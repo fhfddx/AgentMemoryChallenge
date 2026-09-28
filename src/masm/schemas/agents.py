@@ -18,6 +18,7 @@ _MAX_ENTITIES = 64
 _MAX_KEYWORDS = 64
 _MAX_EVENTS = 64
 _MAX_RELATIONS = 64
+_MAX_ACTIONS = 32
 
 
 class EntityKind(StrEnum):
@@ -146,3 +147,28 @@ class TemporalRelationResult(_StrictModel):
     )
     relations: tuple[RelationSuggestion, ...] = Field(default=(), max_length=_MAX_RELATIONS)
     event_order: tuple[str, ...] = Field(default=(), max_length=_MAX_EVENTS)
+
+
+class ActionKind(StrEnum):
+    """记忆管理智能体允许提出的动作；其它动作一律被拒绝。"""
+
+    CREATE = "create"
+    LINK = "link"
+    MERGE = "merge"
+    SUPERSEDE = "supersede"
+    CONFLICT = "conflict"
+
+
+class CuratorAction(_WithEvidence):
+    """单个记忆管理动作建议；必须携带原始证据引用。"""
+
+    kind: ActionKind
+    target_memory_id: UUID | None = None
+    confidence: Confidence
+
+
+class CuratorDecision(_StrictModel):
+    """记忆管理智能体的完整决策；只提出建议，不修改存储。"""
+
+    actions: tuple[CuratorAction, ...] = Field(default=(), max_length=_MAX_ACTIONS)
+    summary: str = Field(default="", max_length=2000)

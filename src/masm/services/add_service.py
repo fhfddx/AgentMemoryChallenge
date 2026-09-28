@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from masm.config import Settings
+from masm.orchestration.add_pipeline import AddPipeline
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.fakes import DeterministicFakeEmbeddingProvider
 from masm.schemas.api import AddRequest, AddResponse
@@ -79,6 +80,7 @@ class AddService:
         settings: Settings,
         *,
         embeddings: EmbeddingProvider | None = None,
+        pipeline: AddPipeline | None = None,
         clock: Callable[[], datetime] | None = None,
         processing_lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
     ) -> None:
@@ -86,6 +88,8 @@ class AddService:
         self._assets = asset_store
         self._settings = settings
         self._embeddings = embeddings or DeterministicFakeEmbeddingProvider()
+        # pipeline 为 None 时保持任务 4 的基线模式（不调用任何智能体）。
+        self._pipeline = pipeline
         self._clock = clock or utc_now
         self._lease = timedelta(seconds=processing_lease_seconds)
 
@@ -100,13 +104,18 @@ class AddService:
         if ledger is not None and ledger.status == "COMMITTED":
             return self._replay(request)
 
-        # 摘要与向量仍在 claim 之前生成，Provider 故障不会遗留 PROCESSING。
-        # 只包住 _prepare：媒体解码与校验在上方，400/413/422 语义不受影响。
+        # 智能体编排与向量生成都在 claim 之前完成，Provider 故障不会遗留 PROCESSING。
+        # 只包住这一段：媒体解码与校验在上方，400/413/422 语义不受影响。
         try:
-            prepared = self._prepare(request, images)
+            plan = self._pipeline.process(request) if self._pipeline is not None else None
+            # 智能体成功时以它的摘要生成向量；降级时回落到基线摘要（含图片基础描述）。
+            summary_override = None
+            if plan is not None and not plan.degraded and plan.memories:
+                summary_override = plan.memories[0].summary
+            prepared = self._prepare(request, images, summary_override=summary_override)
         except Exception:
-            # prepare 期间其他处理者可能已用同一 request_id 完成提交；
-            # 此时已经成功的请求不得因为本次 Provider 故障而暴露异常。
+            # 编排或向量生成期间其他处理者可能已用同一 request_id 完成提交；
+            # 此时已经成功的请求不得因为本次故障而暴露异常。
             ledger = self._repo.get_ledger(request.user_id, request.request_id)
             if ledger is not None and ledger.status == "COMMITTED":
                 return self._replay(request)
@@ -131,7 +140,7 @@ class AddService:
             self._repo.finalize_request(
                 request.user_id,
                 request.request_id,
-                self._build_bundle(request, asset_refs, prepared),
+                self._build_bundle(request, asset_refs, prepared, plan),
                 owner_token=owner_token,
             )
         except LedgerStateError as exc:
@@ -239,8 +248,17 @@ class AddService:
                     images.append(image)
         return images
 
-    def _prepare(self, request: AddRequest, images: Sequence[DecodedImage]) -> _Prepared:
-        """生成基础摘要与文本/图片向量（均在 claim 之前完成）。"""
+    def _prepare(
+        self,
+        request: AddRequest,
+        images: Sequence[DecodedImage],
+        *,
+        summary_override: str | None = None,
+    ) -> _Prepared:
+        """生成摘要与文本/图片向量（均在 claim 之前完成）。
+
+        summary_override 由智能体编排提供；为 None 时使用基线摘要（含图片基础描述）。
+        """
         text_parts: list[str] = []
         for message in request.messages:
             content = message.content
@@ -253,7 +271,8 @@ class AddService:
         descriptions = [
             f"image {image.media_type} {image.width}x{image.height}" for image in images
         ]
-        summary = " ".join(part for part in (text, *descriptions) if part)
+        baseline_summary = " ".join(part for part in (text, *descriptions) if part)
+        summary = summary_override or baseline_summary
         modality = "mixed" if (text and images) else ("image" if images else "text")
 
         text_vector: list[float] = []
@@ -285,9 +304,13 @@ class AddService:
         )
 
     def _build_bundle(
-        self, request: AddRequest, asset_refs: list[AssetRef], prepared: _Prepared
+        self,
+        request: AddRequest,
+        asset_refs: list[AssetRef],
+        prepared: _Prepared,
+        plan: MemoryBundle | None = None,
     ) -> MemoryBundle:
-        """构建记忆束：保持内容分片顺序，图片替换为对象引用，并附带文本与图片向量。"""
+        """构建记忆束：保持内容分片顺序，图片替换为对象引用，并附带向量与已校验动作。"""
         messages: list[SourceMessageDraft] = []
         image_iter = iter(asset_refs)
 
@@ -321,11 +344,26 @@ class AddService:
         image_embeddings = [
             self._embedding_draft("image", vector) for vector in prepared.image_vectors
         ]
+        # 智能体成功时附加其结构化结论；降级或基线模式只保存基线记忆。
+        keywords: Sequence[str] = []
+        event_time = None
+        time_precision = None
+        confidence = None
+        if plan is not None and not plan.degraded and plan.memories:
+            enriched = plan.memories[0]
+            keywords = enriched.keywords
+            event_time = enriched.event_time
+            time_precision = enriched.time_precision
+            confidence = enriched.confidence
+
         memory = MemoryDraft(
             summary=prepared.summary,
             original_text=prepared.text,
-            keywords=[],
+            keywords=keywords,
             modality=prepared.modality,
+            event_time=event_time,
+            time_precision=time_precision,
+            confidence=confidence,
             embedding=embedding,
             image_embeddings=image_embeddings,
         )
@@ -335,4 +373,6 @@ class AddService:
             messages=messages,
             memories=[memory],
             assets=asset_refs,
+            actions=plan.actions if plan is not None else None,
+            degraded=plan.degraded if plan is not None else False,
         )

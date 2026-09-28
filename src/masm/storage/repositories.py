@@ -19,6 +19,7 @@ from masm.storage.db import Database
 from masm.storage.models import (
     Asset,
     Memory,
+    MemoryConflict,
     MemoryEmbedding,
     MemoryEntity,
     MemoryEvent,
@@ -28,7 +29,13 @@ from masm.storage.models import (
     SourceMessage,
     User,
 )
-from masm.storage.types import AddCommit, LedgerState, MemoryBundle, MemoryCandidate
+from masm.storage.types import (
+    AddCommit,
+    LedgerState,
+    MemoryBundle,
+    MemoryCandidate,
+    ValidatedActions,
+)
 
 # 关系边允许的节点类型。
 _ALLOWED_NODE_TYPES = {"memory", "entity", "event"}
@@ -169,7 +176,74 @@ class MemoryRepository:
                         vector=list(draft_embedding.vector),
                     )
                 )
+        if bundle.actions is not None and memory_ids:
+            self._apply_actions(session, user_id, memory_ids[0], bundle.actions)
         return memory_ids
+
+    def _apply_actions(
+        self,
+        session: Session,
+        user_id: str,
+        memory_id: UUID,
+        actions: ValidatedActions,
+    ) -> None:
+        """按 ValidatedActions 写入治理字段、关系边与冲突组。
+
+        只允许修改治理状态（duplicate_of / supersedes / conflict_group_id / status）；
+        绝不触碰原始证据、原始消息或既有记忆正文。
+        """
+        memory = session.get(Memory, memory_id)
+        if memory is None:
+            raise LedgerStateError("待应用动作的记忆不存在")
+
+        memory.duplicate_of = actions.duplicate_of
+        memory.supersedes = actions.supersedes
+        if actions.conflict_group_id is not None:
+            memory.conflict_group_id = actions.conflict_group_id
+
+        for relation in actions.relations:
+            target = session.get(Memory, relation.target_id)
+            if target is None or target.user_id != user_id:
+                raise LedgerStateError("关系目标不属于该用户")
+            session.add(
+                MemoryRelation(
+                    user_id=user_id,
+                    source_type="memory",
+                    source_id=memory_id,
+                    target_type="memory",
+                    target_id=relation.target_id,
+                    relation_type=relation.relation_type,
+                    confidence=relation.confidence,
+                    evidence_ref=(
+                        dict(relation.evidence_ref) if relation.evidence_ref is not None else None
+                    ),
+                )
+            )
+
+        if actions.supersedes is not None:
+            superseded = session.get(Memory, actions.supersedes)
+            if superseded is None or superseded.user_id != user_id:
+                raise LedgerStateError("替代目标不属于该用户")
+            # 仅修改治理状态：原始证据与正文保持不可变。
+            superseded.status = "superseded"
+
+        if actions.conflict_group_id is not None:
+            members = [memory_id]
+            for target_id in actions.conflict_targets:
+                target = session.get(Memory, target_id)
+                if target is None or target.user_id != user_id:
+                    raise LedgerStateError("冲突目标不属于该用户")
+                target.conflict_group_id = actions.conflict_group_id
+                members.append(target_id)
+            for version, member_id in enumerate(dict.fromkeys(members), start=1):
+                session.add(
+                    MemoryConflict(
+                        user_id=user_id,
+                        conflict_group_id=actions.conflict_group_id,
+                        memory_id=member_id,
+                        version=version,
+                    )
+                )
 
     def get_by_request(self, user_id: str, request_id: str) -> AddCommit | None:
         """按 user_id + request_id 返回已提交结果；不存在时返回 None。"""
@@ -317,6 +391,8 @@ class MemoryRepository:
                 user_id=row.Memory.user_id,
                 content=row.Memory.summary,
                 score=float(row.rank),
+                supersedes=row.Memory.supersedes,
+                status=row.Memory.status,
             )
             for row in rows
         ]
@@ -345,6 +421,8 @@ class MemoryRepository:
                     Memory.id.label("memory_id"),
                     Memory.user_id.label("user_id"),
                     Memory.summary.label("summary"),
+                    Memory.supersedes.label("supersedes"),
+                    Memory.status.label("status"),
                     distance,
                 )
                 .join(MemoryEmbedding, MemoryEmbedding.memory_id == Memory.id)
@@ -364,9 +442,17 @@ class MemoryRepository:
                     scored.c.memory_id,
                     scored.c.user_id,
                     scored.c.summary,
+                    scored.c.supersedes,
+                    scored.c.status,
                     best_distance.label("distance"),
                 )
-                .group_by(scored.c.memory_id, scored.c.user_id, scored.c.summary)
+                .group_by(
+                    scored.c.memory_id,
+                    scored.c.user_id,
+                    scored.c.summary,
+                    scored.c.supersedes,
+                    scored.c.status,
+                )
                 .order_by(best_distance, scored.c.memory_id)
                 .limit(limit)
             )
@@ -377,6 +463,8 @@ class MemoryRepository:
                 user_id=row.user_id,
                 content=row.summary,
                 score=1.0 - float(row.distance),
+                supersedes=row.supersedes,
+                status=row.status,
             )
             for row in rows
         ]
@@ -456,6 +544,8 @@ class MemoryRepository:
                 user_id=row.user_id,
                 content=row.summary,
                 score=0.0,
+                supersedes=row.supersedes,
+                status=row.status,
             )
             for row in rows
         ]

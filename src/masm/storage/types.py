@@ -1,6 +1,6 @@
 """存储层领域类型。"""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -49,6 +49,31 @@ class MemoryDraft:
 
 
 @dataclass(frozen=True)
+class RelationDraft:
+    """待写入的同用户关系边；源端固定为本次新建的那条记忆。"""
+
+    target_id: UUID
+    relation_type: str
+    confidence: float | None = None
+    evidence_ref: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ValidatedActions:
+    """通过确定性校验的记忆管理动作。
+
+    所有数据库治理变更（关系边、重复标记、替代、冲突组）都只能由该对象驱动，
+    它不包含任何可以改写原始证据的字段。
+    """
+
+    relations: Sequence[RelationDraft] = ()
+    duplicate_of: UUID | None = None
+    supersedes: UUID | None = None
+    conflict_group_id: UUID | None = None
+    conflict_targets: Sequence[UUID] = ()
+
+
+@dataclass(frozen=True)
 class MemoryBundle:
     """一次 Add 请求要持久化的记忆束。"""
 
@@ -57,6 +82,8 @@ class MemoryBundle:
     messages: Sequence[SourceMessageDraft] = ()
     memories: Sequence[MemoryDraft] = ()
     assets: Sequence[AssetRef] = ()
+    actions: ValidatedActions | None = None
+    degraded: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,12 +101,17 @@ class LedgerState:
 
 @dataclass(frozen=True)
 class MemoryCandidate:
-    """检索返回的记忆候选。"""
+    """检索返回的记忆候选。
+
+    supersedes / status 供确定性动作校验判断替代链与治理状态。
+    """
 
     memory_id: UUID
     user_id: str
     content: str
     score: float
+    supersedes: UUID | None = None
+    status: str = "active"
 
 
 @dataclass(frozen=True)
