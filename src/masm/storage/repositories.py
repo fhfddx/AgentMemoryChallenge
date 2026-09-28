@@ -9,10 +9,12 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from masm.storage.db import Database
 from masm.storage.models import (
+    Asset,
     Memory,
     MemoryEmbedding,
     MemoryEntity,
@@ -47,18 +49,22 @@ class MemoryRepository:
         self._database = database
 
     def add_bundle(self, user_id: str, bundle: MemoryBundle) -> AddCommit:
-        """在同一事务单元中持久化一个记忆束。"""
+        """在同一事务单元中持久化一个记忆束（不含幂等账本）。"""
         with self._database.session() as session:
             self._ensure_user(session, user_id)
             session_model = self._ensure_session(session, user_id, bundle.session_id)
-            session.add(
-                RequestLedger(
-                    user_id=user_id,
-                    request_id=bundle.request_id,
-                    session_id=bundle.session_id,
-                    status="COMMITTED",
+            for asset in bundle.assets:
+                session.add(
+                    Asset(
+                        user_id=user_id,
+                        object_uri=asset.object_uri,
+                        media_type=asset.media_type,
+                        content_hash=asset.content_hash,
+                        decoded_size=asset.decoded_size,
+                        width=asset.width,
+                        height=asset.height,
+                    )
                 )
-            )
             for message in bundle.messages:
                 session.add(
                     SourceMessage(
@@ -134,6 +140,51 @@ class MemoryRepository:
             session_id=ledger.session_id,
             memory_ids=memory_ids,
         )
+
+    def get_ledger_status(self, user_id: str, request_id: str) -> str | None:
+        """返回幂等账本状态（PROCESSING/COMMITTED/FAILED），不存在时返回 None。"""
+        with self._database.session() as session:
+            ledger = session.execute(
+                select(RequestLedger).where(
+                    RequestLedger.user_id == user_id,
+                    RequestLedger.request_id == request_id,
+                )
+            ).scalar_one_or_none()
+        return ledger.status if ledger is not None else None
+
+    def claim_request(self, user_id: str, request_id: str, session_id: str) -> bool:
+        """原子地写入 PROCESSING 账本；返回 True 表示成功取得所有权。"""
+        with self._database.session() as session:
+            self._ensure_user(session, user_id)
+            # 先落库 User，避免 RequestLedger 外键在未排序的 flush 中失败。
+            session.flush()
+            session.add(
+                RequestLedger(
+                    user_id=user_id,
+                    request_id=request_id,
+                    session_id=session_id,
+                    status="PROCESSING",
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                return False
+        return True
+
+    def mark_request(self, user_id: str, request_id: str, status: str) -> None:
+        """更新幂等账本状态。"""
+        with self._database.session() as session:
+            ledger = session.execute(
+                select(RequestLedger).where(
+                    RequestLedger.user_id == user_id,
+                    RequestLedger.request_id == request_id,
+                )
+            ).scalar_one_or_none()
+            if ledger is not None:
+                ledger.status = status
+                session.commit()
 
     def lexical_candidates(self, user_id: str, query: str, limit: int) -> list[MemoryCandidate]:
         """全文检索，SQL 查询阶段即按 user_id 过滤。"""

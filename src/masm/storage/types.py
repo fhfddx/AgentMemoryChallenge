@@ -6,6 +6,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from masm.schemas.internal import AssetRef
+
 
 @dataclass(frozen=True)
 class SourceMessageDraft:
@@ -50,6 +52,7 @@ class MemoryBundle:
     request_id: str
     messages: Sequence[SourceMessageDraft] = ()
     memories: Sequence[MemoryDraft] = ()
+    assets: Sequence[AssetRef] = ()
 
 
 @dataclass(frozen=True)
