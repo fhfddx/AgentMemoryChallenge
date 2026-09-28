@@ -32,11 +32,12 @@ class _FakePublicApi:
         query = str(payload["query"])
         contents = self._content_by_user.get(payload["user_id"], [])
         ranked = sorted(contents, key=lambda content: query not in content)
+        duplicated = [value for content in ranked for value in (content, content)]
         return TimedResponse(
             payload={
                 "data": [
                     {"id": f"evidence-{index}", "content": content, "score": 1.0}
-                    for index, content in enumerate(ranked)
+                    for index, content in enumerate(duplicated)
                 ]
             },
             latency_ms=3.0,
@@ -120,5 +121,18 @@ def test_same_fixture_and_seed_produce_identical_manifest_without_raw_text(
     assert "red-harbor is stored" not in serialized
     assert first.metrics.recall_at_10 == 1.0
     assert first.metrics.recall_at_100 == 1.0
+    assert first.metrics.ndcg == 1.0
     assert first.metrics.model_calls == 3
     assert first.dataset_version == "fixture-v1"
+
+
+def test_resolved_git_commit_is_part_of_run_identity(tmp_path: Path, monkeypatch) -> None:
+    config_path, _ = _write_fixture(tmp_path)
+
+    monkeypatch.setattr("experiments.run_experiment._git_commit", lambda _: "a" * 40)
+    first = run_experiment(config_path, tmp_path / "commit-a", client=_FakePublicApi())
+    monkeypatch.setattr("experiments.run_experiment._git_commit", lambda _: "b" * 40)
+    second = run_experiment(config_path, tmp_path / "commit-b", client=_FakePublicApi())
+
+    assert first.git_commit != second.git_commit
+    assert first.run_id != second.run_id

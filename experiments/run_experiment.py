@@ -153,13 +153,23 @@ def run_experiment(
             evidence = result.payload.get("data")
             if not isinstance(evidence, list):
                 raise ValueError("Search 未返回 data 数组")
-            relevant_tokens = {tokens_by_item[item_id] for item_id in query.relevant_item_ids}
-            flags = tuple(
-                any(token in _evidence_text(item.get("content")) for token in relevant_tokens)
-                for item in evidence
-                if isinstance(item, dict)
-            )
-            rankings.append(QueryRanking(flags, len(query.relevant_item_ids)))
+            relevant_tokens = {
+                item_id: tokens_by_item[item_id] for item_id in query.relevant_item_ids
+            }
+            seen_relevant: set[str] = set()
+            flags: list[bool] = []
+            for item in evidence:
+                if not isinstance(item, dict):
+                    continue
+                content = _evidence_text(item.get("content"))
+                newly_matched = {
+                    item_id
+                    for item_id, token in relevant_tokens.items()
+                    if item_id not in seen_relevant and token in content
+                }
+                flags.append(bool(newly_matched))
+                seen_relevant.update(newly_matched)
+            rankings.append(QueryRanking(tuple(flags), len(query.relevant_item_ids)))
     finally:
         if owned_client is not None:
             owned_client.close()
@@ -185,14 +195,15 @@ def run_experiment(
     )
     canonical_config = _canonical_json(config)
     config_hash = hashlib.sha256(canonical_config.encode("utf-8")).hexdigest()
+    resolved_commit = _git_commit(str(config["git_commit"]))
     run_id = hashlib.sha256(
-        f"{config_hash}:{dataset.version}:{config['seed']}".encode()
+        f"{config_hash}:{dataset.version}:{config['seed']}:{resolved_commit}".encode()
     ).hexdigest()[:16]
     manifest = ExperimentManifest(
         schema_version=1,
         experiment_name=str(config["name"]),
         run_id=run_id,
-        git_commit=_git_commit(str(config["git_commit"])),
+        git_commit=resolved_commit,
         seed=int(config["seed"]),
         dataset_adapter=str(dataset_config["adapter"]),
         dataset_version=dataset.version,
