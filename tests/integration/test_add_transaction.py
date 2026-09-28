@@ -312,16 +312,17 @@ def test_concurrent_same_content_one_db_failure_keeps_object(
 # ---------------------------------------------------------------- 所有权隔离
 
 
-def test_takeover_isolates_old_owner_resources(
+def test_active_owner_lock_prevents_takeover_and_retry_replays(
     monkeypatch: pytest.MonkeyPatch,
     database: Database,
     asset_store: AssetStore,
     settings,
 ) -> None:
-    """确定的接管时序：旧处理者不得提交，也不得清理新所有者资源。
+    """活跃处理者持锁期间即使租约时钟越界，也不得被并发请求接管。
 
-    运行级生命周期锁把「finalize -> publish」串行化，因此接管者的 publish 必须等
-    旧处理者退出临界区之后才会发生；本测试据此断言旧处理者既不能提交、也不能碰新资源。
+    生命周期锁覆盖 claim -> staging -> finalize -> publish。并发重试只能等待活跃处理者
+    完成，然后通过已提交账本幂等回放；进程真正退出时数据库会话锁自动释放，陈旧租约
+    仍可由既有的 stale-owner 测试验证接管。
     """
     clock = _FakeClock()
     user_id, request_id = _uid("u"), _uid("r")
@@ -393,11 +394,12 @@ def test_takeover_isolates_old_owner_resources(
     new_thread.join(timeout=10)
     assert not new_thread.is_alive()
 
-    assert "old_conflict" in results
-    assert "old" not in results
+    assert "old_conflict" not in results
+    old_response = results["old"]
     new_response = results["new"]
+    assert getattr(old_response, "success", None) is True
     assert getattr(new_response, "success", None) is True
-    assert len(publish_seen) == 1, "只有接管者允许发布对象"
+    assert publish_seen == [old_token, old_token], "重试只能幂等回放原所有者的发布"
     # 旧处理者退出后锁必须释放。
     assert try_lock_run_lifecycle(database.engine, user_id, request_id) is True
 

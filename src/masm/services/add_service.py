@@ -127,27 +127,22 @@ class AddService:
                 return self._replay(request)
             raise
 
-        owner_token = self._acquire(request, now)
-        if owner_token is None:
-            # 初次检查之后、prepare 期间其他处理者完成了提交：回放原结果。
-            return self._replay(request)
-
-        asset_refs: list[AssetRef] = []
-        try:
-            for image in prepared.images:
-                asset_refs.append(
-                    self._assets.put(request.user_id, request.request_id, owner_token, image)
-                )
-        except Exception:
-            self._fail(request, owner_token)
-            raise
-
-        # 运行级生命周期锁覆盖「数据库 finalize -> 发布对象」整段：与删除互斥，
-        # 因此删除完成后本次 Add 不可能再把暂存文件发布成没有数据库记录的孤儿对象。
-        # 锁外故障处理（丢弃暂存 / 标记 FAILED）各自再加同一把锁，因此不在这里嵌套。
-        failure: BaseException | None = None
+        # 运行级生命周期锁从 claim 一直覆盖到暂存写入、数据库 finalize 与对象发布：
+        # Delete 因而不可能在 put 前删掉账本，也不可能在回放/发布之间撤销该运行。
         with self._lifecycle_lock(request.user_id, request.request_id):
+            owner_token = self._acquire(request, now)
+            if owner_token is None:
+                # prepare 期间其他处理者已提交；必须使用锁内新快照回放。
+                return self._replay_locked(request)
+
+            asset_refs: list[AssetRef] = []
             try:
+                for image in prepared.images:
+                    asset_refs.append(
+                        self._assets.put(
+                            request.user_id, request.request_id, owner_token, image
+                        )
+                    )
                 self._repo.finalize_request(
                     request.user_id,
                     request.request_id,
@@ -159,37 +154,21 @@ class AddService:
                 return self._degrade(request, asset_refs, prepared, owner_token)
             except LedgerStateError as exc:
                 # 已失去所有权：只丢弃本次尝试的暂存，绝不触碰新所有者资源。
-                failure = AddConflictError("请求所有权已失效")
-                failure.__cause__ = exc
-            except Exception as exc:
-                failure = exc
+                self._discard(request, owner_token)
+                raise AddConflictError("请求所有权已失效") from exc
+            except Exception:
+                self._fail(request, owner_token)
+                raise
             else:
                 # 数据库已提交后发布本次尝试的暂存对象；失败会抛出 500，重试时由 _replay 修复。
                 self._assets.publish(request.user_id, request.request_id, owner_token)
 
-        if failure is not None:
-            self._release_failed_attempt(request, owner_token, failure)
         return AddResponse(
             success=True,
             request_id=request.request_id,
             user_id=request.user_id,
             session_id=request.session_id,
         )
-
-    def _release_failed_attempt(
-        self, request: AddRequest, owner_token: datetime, failure: BaseException
-    ) -> None:
-        """锁外清理一次失败的尝试：丢弃暂存并把账本标记为 FAILED（两者都在生命周期锁内）。
-
-        ``AddConflictError`` 表示所有权已失效，此时绝不能触碰新所有者的资源，只丢弃暂存。
-        """
-        if isinstance(failure, AddConflictError):
-            with self._lifecycle_lock(request.user_id, request.request_id):
-                self._discard(request, owner_token)
-            raise failure
-        with self._lifecycle_lock(request.user_id, request.request_id):
-            self._fail(request, owner_token)
-        raise failure
 
     @contextmanager
     def _lifecycle_lock(self, user_id: str, request_id: str) -> Iterator[None]:
@@ -288,17 +267,21 @@ class AddService:
             self._assets.discard(request.user_id, request.request_id, owner_token)
 
     def _replay(self, request: AddRequest) -> AddResponse:
-        """COMMITTED 请求返回先前的逻辑结果，并在生命周期锁内发布遗留的暂存对象。
+        """在生命周期锁内重新读取并回放 COMMITTED 请求。"""
+        with self._lifecycle_lock(request.user_id, request.request_id):
+            return self._replay_locked(request)
 
-        publish 必须在生命周期锁内：否则删除完成后一次回放仍可能把暂存文件发布成孤儿。
+    def _replay_locked(self, request: AddRequest) -> AddResponse:
+        """用锁内一致快照验证提交，再发布遗留暂存对象并返回原结果。
+
+        调用方必须持有运行级生命周期锁。必须先同时确认 COMMITTED 账本和对应记忆提交，
+        再执行 publish；否则锁外旧账本可能在 Delete 删除数据库后重新发布孤儿对象。
         """
         ledger = self._repo.get_ledger(request.user_id, request.request_id)
-        if ledger is not None:
-            with self._lifecycle_lock(request.user_id, request.request_id):
-                self._assets.publish(request.user_id, request.request_id, ledger.owner_token)
         commit = self._repo.get_by_request(request.user_id, request.request_id)
-        if commit is None:
+        if ledger is None or ledger.status != "COMMITTED" or commit is None:
             raise AddPreviouslyFailedError("账本与记忆数据不一致")
+        self._assets.publish(request.user_id, request.request_id, ledger.owner_token)
         return AddResponse(
             success=True,
             request_id=commit.request_id,

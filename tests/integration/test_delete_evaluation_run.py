@@ -580,6 +580,153 @@ def test_add_finalize_then_publish_is_serialized_with_delete(
     assert try_lock_run_lifecycle(database.engine, user_id, run_id) is True
 
 
+def test_add_holds_lifecycle_lock_before_writing_staging(
+    database: Database, asset_store: AssetStore, settings, embeddings, monkeypatch
+) -> None:
+    """图片暂存写入也必须位于生命周期锁内，防止 Delete 先完成后留下暂存孤儿。"""
+    user_id = _uid("u")
+    run_id = _uid("r")
+    put_started = threading.Event()
+    allow_put = threading.Event()
+    original_put = AssetStore.put
+
+    def _blocking_put(self, user_id_arg, request_id_arg, owner_token, image):
+        put_started.set()
+        assert allow_put.wait(30), "测试未能放行 put"
+        return original_put(self, user_id_arg, request_id_arg, owner_token, image)
+
+    monkeypatch.setattr(AssetStore, "put", _blocking_put)
+    errors: list[BaseException] = []
+
+    def _run_add() -> None:
+        try:
+            _add(
+                AddService(
+                    MemoryRepository(database), asset_store, settings, embeddings=embeddings
+                ),
+                run_id,
+                user_id,
+            )
+        except BaseException as exc:  # pragma: no cover - 失败时用于诊断
+            errors.append(exc)
+
+    add_thread = threading.Thread(target=_run_add, daemon=True)
+    add_thread.start()
+    assert put_started.wait(30), "Add 未到达暂存写入阶段"
+
+    # 如果 put 已经受到同一把生命周期锁保护，Delete 此时就不可能完成。
+    delete_errors: list[BaseException] = []
+
+    def _run_delete() -> None:
+        try:
+            _service(database, asset_store, settings, embeddings).delete_run(
+                run_id, user_id=user_id
+            )
+        except BaseException as exc:  # pragma: no cover - 失败时用于诊断
+            delete_errors.append(exc)
+
+    delete_thread = threading.Thread(target=_run_delete, daemon=True)
+    delete_thread.start()
+    delete_thread.join(2)
+    delete_was_blocked = delete_thread.is_alive()
+    allow_put.set()
+    add_thread.join(30)
+    delete_thread.join(30)
+
+    assert errors == [], f"Add 执行出现异常: {errors!r}"
+    assert delete_errors == [], f"Delete 执行出现异常: {delete_errors!r}"
+    assert not add_thread.is_alive() and not delete_thread.is_alive()
+    assert delete_was_blocked is True
+
+
+def test_replay_rechecks_commit_under_lifecycle_lock_before_publish(
+    database: Database, asset_store: AssetStore, settings, embeddings, monkeypatch
+) -> None:
+    """回放不得用锁外旧账本在删除之后重新发布已撤销运行的暂存对象。"""
+    from masm.storage.assets import _publish_object
+
+    user_id = _uid("u")
+    run_id = _uid("r")
+    request = AddRequest(
+        request_id=run_id,
+        user_id=user_id,
+        session_id="session-replay-race",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "replay race"},
+                    {"type": "image_url", "image_url": {"url": _data_url()}},
+                ],
+            }
+        ],
+    )
+
+    def _failing_publish(staged: Path, final: Path) -> None:
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr("masm.storage.assets._publish_object", _failing_publish)
+    with pytest.raises(OSError):
+        AddService(
+            MemoryRepository(database), asset_store, settings, embeddings=embeddings
+        ).add(request)
+    assert _staging_files(asset_store)
+
+    monkeypatch.setattr("masm.storage.assets._publish_object", _publish_object)
+    retry_repo = MemoryRepository(database)
+    retry = AddService(retry_repo, asset_store, settings, embeddings=embeddings)
+    stale_ledger_read = threading.Event()
+    allow_replay_lock = threading.Event()
+    original_replay = retry._replay
+
+    def _blocking_replay(request_arg: AddRequest):
+        # add() 已在进入 _replay 前读到 COMMITTED；在取得生命周期锁之前暂停。
+        stale_ledger_read.set()
+        assert allow_replay_lock.wait(30), "测试未能放行回放"
+        return original_replay(request_arg)
+
+    monkeypatch.setattr(retry, "_replay", _blocking_replay)
+    replay_errors: list[BaseException] = []
+
+    def _run_replay() -> None:
+        try:
+            retry.add(request)
+        except BaseException as exc:  # pragma: no cover - 失败时用于诊断
+            replay_errors.append(exc)
+
+    replay_thread = threading.Thread(target=_run_replay, daemon=True)
+    replay_thread.start()
+    assert stale_ledger_read.wait(30), "回放未读取到旧账本"
+
+    # 模拟对象存储暂时不可删除：数据库删除已经提交，但暂存目录保留供稍后重试。
+    original_cleanup = AssetStore.cleanup_staging
+
+    def _failing_cleanup(self, user_id_arg, request_id_arg, owner_token) -> bool:
+        raise OSError("staging locked")
+
+    monkeypatch.setattr(AssetStore, "cleanup_staging", _failing_cleanup)
+    first = _service(database, asset_store, settings, embeddings).delete_run(
+        run_id, user_id=user_id
+    )
+    assert first.complete is False
+    assert _staging_files(asset_store)
+
+    monkeypatch.setattr(AssetStore, "cleanup_staging", original_cleanup)
+    allow_replay_lock.set()
+    replay_thread.join(30)
+
+    assert not replay_thread.is_alive()
+    assert replay_errors, "删除后的回放必须失败，不能伪装成功"
+
+    second = _service(database, asset_store, settings, embeddings).delete_run(
+        run_id, user_id=user_id
+    )
+    assert second.complete is True
+    assert _count(database, Memory, user_id) == 0
+    assert _objects(asset_store) == []
+    assert _staging_files(asset_store) == []
+
+
 def test_delete_cleans_staging_left_by_failed_publish(
     database: Database, asset_store: AssetStore, settings, embeddings, monkeypatch
 ) -> None:
