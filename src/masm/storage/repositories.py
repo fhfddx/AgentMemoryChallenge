@@ -496,6 +496,7 @@ class MemoryRepository:
                 supersedes=row.Memory.supersedes,
                 status=row.Memory.status,
                 conflict_group_id=row.Memory.conflict_group_id,
+                duplicate_of=row.Memory.duplicate_of,
             )
             for row in rows
         ]
@@ -527,6 +528,7 @@ class MemoryRepository:
                     Memory.supersedes.label("supersedes"),
                     Memory.status.label("status"),
                     Memory.conflict_group_id.label("conflict_group_id"),
+                    Memory.duplicate_of.label("duplicate_of"),
                     distance,
                 )
                 .join(MemoryEmbedding, MemoryEmbedding.memory_id == Memory.id)
@@ -549,6 +551,7 @@ class MemoryRepository:
                     scored.c.supersedes,
                     scored.c.status,
                     scored.c.conflict_group_id,
+                    scored.c.duplicate_of,
                     best_distance.label("distance"),
                 )
                 .group_by(
@@ -558,6 +561,7 @@ class MemoryRepository:
                     scored.c.supersedes,
                     scored.c.status,
                     scored.c.conflict_group_id,
+                    scored.c.duplicate_of,
                 )
                 .order_by(best_distance, scored.c.memory_id)
                 .limit(limit)
@@ -572,6 +576,7 @@ class MemoryRepository:
                 supersedes=row.supersedes,
                 status=row.status,
                 conflict_group_id=row.conflict_group_id,
+                duplicate_of=row.duplicate_of,
             )
             for row in rows
         ]
@@ -625,8 +630,56 @@ class MemoryRepository:
                 supersedes=memory.supersedes,
                 status=memory.status,
                 conflict_group_id=memory.conflict_group_id,
+                duplicate_of=memory.duplicate_of,
             )
             for memory in memories
+        ]
+
+    def conflict_peers(
+        self, user_id: str, memory_ids: Sequence[UUID], limit: int
+    ) -> list[MemoryCandidate]:
+        """冲突组补全：返回同组其它成员，SQL 查询阶段即按 user_id 过滤。"""
+        ids = list(memory_ids)
+        if not ids:
+            return []
+        with self._database.session() as session:
+            groups = list(
+                session.execute(
+                    select(Memory.conflict_group_id).where(
+                        Memory.user_id == user_id,
+                        Memory.id.in_(ids),
+                        Memory.conflict_group_id.is_not(None),
+                    )
+                ).scalars()
+            )
+            if not groups:
+                return []
+            rows = (
+                session.execute(
+                    select(Memory)
+                    .where(
+                        Memory.user_id == user_id,
+                        Memory.conflict_group_id.in_(list(set(groups))),
+                        Memory.id.not_in(ids),
+                    )
+                    .order_by(Memory.observed_at, Memory.id)
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+        return [
+            MemoryCandidate(
+                memory_id=row.id,
+                user_id=row.user_id,
+                content=row.summary,
+                score=0.0,
+                supersedes=row.supersedes,
+                status=row.status,
+                conflict_group_id=row.conflict_group_id,
+                duplicate_of=row.duplicate_of,
+            )
+            for row in rows
         ]
 
     def metadata_candidates(
@@ -657,6 +710,7 @@ class MemoryRepository:
                 supersedes=row.supersedes,
                 status=row.status,
                 conflict_group_id=row.conflict_group_id,
+                duplicate_of=row.duplicate_of,
             )
             for row in rows
         ]

@@ -114,6 +114,7 @@ class MemoryCandidate:
     supersedes: UUID | None = None
     status: str = "active"
     conflict_group_id: UUID | None = None
+    duplicate_of: UUID | None = None
 
 
 @dataclass(frozen=True)
