@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "MASM-no-conflict",
+  "description": "关闭冲突感知重排",
+  "deployment_profile": "masm-no-conflict",
+  "seed": 20260928,
+  "git_commit": "auto",
+  "base_url": "http://127.0.0.1:8000",
+  "api_key_env": "MASM_API_KEY",
+  "dataset": {"adapter": "atm_bench", "path": "../../fixtures/small_atm.json", "version": "masm-small-v1"},
+  "models": {"embedding": "record-before-run", "llm": "record-before-run", "reranker": "without-conflict"},
+  "prompts": {"perception": "perception_v1", "temporal": "temporal_v1", "curator": "curator_v1"},
+  "accounting": {"cost_per_add_usd": 0.0, "cost_per_search_usd": 0.0, "model_calls_per_add": 3, "model_calls_per_search": 1, "degraded_operations": 0}
+}

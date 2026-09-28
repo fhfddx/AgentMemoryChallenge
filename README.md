@@ -51,6 +51,12 @@ Smoke 覆盖公开 Health、Add、立即 Search 和重复 Add。复制它输出�
 `--verify-request-id`、`--verify-user-id`、`--verify-marker` 可验证持久性。HTTPS、备份、健康检查
 和当前对象存储边界见 `deployments/README.md`。
 
+## 可复现实验
+
+`experiments/` 提供 B0、B1、完整 MASM、六组消融配置、ATM-Bench/Mem-Gallery 规范化适配器，
+以及指标计算和汇总工具。运行器只调用公共 Add/Search HTTP 接口；具体命令、配置占位符和
+隐私边界见 `experiments/README.md`。
+
 ## 目录结构
 
 ```text

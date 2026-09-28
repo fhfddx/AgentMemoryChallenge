@@ -1,0 +1,31 @@
+{
+  "version": "masm-small-v1",
+  "items": [
+    {
+      "id": "travel-note",
+      "user_id": "benchmark-small-user",
+      "session_id": "benchmark-small-session",
+      "messages": [{"role": "user", "content": "The Kyoto hotel confirmation contains marker maple-bridge-17."}],
+      "match_token": "maple-bridge-17"
+    },
+    {
+      "id": "food-note",
+      "user_id": "benchmark-small-user",
+      "session_id": "benchmark-small-session",
+      "messages": [{"role": "user", "content": "The preferred vegetarian dish contains marker cedar-bowl-29."}],
+      "match_token": "cedar-bowl-29"
+    },
+    {
+      "id": "schedule-note",
+      "user_id": "benchmark-small-user",
+      "session_id": "benchmark-small-session",
+      "messages": [{"role": "user", "content": "The project review schedule contains marker amber-clock-41."}],
+      "match_token": "amber-clock-41"
+    }
+  ],
+  "queries": [
+    {"id": "q-travel", "user_id": "benchmark-small-user", "query": "maple-bridge-17", "relevant_item_ids": ["travel-note"]},
+    {"id": "q-food", "user_id": "benchmark-small-user", "query": "cedar-bowl-29", "relevant_item_ids": ["food-note"]},
+    {"id": "q-schedule", "user_id": "benchmark-small-user", "query": "amber-clock-41", "relevant_item_ids": ["schedule-note"]}
+  ]
+}
