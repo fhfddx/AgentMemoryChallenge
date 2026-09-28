@@ -4,6 +4,8 @@ import json
 import logging
 import sys
 
+import pytest
+
 from masm.observability.logging import (
     ALLOWED_LOG_FIELDS,
     RedactingFormatter,
@@ -55,6 +57,76 @@ def test_nested_structures_are_redacted() -> None:
     assert "r-1" in flat
 
 
+def test_caller_provided_failure_is_always_dropped() -> None:
+    """调用方提供的 failure 一律丢弃（含无空格的私有值），不从任何字段名推断。"""
+    payload = {
+        "failure": "TimeoutError",
+        "token_usage": {"total_tokens": 1},
+    }
+
+    redacted = redact_fields(payload)
+
+    assert "failure" not in redacted
+    assert "TimeoutError" not in json.dumps(redacted, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "secret",
+    ["privateMemoryBody", "MyPasswordIsHunter2", "secret_private_value"],
+)
+@pytest.mark.parametrize("field", ["failure", "content", "prompt", "memory_body", "raw_response"])
+def test_identifier_like_secrets_never_reach_the_log(field: str, secret: str) -> None:
+    """无空格的私有标识符不得因为「看起来像标识符」而被放行。"""
+    formatter = RedactingFormatter("%(message)s")
+    record = logging.LogRecord(
+        "masm",
+        logging.ERROR,
+        __file__,
+        1,
+        "failure %s",
+        ({"event": "model.failed", field: secret},),
+        None,
+    )
+
+    output = formatter.format(record)
+
+    assert secret not in output
+    assert field not in output
+
+
+def test_exception_type_is_the_only_failure_source() -> None:
+    """失败标识只能来自 exc_info 的异常类型。"""
+    formatter = RedactingFormatter("%(message)s")
+    try:
+        raise TimeoutError("boom MyPasswordIsHunter2")
+    except TimeoutError:
+        record = logging.LogRecord(
+            "masm",
+            logging.ERROR,
+            __file__,
+            1,
+            "model failed",
+            ({"failure": "privateMemoryBody"},),
+            sys.exc_info(),
+        )
+
+    output = formatter.format(record)
+
+    assert "builtins.TimeoutError" in output
+    assert "privateMemoryBody" not in output
+    assert "MyPasswordIsHunter2" not in output
+
+
+def test_internal_error_code_must_be_an_explicit_enum_member() -> None:
+    """内部错误码必须是显式枚举成员，未知取值一律丢弃。"""
+    assert redact_fields({"error_code": "lock_timeout"})["error_code"] == "lock_timeout"
+    assert redact_fields({"error_code": "pending_physical_delete"}) == {
+        "error_code": "pending_physical_delete"
+    }
+    assert "error_code" not in redact_fields({"error_code": "privateMemoryBody"})
+    assert "error_code" not in redact_fields({"error_code": "MyPasswordIsHunter2"})
+
+
 def test_token_usage_keeps_only_numeric_statistics() -> None:
     """token_usage 只能是受控的数值统计，不能成为任意容器的透传通道。"""
     valid = {
@@ -95,14 +167,13 @@ def test_token_usage_rejects_non_numeric_values() -> None:
     assert "token_usage" not in redacted
 
 
-def test_failure_accepts_only_exception_types_and_error_codes() -> None:
-    """failure 只接受异常类型名或内部错误码；自由文本一律替换掉。"""
-    assert redact_fields({"failure": "TimeoutError"})["failure"] == "TimeoutError"
-    assert redact_fields({"failure": "E_UPSTREAM_TIMEOUT"})["failure"] == "E_UPSTREAM_TIMEOUT"
+def test_failure_field_is_not_part_of_the_allowlist() -> None:
+    """failure 不在白名单里：调用方永远无法通过它写入任何内容。"""
+    assert "failure" not in ALLOWED_LOG_FIELDS
 
     leaked = redact_fields({"failure": "private body of user message"})
-    assert leaked["failure"] != "private body of user message"
-    assert "private body" not in json.dumps(leaked, ensure_ascii=False)
+
+    assert leaked == {}
 
 
 def test_nested_containers_for_whitelisted_scalar_fields_are_dropped() -> None:

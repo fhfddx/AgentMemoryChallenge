@@ -2,14 +2,15 @@
 
 作用域始终是「明确用户 + 明确运行（Add request_id）」。删除状态机：
 
-1. **登记意图**：把该运行拥有的对象地址持久化到 ``deletion_intents``（PENDING，幂等），
-   共享对象（其他用户/运行仍引用）不登记，因而永不删除物理文件；
-2. **删除数据库记录**：运行级资产行、记忆及其 embedding/entity/event、关系、冲突、
-   原始消息、处理运行、幂等账本，并清理悬空治理引用与不再被引用的会话；
-3. **执行对象删除**：对每个 PENDING 意图尝试删除；成功或确定不存在 → DONE，
-   失败 → 累加 attempts 与 last_error，保持 PENDING；
-4. **重新读取**：完成与否以数据库中的 PENDING 意图为准，因此第二次调用绝不会在
-   文件仍存在时报告 complete=True，且跨进程重启后仍能继续重试。
+1. **删除数据库行并持久化意图**：在单个可回滚事务中删除该运行的记忆、embedding/
+   entity/event、关系、冲突、原始消息、处理运行、幂等账本与运行级资产行，并把该运行
+   独占（无任何用户/运行再引用）的对象地址登记为 PENDING 删除意图。此阶段绝不触碰
+   文件系统，因此事务提交失败时物理对象不会被提前删除。
+2. **重试物理删除**：读取持久化的 PENDING 意图（**不依赖已被删除的 SourceMessage**），
+   在对象 advisory 锁下重新做权威存活性检查，确认无人引用后才删除对象，并用独立事务
+   标记 DONE；失败则累加 attempts 保持 PENDING。
+3. **重新读取**：完成与否以数据库中的 PENDING 意图为准，因此第二次调用绝不会在文件仍
+   存在时报告 complete=True，且跨进程重启后仍能继续重试。
 """
 
 from collections.abc import Sequence
@@ -50,15 +51,15 @@ class DeletionService:
         self._assets = asset_store
 
     def delete_run(self, run_id: str, *, user_id: str) -> DeletionReport:
-        """删除指定用户该运行的数据库记录，并幂等地重试待清理对象。
+        """删除指定用户该运行的数据库记录，并重试待清理的物理对象。
 
-        物理删除在仓库的「对象 advisory 锁」临界区内执行：先在同一事务中确认无人引用，
-        再删除文件，因此并发 Add 不可能丢对象。
+        阶段 1（可回滚）：删行 + 登记 PENDING 意图，同一事务提交；
+        阶段 2（不可回滚）：在对象锁下重新检查引用后物理删除，独立事务标记 DONE。
         """
-        registered = self._register(run_id, user_id)
-        # 仓库在同一事务内完成「确认无人引用 -> 删除物理对象 -> 推进删除意图」，
-        # 失败对象保持 PENDING 并由下面重新读取的意图状态决定 complete。
-        deleted = self._repo.delete_run(user_id, run_id, delete_object=self._assets.delete_object)
+        deleted = self._repo.delete_run(user_id, run_id)
+        outcome = self._repo.retry_pending_object_deletions(
+            user_id, run_id, self._assets.delete_object
+        )
 
         remaining = self._repo.pending_deletion_uris(user_id, run_id)
         return DeletionReport(
@@ -69,15 +70,9 @@ class DeletionService:
             sources_deleted=deleted.sources,
             relations_deleted=deleted.relations,
             conflicts_deleted=deleted.conflicts,
-            objects_deleted=deleted.objects_deleted,
-            objects_missing=deleted.objects_missing,
+            objects_deleted=outcome.deleted,
+            objects_missing=outcome.missing,
             shared_objects_kept=len(deleted.shared_object_uris),
-            retried_uris=tuple(registered),
+            retried_uris=tuple(deleted.object_uris),
             failed_object_uris=tuple(remaining),
         )
-
-    def _register(self, run_id: str, user_id: str) -> list[str]:
-        """登记该运行独占的对象删除意图；共享对象不登记。"""
-        owned = self._repo.deletable_object_uris(user_id, run_id)
-        self._repo.register_deletion_intents(user_id, run_id, owned)
-        return list(owned)

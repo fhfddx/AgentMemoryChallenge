@@ -1,14 +1,16 @@
 """运行级删除的仓库层回归测试。
 
-覆盖三处此前缺失的边界：
+覆盖此前缺失的边界：
 1. 清理悬空治理引用（duplicate_of / supersedes）时必须按 user_id 限制作用域；
 2. 同一 ``request_id`` 被重新拥有后，删除意图必须能从 DONE 重置回 PENDING；
-3. 「检查引用 -> 删除物理对象」必须在同一把对象 advisory 锁内完成，否则并发 Add 会丢对象。
+3. 「引用检查 -> 物理删除」必须在同一把对象锁内完成，否则并发 Add 会丢对象；
+4. 物理删除必须跨事务重试：第一次失败后 SourceMessage 已删除，第二次只能靠持久化意图；
+5. 数据库提交失败时绝不能提前删除物理对象（删除不在 commit 之前发生）。
 """
 
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 
 from masm.storage.db import Database
 from masm.storage.models import Asset, Memory, SourceMessage
@@ -79,9 +81,17 @@ def _locks_object_uri(database: Database, object_uri: str) -> bool:
 
 
 def _run_with_object(
-    repo: MemoryRepository, user_id: str, request_id: str, object_uri: str
+    repo: MemoryRepository,
+    user_id: str,
+    request_id: str,
+    object_uri: str,
+    *,
+    asset_request_id: str | None | object = ...,
 ) -> UUID:
-    """建立一个带图片引用的运行（记忆 + 源消息 + 资产行），返回记忆主键。"""
+    """建立一个带图片引用的运行（记忆 + 源消息 + 资产行），返回记忆主键。
+
+    ``asset_request_id`` 用于模拟迁移前遗留的资产行（显式传 None）。
+    """
     memory_id = _add(repo, user_id, request_id, "memory with an object", "session-object")
     with repo._database.session() as session:
         session_id = session.execute(
@@ -100,7 +110,7 @@ def _run_with_object(
         session.add(
             Asset(
                 user_id=user_id,
-                request_id=request_id,
+                request_id=request_id if asset_request_id is ... else asset_request_id,
                 object_uri=object_uri,
                 media_type="image/png",
                 content_hash=uuid4().hex,
@@ -160,55 +170,98 @@ def test_deletion_intent_is_reset_when_request_id_is_reused(database: Database) 
     assert repo.pending_deletion_uris(user_id, run_id) == sorted([first_uri, second_uri])
 
 
-def test_delete_run_holds_object_lock_while_deleting(database: Database, monkeypatch) -> None:
-    """物理删除必须发生在持有该对象 advisory 锁的临界区内。
-
-    在临界区回调执行的瞬间用独立连接探测同一把锁：若实现已持有锁，探测必然被阻塞
-    （说明「检查引用 -> 删除物理对象」受保护）；若实现未加锁，探测会立即成功。
-    """
+def test_delete_run_registers_pending_intent_without_touching_storage(database: Database) -> None:
+    """数据库阶段只登记 PENDING 意图：绝不触碰对象存储，也不产生删除结果。"""
     repo = MemoryRepository(database)
     user_id, run_id = _uid("user"), _uid("run")
     object_uri = f"{user_id}/{uuid4().hex}.png"
     _run_with_object(repo, user_id, run_id, object_uri)
 
-    probes: list[bool] = []
-    handed_to_delete: list[str] = []
+    deleted = repo.delete_run(user_id, run_id)
 
-    def _probe(self: MemoryRepository, object_uri: str, delete_object: object) -> tuple[str, str]:
-        handed_to_delete.append(object_uri)
-        probes.append(_locks_object_uri(database, object_uri))
-        return ("deleted", "")
-
-    monkeypatch.setattr(MemoryRepository, "_delete_object_locked", _probe, raising=True)
-
-    report = repo.delete_run(user_id, run_id, delete_object=lambda uri: True)
-
-    assert handed_to_delete == [object_uri]
-    assert probes == [False], "临界区内不应有其他连接能取得同一把对象锁"
-    assert report.object_uris == (object_uri,)
-    assert report.objects_deleted == 1
+    assert deleted.object_uris == (object_uri,)
+    assert repo.pending_deletion_uris(user_id, run_id) == [object_uri]
 
 
-def test_delete_run_releases_lock_after_finishing(database: Database) -> None:
-    """删除结束后锁必须释放。"""
+def test_retry_uses_persisted_intents_after_source_messages_are_gone(database: Database) -> None:
+    """第一次删除失败后 SourceMessage 已删除，重试必须仍能靠持久化意图找到 URI。"""
     repo = MemoryRepository(database)
     user_id, run_id = _uid("user"), _uid("run")
     object_uri = f"{user_id}/{uuid4().hex}.png"
     _run_with_object(repo, user_id, run_id, object_uri)
+
+    repo.delete_run(user_id, run_id)
+    with repo._database.session() as session:
+        remaining_messages = int(
+            session.execute(
+                select(func.count())
+                .select_from(SourceMessage)
+                .where(
+                    SourceMessage.user_id == user_id,
+                    SourceMessage.request_id == run_id,
+                )
+            ).scalar_one()
+        )
+    assert remaining_messages == 0
+
+    def _explode(uri: str) -> bool:
+        raise OSError("storage unavailable")
+
+    first = repo.retry_pending_object_deletions(user_id, run_id, _explode)
+    assert first.deleted == 0
+    assert first.failed == ((object_uri, "OSError"),)
+    assert repo.pending_deletion_uris(user_id, run_id) == [object_uri]
+
+    # 存储恢复后重试：不再有 SourceMessage 可依赖。
     calls: list[str] = []
 
-    def _store_delete(uri: str) -> bool:
+    def _recover(uri: str) -> bool:
         calls.append(uri)
         return True
 
-    report = repo.delete_run(user_id, run_id, delete_object=_store_delete)
+    second = repo.retry_pending_object_deletions(user_id, run_id, _recover)
 
     assert calls == [object_uri]
-    assert report.object_uris == (object_uri,)
+    assert second.deleted == 1
+    assert repo.pending_deletion_uris(user_id, run_id) == []
+
+
+def test_retry_completes_inside_the_object_lock(database: Database, monkeypatch) -> None:
+    """物理删除必须发生在持有该对象 advisory 锁的临界区内。"""
+    repo = MemoryRepository(database)
+    user_id, run_id = _uid("user"), _uid("run")
+    object_uri = f"{user_id}/{uuid4().hex}.png"
+    _run_with_object(repo, user_id, run_id, object_uri)
+    repo.delete_run(user_id, run_id)
+
+    probes: list[bool] = []
+    handed_to_store: list[str] = []
+
+    def _probe(uri: str) -> bool:
+        handed_to_store.append(uri)
+        probes.append(_locks_object_uri(database, uri))
+        return True
+
+    repo.retry_pending_object_deletions(user_id, run_id, _probe)
+
+    assert handed_to_store == [object_uri]
+    assert probes == [False], "临界区内不应有其他连接能取得同一把对象锁"
+
+
+def test_retry_releases_lock_after_finishing(database: Database) -> None:
+    """重试结束后锁必须释放。"""
+    repo = MemoryRepository(database)
+    user_id, run_id = _uid("user"), _uid("run")
+    object_uri = f"{user_id}/{uuid4().hex}.png"
+    _run_with_object(repo, user_id, run_id, object_uri)
+    repo.delete_run(user_id, run_id)
+
+    repo.retry_pending_object_deletions(user_id, run_id, lambda uri: True)
+
     assert _locks_object_uri(database, object_uri) is True
 
 
-def test_delete_run_keeps_shared_objects(database: Database) -> None:
+def test_retry_keeps_shared_objects(database: Database) -> None:
     """仍被其他运行引用的对象必须保留，且不进入待删清单。"""
     repo = MemoryRepository(database)
     user_id = _uid("user")
@@ -216,89 +269,170 @@ def test_delete_run_keeps_shared_objects(database: Database) -> None:
     shared_uri = f"{user_id}/{uuid4().hex}.png"
     _run_with_object(repo, user_id, run_one, shared_uri)
     _run_with_object(repo, user_id, run_two, shared_uri)
-    deleted: list[str] = []
 
-    def _store_delete(uri: str) -> bool:
-        deleted.append(uri)
-        return True
+    deleted = repo.delete_run(user_id, run_one)
+    outcome = repo.retry_pending_object_deletions(user_id, run_one, lambda uri: True)
 
-    report = repo.delete_run(user_id, run_one, delete_object=_store_delete)
-
-    assert deleted == []
-    assert report.object_uris == ()
-    assert report.shared_object_uris == (shared_uri,)
+    assert deleted.object_uris == ()
+    assert deleted.shared_object_uris == (shared_uri,)
+    assert outcome.deleted == 0
+    assert repo.pending_deletion_uris(user_id, run_one) == []
 
 
-def test_delete_run_reports_missing_objects(database: Database) -> None:
-    """物理对象已不存在时必须可观察，而不是伪装成删除成功。"""
-    repo = MemoryRepository(database)
-    user_id, run_id = _uid("user"), _uid("run")
-    object_uri = f"{user_id}/{uuid4().hex}.png"
-    _run_with_object(repo, user_id, run_id, object_uri)
-    calls: list[str] = []
-
-    def _store_delete(uri: str) -> bool:
-        calls.append(uri)
-        return False
-
-    report = repo.delete_run(user_id, run_id, delete_object=_store_delete)
-
-    assert calls == [object_uri]
-    assert report.objects_missing == 1
-    assert report.object_failures == ()
-    assert repo.pending_deletion_uris(user_id, run_id) == []
-
-
-def test_delete_run_keeps_objects_referenced_by_null_request_assets(database: Database) -> None:
+def test_retry_keeps_objects_referenced_by_null_request_assets(database: Database) -> None:
     """迁移前遗留（request_id 为 NULL）的资产行仍构成引用，对象不得被删除。"""
     repo = MemoryRepository(database)
     user_id, run_id = _uid("user"), _uid("run")
     object_uri = f"{user_id}/{uuid4().hex}.png"
-    _run_with_object(repo, user_id, run_id, object_uri)
+    _run_with_object(repo, user_id, run_id, object_uri, asset_request_id=None)
+
+    deleted = repo.delete_run(user_id, run_id)
+    calls: list[str] = []
+    outcome = repo.retry_pending_object_deletions(
+        user_id, run_id, lambda uri: calls.append(uri) or True
+    )
+
+    assert deleted.object_uris == ()
+    assert deleted.shared_object_uris == (object_uri,)
+    assert calls == []
+    assert outcome.deleted == 0
+
+
+def test_retry_keeps_objects_referenced_by_other_runs_messages(database: Database) -> None:
+    """只有一行资产行、但另一个运行的原始消息仍引用时，对象不得被删除。"""
+    repo = MemoryRepository(database)
+    user_id = _uid("user")
+    run_one, run_two = _uid("run"), _uid("run")
+    shared_uri = f"{user_id}/{uuid4().hex}.png"
+    # run_one 拥有唯一一行资产记录；run_two 只在原始消息里引用同一对象。
+    _run_with_object(repo, user_id, run_one, shared_uri)
+    _run_with_object(repo, user_id, run_two, shared_uri)
     with repo._database.session() as session:
-        # 模拟迁移未回填成功的历史资产行（0003 之前的写入形态）。
         session.execute(
             update(Asset)
-            .where(Asset.user_id == user_id, Asset.object_uri == object_uri)
+            .where(Asset.user_id == user_id, Asset.object_uri == shared_uri)
             .values(request_id=None)
+        )
+        session.execute(
+            update(SourceMessage)
+            .where(SourceMessage.request_id == run_two)
+            .values(request_id=run_one)
         )
         session.commit()
 
-    assert repo.deletable_object_uris(user_id, run_id) == []
-    report = repo.delete_run(user_id, run_id, delete_object=lambda uri: True)
+    deleted = repo.delete_run(user_id, run_one)
+    calls: list[str] = []
+    repo.retry_pending_object_deletions(user_id, run_one, lambda uri: calls.append(uri) or True)
 
-    assert report.object_uris == ()
-    assert report.shared_object_uris == (object_uri,)
+    assert calls == []
+    assert deleted.object_uris == ()
+    assert deleted.shared_object_uris == (shared_uri,)
 
 
-def test_delete_run_without_callback_leaves_intents_pending(database: Database) -> None:
-    """未提供删除回调时不得触动物理对象，只报告待删清单。"""
+def test_retry_reports_missing_objects_as_done(database: Database) -> None:
+    """物理对象已不存在时必须可观察，并确认删除（不再重试）。"""
     repo = MemoryRepository(database)
     user_id, run_id = _uid("user"), _uid("run")
     object_uri = f"{user_id}/{uuid4().hex}.png"
     _run_with_object(repo, user_id, run_id, object_uri)
+    repo.delete_run(user_id, run_id)
 
-    report = repo.delete_run(user_id, run_id)
+    outcome = repo.retry_pending_object_deletions(user_id, run_id, lambda uri: False)
 
-    assert report.object_uris == (object_uri,)
-    assert report.objects_deleted == 0
-    assert report.objects_missing == 0
-    assert report.object_failures == ()
+    assert outcome.missing == 1
+    assert outcome.deleted == 0
+    assert repo.pending_deletion_uris(user_id, run_id) == []
 
 
-def test_delete_run_keeps_intent_pending_when_delete_fails(database: Database) -> None:
-    """物理删除抛异常时必须在结果中暴露失败对象及其错误类型，供调用方保留重试。"""
+def test_retry_keeps_intent_pending_when_delete_fails(database: Database) -> None:
+    """物理删除抛异常时意图必须保持 PENDING 并累加尝试次数。"""
     repo = MemoryRepository(database)
     user_id, run_id = _uid("user"), _uid("run")
     object_uri = f"{user_id}/{uuid4().hex}.png"
     _run_with_object(repo, user_id, run_id, object_uri)
+    repo.delete_run(user_id, run_id)
 
     def _explode(uri: str) -> bool:
         raise OSError("locked object")
 
-    report = repo.delete_run(user_id, run_id, delete_object=_explode)
+    outcome = repo.retry_pending_object_deletions(user_id, run_id, _explode)
 
-    assert report.object_uris == (object_uri,)
-    assert report.objects_deleted == 0
-    assert report.objects_missing == 0
-    assert report.object_failures == ((object_uri, "OSError"),)
+    assert outcome.failed == ((object_uri, "OSError"),)
+    assert repo.pending_deletion_uris(user_id, run_id) == [object_uri]
+    intents = repo.pending_deletion_intents(user_id, run_id)
+    assert intents[0].attempts == 1
+    assert intents[0].last_error == "OSError"
+
+
+def test_commit_failure_never_deletes_physical_objects(database: Database) -> None:
+    """数据库提交失败（回滚）时，物理对象绝不能被提前删除。"""
+    repo = MemoryRepository(database)
+    user_id, run_id = _uid("user"), _uid("run")
+    object_uri = f"{user_id}/{uuid4().hex}.png"
+    memory_id = _run_with_object(repo, user_id, run_id, object_uri)
+
+    def _fail_commit(session) -> None:
+        raise RuntimeError("commit failed")
+
+    failing = MemoryRepository(database, commit=_fail_commit)
+    try:
+        failing.delete_run(user_id, run_id)
+    except RuntimeError:
+        pass
+
+    # 行删除与删除意图必须一起回滚：记忆仍在，也没有任何 PENDING 意图。
+    with database.session() as session:
+        alive = session.execute(
+            select(Memory.id).where(Memory.id == memory_id, Memory.user_id == user_id)
+        ).scalar_one_or_none()
+    assert alive == memory_id
+    assert repo.pending_deletion_uris(user_id, run_id) == []
+    # 物理对象从未被触碰（本阶段本来也不该触碰）。
+    assert repo.deletable_object_uris(user_id, run_id) == [object_uri]
+
+
+def test_retry_waits_for_lock_then_succeeds(database: Database) -> None:
+    """lock_timeout 必须在加锁之前设置：短暂持锁者释放后，重试应正常完成。"""
+    import threading
+    import time
+
+    repo = MemoryRepository(database)
+    user_id, run_id = _uid("user"), _uid("run")
+    object_uri = f"{user_id}/{uuid4().hex}.png"
+    _run_with_object(repo, user_id, run_id, object_uri)
+    repo.delete_run(user_id, run_id)
+
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def _hold() -> None:
+        with database.engine.connect() as connection:
+            connection.execute(
+                text("SELECT pg_advisory_lock(hashtext(:uri)::bigint)"), {"uri": object_uri}
+            )
+            holder_ready.set()
+            release_holder.wait(6)
+            connection.execute(
+                text("SELECT pg_advisory_unlock(hashtext(:uri)::bigint)"), {"uri": object_uri}
+            )
+            connection.rollback()
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    assert holder_ready.wait(5)
+
+    result: dict = {}
+
+    def _worker() -> None:
+        result["outcome"] = repo.retry_pending_object_deletions(user_id, run_id, lambda uri: True)
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    time.sleep(1.0)
+    release_holder.set()
+    worker.join(10)
+
+    assert not worker.is_alive()
+    assert result["outcome"].deleted == 1
+    assert repo.pending_deletion_uris(user_id, run_id) == []
+    holder.join(5)

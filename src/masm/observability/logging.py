@@ -3,8 +3,11 @@
 采用**字段白名单 + 逐字段形状约束**：只有 :data:`ALLOWED_LOG_FIELDS` 中列出的键允许
 进入日志，其余键（含容器里的键）在任意嵌套层级都被整体丢弃；白名单字段本身也不再允许
 任意容器透传，而是按字段名施加受控形状（例如 ``token_usage`` 只保留数值统计，
-``failure`` 只接受异常类型名或内部错误码）。自由文本（格式化后的消息、异常文本）没有
-字段名，因此在白名单之外再做值级脱敏，覆盖 Bearer Token、API Key、数据 URL、连接串等。
+``error_code`` 只接受 :data:`INTERNAL_ERROR_CODES` 枚举成员）。**失败标识只有一个可信
+来源**：``exc_info`` 中的异常类型；调用方提供的 ``failure`` 文本一律丢弃，因为它无法与
+用户私有内容区分（例如 ``MyPasswordIsHunter2`` 这类无空格字符串）。自由文本（格式化后的
+消息、异常文本）没有字段名，因此在白名单之外再做值级脱敏，覆盖 Bearer Token、API Key、
+数据 URL、连接串等。
 """
 
 import json
@@ -14,6 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 # 只允许这些字段进入日志（数量、延迟、状态、模型版本、token、成本、降级等聚合元数据）。
+# 注意：不含 "failure"——调用方提供的失败文本一律丢弃，见 RedactingFormatter。
 ALLOWED_LOG_FIELDS = frozenset(
     {
         "request_id",
@@ -34,7 +38,7 @@ ALLOWED_LOG_FIELDS = frozenset(
         "token_usage",
         "cost_usd",
         "degraded",
-        "failure",
+        "error_code",
         "agent_name",
         "attempts",
         "run_id",
@@ -105,8 +109,16 @@ _ALLOWED_TOKEN_USAGE_KEYS = frozenset(
     }
 )
 
-# failure 只允许异常类型名（如 TimeoutError）或内部错误码（如 E_UPSTREAM_TIMEOUT）。
-_FAILURE_PATTERN = re.compile(r"\A(?:[A-Za-z_][A-Za-z0-9_]{0,63}|[A-Z][A-Z0-9_]{1,63})\Z")
+# 内部错误码显式枚举：只有这些值允许作为 ``failure`` 进入日志。
+INTERNAL_ERROR_CODES = frozenset(
+    {
+        "pending_physical_delete",
+        "object_delete_failed",
+        "lock_timeout",
+        "dependency_unhealthy",
+        "upstream_timeout",
+    }
+)
 
 _REJECTED_PLACEHOLDER = "[REJECTED]"
 
@@ -127,11 +139,11 @@ def _is_token_statistics(value: Any) -> bool:
     return True
 
 
-def _redact_failure(value: Any) -> Any:
-    """failure 只接受异常类型名或内部错误码；其余（可能含用户内容）一律替换。"""
-    if isinstance(value, str) and _FAILURE_PATTERN.match(value):
-        return value
-    return _REJECTED_PLACEHOLDER
+def _failure_from_exception(exc: type[BaseException] | None) -> str | None:
+    """异常类型名是唯一来自异常的可信失败标识（绝不使用 str(exc)）。"""
+    if exc is None:
+        return None
+    return f"{exc.__module__}.{exc.__qualname__}"
 
 
 def redact_fields(payload: Any) -> Any:
@@ -140,7 +152,10 @@ def redact_fields(payload: Any) -> Any:
     两条规则同时生效：
     1. 键不在白名单内 -> 整个键值（含其内部结构）被丢弃，绝不因为「值是容器」就保留；
     2. 键在白名单内 -> 按字段形状收敛：标量字段拒绝容器，``token_usage`` 只留受控数值
-       统计，``failure`` 只留异常类型名/错误码，字符串统一走值级脱敏。
+       统计，字符串统一走值级脱敏。
+
+    注意 ``failure`` **不在**白名单内：调用方提供的失败文本一律丢弃，失败标识只能由
+    :class:`RedactingFormatter` 从 ``exc_info`` 的异常类型推导。
     """
     if isinstance(payload, Mapping):
         projected: dict[str, Any] = {}
@@ -152,8 +167,10 @@ def redact_fields(payload: Any) -> Any:
                 if _is_token_statistics(value):
                     projected[name] = dict(value)
                 continue
-            if name == "failure":
-                projected[name] = _redact_failure(value)
+            if name == "error_code":
+                # 内部错误码必须是显式枚举成员；其他取值一律丢弃。
+                if isinstance(value, str) and value in INTERNAL_ERROR_CODES:
+                    projected[name] = value
                 continue
             if isinstance(value, str):
                 # 自由文本字段仍做值级脱敏（长度/延迟等数值保持原类型）。
@@ -190,8 +207,10 @@ class RedactingFormatter(logging.Formatter):
                 if isinstance(value, str | int | float | bool):
                     payload[key] = redact_fields({key: value})[key]
         if record.exc_info and record.exc_info[0] is not None:
-            # 只记录异常类型，绝不记录可能包含用户内容的 str(exc)。
-            payload["failure"] = record.exc_info[0].__name__
+            # 只从异常对象取类型名，绝不使用 str(exc) 或调用方提供的 failure 文本。
+            failure = _failure_from_exception(record.exc_info[0])
+            if failure is not None:
+                payload["failure"] = failure
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 

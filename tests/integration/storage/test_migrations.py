@@ -11,7 +11,10 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
 from conftest import require_masm_test_database
+from masm.services.deletion_service import DeletionService
+from masm.storage.assets import AssetStore
 from masm.storage.db import Database
+from masm.storage.repositories import MemoryRepository
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -252,6 +255,53 @@ def test_0003_backfill_is_repeatable_and_lossless_on_reupgrade(database_url: str
     assert first[("legacy-a", "ns-a/shared.png")] == "run-a"
 
     _cleanup_legacy(engine)
+    engine.dispose()
+
+
+def test_0003_shared_legacy_object_survives_until_the_last_run_is_deleted(
+    database_url: str, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """真实删除验证：迁移前两个运行共享同一对象，删除第一个后对象必须仍在。
+
+    旧回填把同一 (user_id, object_uri) 统一归给 MIN(request_id)，只信资产行时会把
+    「仍被第二个运行引用」的对象误判为独占；因此这里直接跑真实删除路径，断言：
+    删除 run-a 后对象仍存在（第二个运行还在引用），删除 run-z 后对象才消失。
+    """
+    validated = require_masm_test_database(database_url)
+    cfg = _alembic_config(validated)
+    engine = create_engine(validated)
+
+    command.downgrade(cfg, "0002")
+    _seed_legacy_0002_data(engine)
+    command.upgrade(cfg, "head")
+
+    # 在真实对象存储里创建该共享对象，使物理删除可观察。
+    shared_uri, orphan_uri = "ns-a/shared.png", "ns-a/orphan.png"
+    target = asset_store.base_dir / shared_uri
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"shared-bytes")
+    assert target.exists()
+
+    database = Database.create(validated)
+    repo = MemoryRepository(database)
+    service = DeletionService(repo, asset_store)
+
+    # run-a（字典序最小、被回填认领）先删除：run-z 的原始消息仍引用同一对象。
+    first = service.delete_run("run-a", user_id="legacy-a")
+
+    assert target.exists(), "删除第一个运行后，第二个运行仍引用的对象不得被删除"
+    assert first.objects_deleted == 0
+
+    second = service.delete_run("run-z", user_id="legacy-a")
+
+    assert second.complete is True
+    assert not target.exists(), "最后一个引用者被删除后，对象才允许消失"
+
+    # 无任何消息引用的遗留资产（orphan）不应被任何运行删除。
+    assert orphan_uri not in second.failed_object_uris
+
+    _cleanup_legacy(engine)
+    database.engine.dispose()
     engine.dispose()
 
 

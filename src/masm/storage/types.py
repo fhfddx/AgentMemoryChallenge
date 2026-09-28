@@ -119,12 +119,11 @@ class MemoryCandidate:
 
 @dataclass(frozen=True)
 class DeletedRun:
-    """一次运行删除后统计到的数据库记录与对象地址。
+    """一次运行删除的**数据库阶段**结果。
 
-    ``object_uris`` 是本次确认可删（无任何用户/运行再引用）的对象地址；
-    ``shared_object_uris`` 是仍被引用的对象地址；``objects_deleted`` /
-    ``objects_missing`` 是已在对象锁临界区内执行物理删除的结果；``object_failures``
-    是删除抛异常的对象及其错误类型，需保留为 PENDING 以便重试。
+    只描述可回滚的数据库工作：``object_uris`` 是本运行独占（无任何用户/运行再引用）、
+    已登记为 PENDING 删除意图的对象地址；``shared_object_uris`` 是仍被引用的对象地址。
+    物理删除结果由 :class:`ObjectDeletionOutcome` 单独报告。
     """
 
     request_id: str
@@ -135,9 +134,17 @@ class DeletedRun:
     conflicts: int = 0
     object_uris: Sequence[str] = ()
     shared_object_uris: Sequence[str] = ()
-    objects_deleted: int = 0
-    objects_missing: int = 0
-    object_failures: Sequence[tuple[str, str]] = ()
+
+
+@dataclass(frozen=True)
+class ObjectDeletionOutcome:
+    """一次物理对象删除重试的结果。"""
+
+    deleted: int = 0
+    missing: int = 0
+    failed: Sequence[tuple[str, str]] = ()
+    still_referenced: Sequence[str] = ()
+    pending: Sequence[str] = ()
 
 
 @dataclass(frozen=True)
