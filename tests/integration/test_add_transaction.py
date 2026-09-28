@@ -2,7 +2,10 @@
 
 import base64
 import io
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -10,6 +13,7 @@ from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.exc import StatementError
 
+from masm.config import Settings
 from masm.schemas.api import AddRequest
 from masm.services.add_service import (
     AddConflictError,
@@ -17,7 +21,11 @@ from masm.services.add_service import (
     AddService,
     utc_now,
 )
-from masm.storage.assets import AssetStore
+from masm.storage.assets import (
+    AssetStore,
+    ImageTooLargeError,
+    InvalidImageDataError,
+)
 from masm.storage.db import Database
 from masm.storage.models import Asset, Memory, SourceMessage
 from masm.storage.repositories import LedgerStateError, MemoryRepository
@@ -176,10 +184,10 @@ def test_object_write_failure_cleans_previous_new_files(
     assert _count(database, Memory, user_id) == 0
 
 
-def test_shared_existing_object_not_deleted(
+def test_published_object_not_deleted_by_later_failure(
     database: Database, asset_store: AssetStore, settings
 ) -> None:
-    """既有共享对象不会被后续失败请求删除。"""
+    """已提交请求发布的对象不会被后续失败请求删除。"""
     user_id = _uid("u")
     url = _data_url(_encode(12))
 
@@ -197,21 +205,117 @@ def test_shared_existing_object_not_deleted(
         )
 
     AddService(MemoryRepository(database), asset_store, settings).add(_image_only_request())
-    objects = list(asset_store.base_dir.rglob("*.png"))
-    assert len(objects) == 1
+    published = [path for path in asset_store.base_dir.rglob("*.png")]
+    assert len(published) == 1
 
     failing_repo = MemoryRepository(database)
-    monkeypatch_target = failing_repo
 
     def _boom(*args, **kwargs):
         raise RuntimeError("injected db failure")
 
-    monkeypatch_target.finalize_request = _boom  # type: ignore[method-assign]
+    failing_repo.finalize_request = _boom  # type: ignore[method-assign]
     with pytest.raises(RuntimeError):
         AddService(failing_repo, asset_store, settings).add(_image_only_request())
 
-    # 该对象已被先前提交引用，不得删除。
+    assert published[0].exists()
+
+
+def test_concurrent_same_content_one_db_failure_keeps_object(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Database,
+    asset_store: AssetStore,
+    settings,
+) -> None:
+    """两个不同 request_id、同一用户、相同图片并发写入：一个 DB 提交失败，成功后对象仍在。"""
+    user_id = _uid("u")
+    url = _data_url(_encode(14))
+    failing_id, ok_id = _uid("r"), _uid("r")
+
+    original = MemoryRepository.finalize_request
+
+    def _conditional(self, uid: str, rid: str, bundle):
+        if rid == failing_id:
+            raise RuntimeError("injected db failure")
+        return original(self, uid, rid, bundle)
+
+    monkeypatch.setattr(MemoryRepository, "finalize_request", _conditional)
+    barrier = threading.Barrier(2)
+
+    def _run(rid: str) -> None:
+        request = AddRequest(
+            request_id=rid,
+            user_id=user_id,
+            session_id="session-1",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": url}}],
+                }
+            ],
+        )
+        barrier.wait()
+        service = AddService(MemoryRepository(database), asset_store, settings)
+        if rid == failing_id:
+            with pytest.raises(RuntimeError):
+                service.add(request)
+        else:
+            service.add(request)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_run, rid) for rid in (failing_id, ok_id)]
+        for future in futures:
+            future.result()
+
+    objects = [path for path in asset_store.base_dir.rglob("*.png")]
+    assert len(objects) == 1
     assert objects[0].exists()
+
+
+def test_invalid_media_leaves_no_processing(
+    database: Database, asset_store: AssetStore, settings
+) -> None:
+    """非法媒体请求在 claim 之前失败，不留下 PROCESSING 账本。"""
+    repo = MemoryRepository(database)
+    service = AddService(repo, asset_store, settings)
+    user_id, request_id = _uid("u"), _uid("r")
+    request = AddRequest(
+        request_id=request_id,
+        user_id=user_id,
+        session_id="session-1",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,A"},
+                    }
+                ],
+            }
+        ],
+    )
+
+    with pytest.raises(InvalidImageDataError):
+        service.add(request)
+    assert repo.get_ledger_status(user_id, request_id) is None
+    assert list(asset_store.base_dir.rglob("*")) == []
+
+
+def test_oversize_media_leaves_no_processing(
+    database: Database, database_url: str, tmp_path: Path
+) -> None:
+    """超限媒体请求在 claim 之前失败，不留下 PROCESSING 账本。"""
+    repo = MemoryRepository(database)
+    small = Settings(database_url=database_url, api_keys=("test-key",), max_add_image_bytes=1)
+    store = AssetStore(tmp_path / "assets")
+    service = AddService(repo, store, small)
+    user_id, request_id = _uid("u"), _uid("r")
+    request = _image_request(request_id, user_id)
+
+    with pytest.raises(ImageTooLargeError):
+        service.add(request)
+    assert repo.get_ledger_status(user_id, request_id) is None
+    assert list(store.base_dir.rglob("*")) == []
 
 
 # ---------------------------------------------------------------- 幂等恢复

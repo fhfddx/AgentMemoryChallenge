@@ -11,6 +11,7 @@ from masm.storage.assets import (
     InvalidImageDataError,
     UnsupportedImageTypeError,
     decode_image_data_url,
+    estimated_decoded_size,
 )
 
 
@@ -81,3 +82,23 @@ def test_decoded_size_limit_enforced() -> None:
     data = _encode("PNG", (64, 64))
     with pytest.raises(ImageTooLargeError):
         decode_image_data_url(_data_url("image/png", data), len(data) - 1)
+
+
+def test_estimated_size_accounts_for_padding() -> None:
+    """估算需扣除 padding，不能高估实际解码大小。"""
+    payload = base64.b64encode(b"\x00\x00\x00\x00").decode()
+    assert payload.endswith("==")
+    assert estimated_decoded_size(payload) == 4
+
+
+@pytest.mark.parametrize(
+    ("image_format", "media_type"),
+    [("JPEG", "image/jpeg"), ("WEBP", "image/webp")],
+)
+def test_exact_size_limit_is_accepted(image_format: str, media_type: str) -> None:
+    """解码大小恰好等于 max_bytes 时必须接受，少一字节才拒绝。"""
+    data = _encode(image_format, (24, 24))
+    decoded = decode_image_data_url(_data_url(media_type, data), len(data))
+    assert decoded.decoded_size == len(data)
+    with pytest.raises(ImageTooLargeError):
+        decode_image_data_url(_data_url(media_type, data), len(data) - 1)

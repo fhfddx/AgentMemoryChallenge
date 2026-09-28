@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -99,7 +100,7 @@ class MemoryRepository:
     def _write_bundle(self, session: Session, user_id: str, bundle: MemoryBundle) -> list[UUID]:
         """在当前会话（事务）内写入 Session/Asset/SourceMessage/Memory。"""
         self._ensure_user(session, user_id)
-        session_model = self._ensure_session(session, user_id, bundle.session_id)
+        session_model_id = self._ensure_session_id(session, user_id, bundle.session_id)
         for asset in bundle.assets:
             session.add(
                 Asset(
@@ -116,7 +117,7 @@ class MemoryRepository:
             session.add(
                 SourceMessage(
                     user_id=user_id,
-                    session_id=session_model.id,
+                    session_id=session_model_id,
                     request_id=bundle.request_id,
                     position=message.position,
                     role=message.role,
@@ -128,7 +129,7 @@ class MemoryRepository:
         for draft in bundle.memories:
             memory = Memory(
                 user_id=user_id,
-                session_id=session_model.id,
+                session_id=session_model_id,
                 request_id=bundle.request_id,
                 summary=draft.summary,
                 original_text=draft.original_text,
@@ -287,16 +288,6 @@ class MemoryRepository:
                 .where(Memory.user_id == user_id, Memory.request_id == request_id)
             ).scalar_one()
         return bool(count)
-
-    def count_asset_references(self, user_id: str, object_uri: str) -> int:
-        """统计引用某对象键的已提交 Asset 记录数。"""
-        with self._database.session() as session:
-            count = session.execute(
-                select(func.count())
-                .select_from(Asset)
-                .where(Asset.user_id == user_id, Asset.object_uri == object_uri)
-            ).scalar_one()
-        return int(count)
 
     def lexical_candidates(self, user_id: str, query: str, limit: int) -> list[MemoryCandidate]:
         """全文检索，SQL 查询阶段即按 user_id 过滤。"""
@@ -460,21 +451,22 @@ class MemoryRepository:
             raise RelationValidationError(f"{node_type} 节点属于其他用户: {node_id}")
 
     def _ensure_user(self, session: Session, user_id: str) -> None:
-        """按需创建用户（幂等）。"""
-        if session.get(User, user_id) is None:
-            session.add(User(user_id=user_id))
-
-    def _ensure_session(self, session: Session, user_id: str, session_id: str) -> SessionRecord:
-        """按需创建会话（幂等）。"""
-        existing = session.execute(
-            select(SessionRecord).where(
-                SessionRecord.user_id == user_id,
-                SessionRecord.session_id == session_id,
+        """按需创建用户（幂等且并发安全）。"""
+        session.execute(
+            pg_insert(User).values(user_id=user_id).on_conflict_do_nothing(
+                index_elements=["user_id"]
             )
-        ).scalar_one_or_none()
-        if existing is not None:
-            return existing
-        model = SessionRecord(user_id=user_id, session_id=session_id)
-        session.add(model)
-        session.flush()
-        return model
+        )
+
+    def _ensure_session_id(self, session: Session, user_id: str, session_id: str) -> UUID:
+        """按需创建会话并返回其主键（幂等且并发安全）。"""
+        statement = (
+            pg_insert(SessionRecord)
+            .values(user_id=user_id, session_id=session_id)
+            .on_conflict_do_update(
+                index_elements=["user_id", "session_id"],
+                set_={"session_id": session_id},
+            )
+            .returning(SessionRecord.id)
+        )
+        return session.execute(statement).scalar_one()

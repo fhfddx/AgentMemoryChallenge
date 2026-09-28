@@ -1,4 +1,8 @@
-"""图片严格解码与本地对象存储（不连接付费服务）。"""
+"""图片严格解码与本地对象存储。
+
+写入采用 request-scoped 暂存：对象先落到仅本请求可见的暂存目录，数据库事务提交成功后
+再原子发布到内容寻址的最终位置。失败请求只丢弃自己的暂存目录，绝不删除共享对象。
+"""
 
 import base64
 import binascii
@@ -7,6 +11,7 @@ import hashlib
 import io
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -31,6 +36,8 @@ _PILLOW_FORMAT_TO_MIME = {
     "PNG": "image/png",
     "WEBP": "image/webp",
 }
+
+_STAGING_DIRNAME = "staging"
 
 
 class MediaValidationError(ValueError):
@@ -62,8 +69,44 @@ class AssetPathError(ValueError):
 
 
 def estimated_decoded_size(payload: str) -> int:
-    """由 Base64 文本长度上界估算解码后字节数，用于解码前的内存保护。"""
-    return (len(payload) // 4) * 3
+    """估算 Base64 文本解码后的字节数。
+
+    对合法长度按 padding 精确计算，因此「实际解码大小恰好等于上限」不会被误拒；
+    非法长度随后会被 b64decode 拒绝，此处给出保守上界以防超大内存分配。
+    """
+    length = len(payload)
+    if length == 0:
+        return 0
+    groups, remainder = divmod(length, 4)
+    if remainder != 0:
+        return groups * 3 + 3
+    padding = 0
+    if payload.endswith("=="):
+        padding = 2
+    elif payload.endswith("="):
+        padding = 1
+    return max(0, groups * 3 - padding)
+
+
+def _strip_extended_prefix(text: str) -> str:
+    """去掉 Windows 扩展长度路径前缀，避免 \\\\?\\ 造成的路径比较竞态。"""
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[len("\\\\?\\UNC\\") :]
+    if text.startswith(("\\\\?\\", "\\\\.\\")):
+        return text[4:]
+    return text
+
+
+def _join_within(base: Path, relative: str) -> Path:
+    """文本拼接 + 归一化，不调用 resolve()，避免首次并发建目录时的前缀竞态。"""
+    joined = os.path.normpath(os.path.join(str(base), relative))
+    return Path(_strip_extended_prefix(joined))
+
+
+def _is_within(base: Path, candidate: Path) -> bool:
+    base_text = os.path.normcase(_strip_extended_prefix(str(base)))
+    candidate_text = os.path.normcase(_strip_extended_prefix(str(candidate)))
+    return candidate_text == base_text or candidate_text.startswith(base_text + os.sep)
 
 
 def _parse_image(data: bytes) -> tuple[str, int, int]:
@@ -131,47 +174,54 @@ def decode_image_data_url(value: str, max_bytes: int) -> DecodedImage:
 
 
 class AssetStore:
-    """本地内容寻址对象存储。
+    """本地对象存储：request-scoped 暂存 + 内容寻址发布。
 
-    对象键由「user_id 的 SHA-256 命名空间 + 内容 SHA-256」生成，绝不直接使用原始
-    user_id/request_id 作为路径；写入使用临时文件 + 原子替换。
+    路径只由 SHA-256 命名空间与内容哈希组成，绝不直接使用原始 user_id/request_id；
+    所有拼接路径在写入前都验证位于 base_dir 内。
     """
 
     def __init__(self, base_dir: Path) -> None:
-        self._base_dir = Path(base_dir).resolve()
+        self._base_dir = Path(_strip_extended_prefix(str(Path(base_dir).resolve())))
 
     @property
     def base_dir(self) -> Path:
         return self._base_dir
 
-    def _namespace(self, user_id: str) -> str:
-        """由 user_id 派生稳定命名空间，消除路径穿越与特殊字符。"""
+    def _user_namespace(self, user_id: str) -> str:
         return hashlib.sha256(user_id.encode("utf-8")).hexdigest()
 
+    def _request_namespace(self, user_id: str, request_id: str) -> str:
+        payload = f"{user_id}\x00{request_id}".encode()
+        return hashlib.sha256(payload).hexdigest()
+
     def _resolve_within_root(self, relative: str) -> Path:
-        """解析相对键为绝对路径，并验证其位于 base_dir 内。"""
-        candidate = (self._base_dir / relative).resolve()
-        if candidate != self._base_dir and self._base_dir not in candidate.parents:
+        """解析相对键并验证其位于 base_dir 内。"""
+        candidate = _join_within(self._base_dir, relative)
+        if not _is_within(self._base_dir, candidate):
             raise AssetPathError(f"对象路径越出存储根目录: {relative}")
         return candidate
 
-    def put(self, user_id: str, request_id: str, image: DecodedImage) -> AssetRef:
-        """写入对象并返回 AssetRef（含 created 状态）。
+    def staging_dir(self, user_id: str, request_id: str) -> Path:
+        """本请求的暂存目录（仅本请求可见）。"""
+        namespace = self._request_namespace(user_id, request_id)
+        return self._resolve_within_root(f"{_STAGING_DIRNAME}/{namespace}")
 
-        request_id 保留给未来暂存/清理语义，当前内容寻址存储不依赖它。
-        """
+    def put(self, user_id: str, request_id: str, image: DecodedImage) -> AssetRef:
+        """把对象写入本请求的暂存目录，返回最终内容寻址引用。"""
         extension = _EXT_BY_MEDIA_TYPE[image.media_type]
         content_hash = hashlib.sha256(image.data).hexdigest()
-        object_key = f"{self._namespace(user_id)}/{content_hash}{extension}"
-        target = self._resolve_within_root(object_key)
+        filename = f"{content_hash}{extension}"
+        object_uri = f"{self._user_namespace(user_id)}/{filename}"
 
-        created = not target.exists()
-        target.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = self.staging_dir(user_id, request_id)
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        staged = staging_dir / filename
+        created = not staged.exists()
         if created:
-            self._atomic_write(target, image.data)
+            self._atomic_write(staged, image.data)
 
         return AssetRef(
-            object_uri=object_key,
+            object_uri=object_uri,
             media_type=image.media_type,
             content_hash=content_hash,
             decoded_size=image.decoded_size,
@@ -180,11 +230,32 @@ class AssetStore:
             created=created,
         )
 
-    def remove(self, object_uri: str) -> None:
-        """删除一个对象文件；路径必须位于 base_dir 内。"""
-        target = self._resolve_within_root(object_uri)
-        with contextlib.suppress(FileNotFoundError):
-            target.unlink()
+    def publish(self, user_id: str, request_id: str) -> list[str]:
+        """把本请求暂存的对象原子发布到内容寻址的最终位置。
+
+        已存在同名最终对象时用相同内容覆盖（内容寻址天然幂等），因此并发发布安全。
+        """
+        staging_dir = self.staging_dir(user_id, request_id)
+        if not staging_dir.exists():
+            return []
+        published: list[str] = []
+        for staged in sorted(staging_dir.iterdir()):
+            if not staged.is_file():
+                continue
+            relative = f"{self._user_namespace(user_id)}/{staged.name}"
+            final = self._resolve_within_root(relative)
+            final.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(staged, final)
+            published.append(relative)
+        with contextlib.suppress(OSError):
+            staging_dir.rmdir()
+        return published
+
+    def discard(self, user_id: str, request_id: str) -> None:
+        """丢弃本请求的暂存目录；绝不触碰已发布或其它请求的对象。"""
+        staging_dir = self.staging_dir(user_id, request_id)
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
     @staticmethod
     def _atomic_write(target: Path, data: bytes) -> None:

@@ -1,5 +1,6 @@
 """Add 应用服务与幂等事务编排。"""
 
+import contextlib
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
@@ -62,24 +63,37 @@ class AddService:
     def add(self, request: AddRequest) -> AddResponse:
         """处理一次 Add；相同 user_id + request_id 只产生一次逻辑写入。"""
         now = self._clock()
+        # 媒体解码与总量校验先于幂等 claim，避免 400/413/422 请求遗留 PROCESSING。
+        images = self._decode_images(request)
+
         if not self._acquire(request, now):
             return self._replay(request)
 
-        images = self._decode_images(request)
-        asset_refs, created_refs = self._store_assets(request, images)
+        asset_refs: list[AssetRef] = []
+        try:
+            for image in images:
+                asset_refs.append(self._assets.put(request.user_id, request.request_id, image))
+        except Exception:
+            self._fail(request)
+            raise
 
         try:
             self._repo.finalize_request(
-                request.user_id, request.request_id, self._build_bundle(request, asset_refs)
+                request.user_id,
+                request.request_id,
+                self._build_bundle(request, asset_refs),
             )
         except LedgerStateError as exc:
-            self._cleanup(request.user_id, created_refs)
+            # 所有权已被接管：账本由新所有者掌管，丢弃本请求暂存后报冲突。
+            with contextlib.suppress(Exception):
+                self._assets.discard(request.user_id, request.request_id)
             raise AddConflictError("请求所有权已失效") from exc
         except Exception:
-            self._cleanup(request.user_id, created_refs)
-            self._mark_failed(request)
+            self._fail(request)
             raise
 
+        # 数据库已提交后发布暂存对象；失败会向上抛出 500，重试时由 _replay 修复。
+        self._assets.publish(request.user_id, request.request_id)
         return AddResponse(
             success=True,
             request_id=request.request_id,
@@ -128,33 +142,14 @@ class AddService:
             raise AddConflictError("该请求正在处理中")
         raise AddConflictError("该请求正在处理中")
 
-    def _store_assets(
-        self, request: AddRequest, images: list[DecodedImage]
-    ) -> tuple[list[AssetRef], list[AssetRef]]:
-        """写入对象文件，返回（全部引用，本次新建的引用）。"""
-        asset_refs: list[AssetRef] = []
-        created_refs: list[AssetRef] = []
-        try:
-            for image in images:
-                ref = self._assets.put(request.user_id, request.request_id, image)
-                asset_refs.append(ref)
-                if ref.created:
-                    created_refs.append(ref)
-        except Exception:
-            self._cleanup(request.user_id, created_refs)
-            self._mark_failed(request)
-            raise
-        return asset_refs, created_refs
+    def _fail(self, request: AddRequest) -> None:
+        """丢弃本请求的暂存对象，并把仍属于本请求的账本标记为 FAILED。
 
-    def _cleanup(self, user_id: str, created_refs: list[AssetRef]) -> None:
-        """只清理由本次请求新建、且没有任何已提交记录引用的对象文件。"""
-        for ref in created_refs:
-            try:
-                if self._repo.count_asset_references(user_id, ref.object_uri) == 0:
-                    self._assets.remove(ref.object_uri)
-            except Exception:
-                # 清理失败不得覆盖原始异常。
-                continue
+        清理失败不得阻止账本进入确定状态。
+        """
+        with contextlib.suppress(Exception):
+            self._assets.discard(request.user_id, request.request_id)
+        self._mark_failed(request)
 
     def _mark_failed(self, request: AddRequest) -> None:
         """仅当账本仍为 PROCESSING 时才标记 FAILED，避免覆盖已提交状态。"""
@@ -170,7 +165,8 @@ class AddService:
             return
 
     def _replay(self, request: AddRequest) -> AddResponse:
-        """COMMITTED 请求返回先前的逻辑结果。"""
+        """COMMITTED 请求返回先前的逻辑结果，并修复「已提交未发布」的窗口。"""
+        self._assets.publish(request.user_id, request.request_id)
         commit = self._repo.get_by_request(request.user_id, request.request_id)
         if commit is None:
             raise AddPreviouslyFailedError("账本与记忆数据不一致")

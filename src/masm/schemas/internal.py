@@ -19,7 +19,8 @@ class DecodedImage:
 class AssetRef:
     """已存储的图片对象引用。
 
-    created 表示本对象是否由本次 put 新建；AddService 只清理 created=True 的对象。
+    object_uri 是发布后的内容寻址键；created 表示本次 put 是否在本请求暂存区新建了文件，
+    仅作信息用途（清理按请求作用域进行，不依赖该标记）。
     """
 
     object_uri: str
