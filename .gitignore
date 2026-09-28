@@ -1,0 +1,31 @@
+# Python 运行产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 测试与静态检查缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 环境变量与密钥（仓库只提交 .env.example）
+.env
+.env.local
+
+# 运行产物、数据库、缓存、图片与评测数据
+artifacts/
+*.db
+*.sqlite3
+
+# IDE
+.idea/
+.vscode/
