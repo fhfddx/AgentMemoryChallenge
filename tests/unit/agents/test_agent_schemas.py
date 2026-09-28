@@ -78,6 +78,38 @@ def test_relation_without_evidence_is_rejected() -> None:
         RelationSuggestion(**_relation(evidence=""))
 
 
+_BLANK_EVIDENCE = ["", " ", "\t", "\n  \n", "\u3000", " \t\u3000 "]
+
+
+@pytest.mark.parametrize("evidence", _BLANK_EVIDENCE)
+def test_blank_evidence_is_rejected_for_every_derived_field(evidence: str) -> None:
+    """空白证据不只包括空字符串：纯空白同样必须被拒绝。"""
+    with pytest.raises(ValidationError):
+        Entity(**_entity(evidence=evidence))
+    with pytest.raises(ValidationError):
+        ObservedEvent(description="walked", confidence=0.5, evidence=evidence)
+    with pytest.raises(ValidationError):
+        RelationSuggestion(**_relation(evidence=evidence))
+
+
+def test_evidence_with_content_around_whitespace_is_accepted() -> None:
+    """仅含空白才被拒绝；带内容的证据（哪怕有前后空白）必须接受。"""
+    entity = Entity(**_entity(evidence="  a red bicycle  "))
+    assert entity.evidence == "  a red bicycle  "
+
+
+def test_evidence_reference_is_never_rewritten() -> None:
+    """校验不得改写原始证据引用（保留原空白、大小写与标点）。"""
+    raw = "  a RED bicycle, 2 wheels  "
+    entity = Entity(**_entity(evidence=raw))
+    event = ObservedEvent(description="rode", confidence=0.5, evidence=raw)
+    relation = RelationSuggestion(**_relation(evidence=raw))
+
+    assert entity.evidence == raw
+    assert event.evidence == raw
+    assert relation.evidence == raw
+
+
 @pytest.mark.parametrize("confidence", [-0.1, 1.5])
 def test_relation_confidence_out_of_range_is_rejected(confidence: float) -> None:
     with pytest.raises(ValidationError):

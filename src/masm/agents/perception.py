@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from masm.agents import load_prompt
 from masm.providers.llm import ModelRequest, StructuredLLM
 from masm.schemas.agents import PerceptionResult
-from masm.schemas.content import ContentPart, TextPart
+from masm.schemas.content import ContentPart
 
 PROMPT_FILE = "perception_v1.txt"
 PROMPT_VERSION = "v1"
@@ -40,18 +40,15 @@ class PerceptionAgent:
         return self._prompt_version
 
     def extract(self, content: Sequence[ContentPart]) -> PerceptionResult:
-        """从原始有序内容中抽取通过 Schema 校验的感知结果。"""
+        """从原始有序内容中抽取通过 Schema 校验的感知结果。
+
+        内容分片以官方结构原样交给 Provider，由 Provider 适配层转换为厂商多模态内容块，
+        因此视觉模型能够真正接收图片。
+        """
         request = ModelRequest(
             prompt=self._prompt,
-            payload={"content": [_serialize(part) for part in content]},
+            content=tuple(content),
             model=self._model,
             prompt_version=self._prompt_version,
         )
         return self._llm.complete_json(request, PerceptionResult)
-
-
-def _serialize(part: ContentPart) -> dict[str, object]:
-    """按官方契约原样序列化内容分片，保持顺序与图片数据 URL。"""
-    if isinstance(part, TextPart):
-        return {"type": "text", "text": part.text}
-    return {"type": "image_url", "image_url": {"url": part.image_url.url}}

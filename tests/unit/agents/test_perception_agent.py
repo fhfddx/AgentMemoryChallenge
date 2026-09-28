@@ -44,17 +44,21 @@ def test_extract_returns_schema_object() -> None:
 
 
 def test_extract_preserves_content_order() -> None:
-    """图片与文本分片必须保持原始顺序传给模型。"""
+    """图片与文本分片必须以官方结构、按原始顺序交给 Provider 适配层。"""
     llm = FakeStructuredLLM([_perception(modality="mixed")])
     agent = PerceptionAgent(llm)
 
     agent.extract([_text("first"), _image(), _text("second")])
 
-    content = llm.requests[0].payload["content"]
-    assert [part["type"] for part in content] == ["text", "image_url", "text"]
-    assert content[0]["text"] == "first"
-    assert content[2]["text"] == "second"
-    assert content[1]["image_url"]["url"] == _DATA_URL
+    content = llm.requests[0].content
+    assert content is not None
+    first, middle, last = content
+    assert isinstance(first, TextPart)
+    assert first.text == "first"
+    assert isinstance(middle, ImageURLPart)
+    assert middle.image_url.url == _DATA_URL
+    assert isinstance(last, TextPart)
+    assert last.text == "second"
 
 
 def test_extract_records_model_and_prompt_version() -> None:

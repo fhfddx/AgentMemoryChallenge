@@ -61,13 +61,26 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class Entity(_StrictModel):
+class _WithEvidence(_StrictModel):
+    """带原始证据引用的派生字段：证据必须非空且不能仅含空白。"""
+
+    evidence: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("evidence")
+    @classmethod
+    def _evidence_must_not_be_blank(cls, value: str) -> str:
+        """拒绝空字符串与纯空白证据；原样返回，绝不改写原始证据引用。"""
+        if not value.strip():
+            raise ValueError("evidence 不能为空或仅含空白")
+        return value
+
+
+class Entity(_WithEvidence):
     """可直接观察到的实体；必须携带原始证据引用。"""
 
     name: str = Field(min_length=1, max_length=200)
     kind: EntityKind
     confidence: Confidence
-    evidence: str = Field(min_length=1, max_length=500)
 
     @field_validator("name")
     @classmethod
@@ -78,13 +91,12 @@ class Entity(_StrictModel):
         return value
 
 
-class ObservedEvent(_StrictModel):
+class ObservedEvent(_WithEvidence):
     """可直接观察到的动作或事件；必须携带原始证据引用。"""
 
     description: str = Field(min_length=1, max_length=500)
     participants: tuple[str, ...] = ()
     confidence: Confidence
-    evidence: str = Field(min_length=1, max_length=500)
 
 
 class ImageDescription(_StrictModel):
@@ -116,13 +128,12 @@ class TemporalExpression(_StrictModel):
     confidence: Confidence
 
 
-class RelationSuggestion(_StrictModel):
+class RelationSuggestion(_WithEvidence):
     """针对某条同用户历史候选的关系建议；必须携带原始证据引用。"""
 
     kind: RelationKind
     target_memory_id: UUID
     confidence: Confidence
-    evidence: str = Field(min_length=1, max_length=1000)
 
 
 class TemporalRelationResult(_StrictModel):

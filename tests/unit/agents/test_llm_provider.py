@@ -1,6 +1,6 @@
-"""结构化模型 Provider 的超时、重试、Schema 校验与版本记录测试。
+"""结构化模型 Provider 的超时、重试、Schema 校验与多模态请求体测试。
 
-使用 httpx.MockTransport 注入确定性响应，绝不访问真实模型 API。
+使用 httpx.MockTransport 注入确定性响应，直接检查最终 HTTP 请求体，绝不访问真实模型 API。
 """
 
 import json
@@ -8,22 +8,33 @@ import json
 import httpx
 import pytest
 
+from masm.agents.perception import PerceptionAgent
 from masm.providers.llm import (
+    MAX_ATTEMPTS,
     ModelRequest,
     ModelUnavailableError,
     OpenAICompatibleLLM,
     StructuredOutputError,
 )
 from masm.schemas.agents import PerceptionResult
+from masm.schemas.content import ImageURLPart, TextPart
 
+_DATA_URL = "data:image/png;base64,iVBORw0KGgo="
 _VALID_BODY = {"choices": [{"message": {"content": '{"keywords": ["cat"], "language": "en"}'}}]}
 _INVALID_BODY = {"choices": [{"message": {"content": "not json at all"}}]}
+
+
+def _text(content: str) -> TextPart:
+    return TextPart(text=content)
+
+
+def _image(url: str = _DATA_URL) -> ImageURLPart:
+    return ImageURLPart(image_url={"url": url})
 
 
 def _request(**overrides: object) -> ModelRequest:
     payload: dict = {
         "prompt": "system prompt",
-        "payload": {"content": []},
         "model": "gpt-4o-mini",
         "prompt_version": "v1",
     }
@@ -42,11 +53,27 @@ def _llm(handler, **overrides: object) -> OpenAICompatibleLLM:
     )
 
 
+def _recording_handler(seen: dict):
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json=_VALID_BODY)
+
+    return handler
+
+
+def _user_content(seen: dict):
+    return seen["body"]["messages"][1]["content"]
+
+
+# ---------------------------------------------------------------- 结构化输出
+
+
 def test_valid_json_is_validated_and_returned() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_VALID_BODY)
 
-    result = _llm(handler).complete_json(_request(), PerceptionResult)
+    result = _llm(handler).complete_json(_request(payload={"content": []}), PerceptionResult)
 
     assert isinstance(result, PerceptionResult)
     assert result.keywords == ("cat",)
@@ -55,12 +82,7 @@ def test_valid_json_is_validated_and_returned() -> None:
 def test_json_schema_and_version_are_sent_to_provider() -> None:
     seen: dict = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["body"] = json.loads(request.content)
-        seen["auth"] = request.headers.get("authorization")
-        return httpx.Response(200, json=_VALID_BODY)
-
-    _llm(handler).complete_json(_request(), PerceptionResult)
+    _llm(_recording_handler(seen)).complete_json(_request(payload={"x": 1}), PerceptionResult)
 
     assert seen["auth"] == "Bearer test-key"
     assert seen["body"]["model"] == "gpt-4o-mini"
@@ -68,6 +90,75 @@ def test_json_schema_and_version_are_sent_to_provider() -> None:
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["name"] == "PerceptionResult"
     assert "properties" in response_format["json_schema"]["schema"]
+
+
+def test_structured_payload_is_sent_as_json_text() -> None:
+    """时序智能体等结构化输入仍以 JSON 文本发送，不能变成内容块数组。"""
+    seen: dict = {}
+
+    _llm(_recording_handler(seen)).complete_json(
+        _request(payload={"history": [{"memory_id": "m-1", "content": "memory"}]}),
+        PerceptionResult,
+    )
+
+    content = _user_content(seen)
+    assert isinstance(content, str)
+    assert json.loads(content) == {"history": [{"memory_id": "m-1", "content": "memory"}]}
+
+
+# ---------------------------------------------------------------- 多模态请求体
+
+
+def test_text_only_content_is_sent_as_text_block() -> None:
+    seen: dict = {}
+
+    _llm(_recording_handler(seen)).complete_json(
+        _request(content=[_text("a red bicycle")]), PerceptionResult
+    )
+
+    assert seen["body"]["messages"][0]["role"] == "system"
+    assert seen["body"]["messages"][0]["content"] == "system prompt"
+    assert _user_content(seen) == [{"type": "text", "text": "a red bicycle"}]
+
+
+def test_image_only_content_is_sent_as_image_block() -> None:
+    seen: dict = {}
+
+    _llm(_recording_handler(seen)).complete_json(
+        _request(content=[_image()]), PerceptionResult
+    )
+
+    assert _user_content(seen) == [{"type": "image_url", "image_url": {"url": _DATA_URL}}]
+
+
+def test_mixed_content_preserves_block_order() -> None:
+    seen: dict = {}
+
+    _llm(_recording_handler(seen)).complete_json(
+        _request(content=[_text("first"), _image(), _text("second")]), PerceptionResult
+    )
+
+    blocks = _user_content(seen)
+    assert [block["type"] for block in blocks] == ["text", "image_url", "text"]
+    assert blocks[0]["text"] == "first"
+    assert blocks[1]["image_url"]["url"] == _DATA_URL
+    assert blocks[2]["text"] == "second"
+
+
+def test_perception_agent_sends_multimodal_blocks_over_http() -> None:
+    """端到端：感知智能体产生的最终 HTTP 请求体必须携带图片内容块。"""
+    seen: dict = {}
+    agent = PerceptionAgent(_llm(_recording_handler(seen)))
+
+    agent.extract([_text("before"), _image(), _text("after")])
+
+    blocks = _user_content(seen)
+    assert [block["type"] for block in blocks] == ["text", "image_url", "text"]
+    assert blocks[1]["image_url"]["url"] == _DATA_URL
+    assert seen["body"]["messages"][0]["role"] == "system"
+
+
+# ---------------------------------------------------------------- 重试与超时
 
 
 def test_invalid_json_is_retried_once_then_fails() -> None:
@@ -79,7 +170,7 @@ def test_invalid_json_is_retried_once_then_fails() -> None:
         return httpx.Response(200, json=_INVALID_BODY)
 
     with pytest.raises(StructuredOutputError):
-        _llm(handler).complete_json(_request(), PerceptionResult)
+        _llm(handler).complete_json(_request(payload={}), PerceptionResult)
 
     assert len(calls) == 2
 
@@ -98,7 +189,7 @@ def test_schema_violation_is_retried_and_can_succeed() -> None:
         calls.append(request)
         return next(responses)
 
-    result = _llm(handler).complete_json(_request(), PerceptionResult)
+    result = _llm(handler).complete_json(_request(payload={}), PerceptionResult)
 
     assert result.keywords == ("cat",)
     assert len(calls) == 2
@@ -112,7 +203,7 @@ def test_transport_failure_raises_model_unavailable() -> None:
         raise httpx.ConnectError("connection refused")
 
     with pytest.raises(ModelUnavailableError):
-        _llm(handler).complete_json(_request(), PerceptionResult)
+        _llm(handler).complete_json(_request(payload={}), PerceptionResult)
 
     assert len(calls) == 2
 
@@ -125,7 +216,7 @@ def test_http_error_status_is_retried_once() -> None:
         return httpx.Response(500, json={"error": "boom"})
 
     with pytest.raises(ModelUnavailableError):
-        _llm(handler).complete_json(_request(), PerceptionResult)
+        _llm(handler).complete_json(_request(payload={}), PerceptionResult)
 
     assert len(calls) == 2
 
@@ -137,10 +228,87 @@ def test_request_timeout_is_applied() -> None:
         seen["timeout"] = request.extensions.get("timeout")
         return httpx.Response(200, json=_VALID_BODY)
 
-    _llm(handler, timeout_seconds=7.0).complete_json(_request(), PerceptionResult)
+    _llm(handler, timeout_seconds=7.0).complete_json(_request(payload={}), PerceptionResult)
 
     assert seen["timeout"]["connect"] == 7.0
     assert seen["timeout"]["read"] == 7.0
+
+
+# ---------------------------------------------------------------- 重试上限
+
+
+def test_provider_attempt_cap_is_enforced() -> None:
+    """Provider 级配置突破上限时安全截断，总调用次数最多为 MAX_ATTEMPTS。"""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json=_INVALID_BODY)
+
+    llm = _llm(handler, max_attempts=5)
+
+    assert llm.max_attempts == MAX_ATTEMPTS
+    with pytest.raises(StructuredOutputError):
+        llm.complete_json(_request(payload={}), PerceptionResult)
+    assert len(calls) == MAX_ATTEMPTS
+
+
+def test_request_attempt_cap_is_enforced() -> None:
+    """请求级配置同样不能突破上限。"""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json=_INVALID_BODY)
+
+    llm = _llm(handler, max_attempts=MAX_ATTEMPTS)
+
+    with pytest.raises(StructuredOutputError):
+        llm.complete_json(_request(payload={}, max_attempts=9), PerceptionResult)
+    assert len(calls) == MAX_ATTEMPTS
+
+
+@pytest.mark.parametrize("attempts", [0, -1])
+def test_non_positive_provider_attempts_are_rejected(attempts: int) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_VALID_BODY)
+
+    with pytest.raises(ValueError):
+        _llm(handler, max_attempts=attempts)
+
+
+@pytest.mark.parametrize("attempts", [0, -3])
+def test_non_positive_request_attempts_are_rejected(attempts: int) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json=_VALID_BODY)
+
+    llm = _llm(handler)
+
+    with pytest.raises(ValueError):
+        llm.complete_json(_request(payload={}, max_attempts=attempts), PerceptionResult)
+    assert calls == []
+
+
+def test_single_attempt_is_allowed() -> None:
+    """保留只调用一次、不重试的能力。"""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json=_INVALID_BODY)
+
+    llm = _llm(handler, max_attempts=1)
+
+    assert llm.max_attempts == 1
+    with pytest.raises(StructuredOutputError):
+        llm.complete_json(_request(payload={}), PerceptionResult)
+    assert len(calls) == 1
+
+
+# ---------------------------------------------------------------- 调用记录
 
 
 def test_records_model_prompt_version_and_outcome() -> None:
@@ -148,7 +316,7 @@ def test_records_model_prompt_version_and_outcome() -> None:
         return httpx.Response(200, json=_VALID_BODY)
 
     llm = _llm(handler)
-    llm.complete_json(_request(), PerceptionResult)
+    llm.complete_json(_request(payload={}), PerceptionResult)
 
     record = llm.records[-1]
     assert record.model == "gpt-4o-mini"
@@ -164,8 +332,8 @@ def test_records_failed_attempts() -> None:
 
     llm = _llm(handler)
     with pytest.raises(StructuredOutputError):
-        llm.complete_json(_request(), PerceptionResult)
+        llm.complete_json(_request(payload={}), PerceptionResult)
 
     record = llm.records[-1]
-    assert record.attempts == 2
+    assert record.attempts == MAX_ATTEMPTS
     assert record.succeeded is False

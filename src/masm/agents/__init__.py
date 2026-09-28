@@ -1,10 +1,15 @@
 """有限职责的智能体角色（由确定性编排器调用，不互相发起无边界循环）。"""
 
-from pathlib import Path
+from importlib import resources
 
-PROMPT_DIR = Path(__file__).parent / "prompts"
+PROMPT_PACKAGE = "masm.agents"
+PROMPT_DIRNAME = "prompts"
 
 
 def load_prompt(name: str) -> str:
-    """读取智能体 Prompt 文件（UTF-8）。"""
-    return (PROMPT_DIR / name).read_text(encoding="utf-8")
+    """读取智能体 Prompt 包资源（UTF-8），兼容源码树与安装后的 wheel。"""
+    return (
+        resources.files(PROMPT_PACKAGE)
+        .joinpath(PROMPT_DIRNAME, name)
+        .read_text(encoding="utf-8")
+    )

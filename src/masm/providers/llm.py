@@ -1,24 +1,28 @@
 """结构化模型 Provider 接口与 OpenAI 兼容实现。
 
-Provider 负责超时、一次重试、JSON 解析与 Pydantic Schema 校验，并记录模型名、
-Prompt 版本与调用结果；记录中不含任何原始内容。
+Provider 负责超时、至多一次重试、JSON 解析与 Pydantic Schema 校验，并把官方内容分片
+转换为厂商格式。记录中不含任何原始内容。
 """
 
 import json
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 import httpx
 from pydantic import BaseModel
 
+from masm.schemas.content import ContentPart, TextPart
+
 T = TypeVar("T", bound=BaseModel)
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
-# 首次调用 + 一次重试。
-DEFAULT_MAX_ATTEMPTS = 2
+
+# 首次调用 + 至多一次重试：任何 Provider 级或请求级配置都不能突破该上限。
+MAX_ATTEMPTS = 2
+DEFAULT_MAX_ATTEMPTS = MAX_ATTEMPTS
 
 
 class ModelUnavailableError(RuntimeError):
@@ -33,13 +37,17 @@ class StructuredOutputError(RuntimeError):
 class ModelRequest:
     """一次结构化模型调用的输入。
 
+    ``content`` 为保持原始顺序的官方内容分片，由 Provider 转换为厂商格式的多模态内容块；
+    未提供 ``content`` 时，``payload`` 以 JSON 文本形式发送（用于结构化输入）。
+
     ``timeout_seconds`` 与 ``max_attempts`` 为请求级覆盖项；为 None 时使用 Provider 配置。
     """
 
     prompt: str
-    payload: Mapping[str, Any]
     model: str
     prompt_version: str
+    payload: Mapping[str, Any] = field(default_factory=dict)
+    content: Sequence[ContentPart] | None = None
     timeout_seconds: float | None = None
     max_attempts: int | None = None
 
@@ -54,6 +62,32 @@ class ModelCallRecord:
     attempts: int
     latency_ms: float
     succeeded: bool
+
+
+def _effective_attempts(value: int | None, default: int) -> int:
+    """把尝试次数约束在 ``1..MAX_ATTEMPTS``。
+
+    低于 1 属于无效配置，明确拒绝；高于上限属于越界配置，安全截断。
+    """
+    if value is None:
+        return min(default, MAX_ATTEMPTS)
+    if value < 1:
+        raise ValueError("max_attempts 必须为正整数")
+    return min(value, MAX_ATTEMPTS)
+
+
+def _to_content_block(part: ContentPart) -> dict[str, Any]:
+    """官方内容分片 -> 厂商内容块（厂商格式只出现在 Provider 适配层内）。"""
+    if isinstance(part, TextPart):
+        return {"type": "text", "text": part.text}
+    return {"type": "image_url", "image_url": {"url": part.image_url.url}}
+
+
+def _user_content(request: ModelRequest) -> str | list[dict[str, Any]]:
+    """多模态分片转成保持顺序的 OpenAI 兼容内容块数组；结构化 payload 仍用 JSON 文本。"""
+    if request.content is not None:
+        return [_to_content_block(part) for part in request.content]
+    return json.dumps(request.payload, ensure_ascii=False, default=str)
 
 
 class StructuredLLM(ABC):
@@ -92,8 +126,9 @@ class StructuredLLM(ABC):
 class OpenAICompatibleLLM(StructuredLLM):
     """OpenAI 兼容的 JSON Schema 模式 Provider。
 
-    支持请求级超时、至多一次重试、JSON Schema 输出约束与 Pydantic 校验。
-    传输层失败抛出 :class:`ModelUnavailableError`，输出不合规则抛出
+    支持请求级超时、至多一次重试、JSON Schema 输出约束与 Pydantic 校验；
+    多模态 ``content`` 会原样转换为 ``text`` / ``image_url`` 内容块数组。
+    传输层失败抛出 :class:`ModelUnavailableError`，输出不合规抛出
     :class:`StructuredOutputError`。
     """
 
@@ -113,12 +148,17 @@ class OpenAICompatibleLLM(StructuredLLM):
         self._api_key = api_key
         self._client = client
         self._timeout_seconds = timeout_seconds
-        self._max_attempts = max(1, max_attempts)
+        self._max_attempts = _effective_attempts(max_attempts, DEFAULT_MAX_ATTEMPTS)
+
+    @property
+    def max_attempts(self) -> int:
+        """实际生效的最大调用次数（1..MAX_ATTEMPTS）。"""
+        return self._max_attempts
 
     def complete_json(self, request: ModelRequest, output_type: type[T]) -> T:
         """调用模型并把响应校验为 ``output_type``。"""
         body = self._build_body(request, output_type)
-        attempts = max(1, request.max_attempts or self._max_attempts)
+        attempts = _effective_attempts(request.max_attempts, self._max_attempts)
         timeout = request.timeout_seconds or self._timeout_seconds
         started = time.perf_counter()
         last_error: Exception | None = None
@@ -157,10 +197,7 @@ class OpenAICompatibleLLM(StructuredLLM):
             "model": request.model or self.model,
             "messages": [
                 {"role": "system", "content": request.prompt},
-                {
-                    "role": "user",
-                    "content": json.dumps(request.payload, ensure_ascii=False, default=str),
-                },
+                {"role": "user", "content": _user_content(request)},
             ],
             "response_format": {
                 "type": "json_schema",
@@ -171,9 +208,7 @@ class OpenAICompatibleLLM(StructuredLLM):
             },
         }
 
-    def _post(
-        self, body: dict[str, Any], output_type: type[T], timeout: float
-    ) -> T:
+    def _post(self, body: dict[str, Any], output_type: type[T], timeout: float) -> T:
         client = self._client or httpx.Client(timeout=timeout)
         try:
             response = client.post(

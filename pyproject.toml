@@ -32,6 +32,10 @@ dev = [
 where = ["src"]
 include = ["masm*"]
 
+# Prompt 是包资源：必须随 wheel 分发，供 importlib.resources 读取。
+[tool.setuptools.package-data]
+"masm.agents" = ["prompts/*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
