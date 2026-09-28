@@ -13,7 +13,7 @@ from masm.services.add_service import AddService
 from masm.services.deletion_service import DeletionService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
-from masm.storage.models import Asset, Memory, SourceMessage, User
+from masm.storage.models import Asset, Memory, SessionRecord, SourceMessage, User
 from masm.storage.repositories import MemoryRepository
 
 
@@ -165,12 +165,15 @@ def test_delete_run_rejects_path_traversal(
     outside.write_text("keep me", encoding="utf-8")
     store = AssetStore(tmp_path / "assets")
     store.base_dir.mkdir(parents=True, exist_ok=True)
+    poisoned_user = _uid("user-poison")
+    poisoned_run = _uid("r")
     with database.session() as session:
-        session.add(User(user_id="user-x"))
+        session.add(User(user_id=poisoned_user))
         session.flush()
         session.add(
             Asset(
-                user_id="user-x",
+                user_id=poisoned_user,
+                request_id=poisoned_run,
                 object_uri="../../outside.txt",
                 media_type="image/png",
                 content_hash="deadbeef",
@@ -179,9 +182,30 @@ def test_delete_run_rejects_path_traversal(
         )
         session.commit()
 
+    with database.session() as session:
+        session.add(SessionRecord(user_id=poisoned_user, session_id="poison-session"))
+        session.flush()
+        session_id = session.execute(
+            select(SessionRecord.id).where(SessionRecord.user_id == poisoned_user)
+        ).scalar_one()
+        session.add(
+            SourceMessage(
+                user_id=poisoned_user,
+                session_id=session_id,
+                request_id=poisoned_run,
+                position=0,
+                role="user",
+                content=[
+                    {"type": "image_url", "image_url": {"url": "../../outside.txt"}}
+                ],
+            )
+        )
+        session.commit()
+
     report = _service(database, asset_store, settings, embeddings).delete_run(
-        "missing-run", user_id="user-x"
+        poisoned_run, user_id=poisoned_user
     )
 
-    assert report.complete is True
+    # 关键不变量：越界路径绝不被删除（无论它被判定为可删除还是被保护）。
     assert outside.exists()
+    assert report.objects_deleted == 0

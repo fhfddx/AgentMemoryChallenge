@@ -300,7 +300,16 @@ class AssetStore:
         路径先经 ``_resolve_within_root`` 解析，越界（目录穿越）会抛 ``AssetPathError``；
         对象不存在时返回 False，便于调用方区分「已删除」与「本来就不存在」。
         """
+        if not relative or relative.startswith(("/", "\\")) or Path(relative).is_absolute():
+            raise AssetPathError("对象地址必须是存储根目录内的相对路径")
         path = self._resolve_within_root(relative)
+        # 真实路径校验：防御 `..`、符号链接与目录 junction 越界。
+        real_root = Path(os.path.realpath(self.base_dir))
+        real_parent = Path(os.path.realpath(path.parent))
+        real_path = Path(os.path.realpath(path))
+        for candidate in (real_parent, real_path):
+            if not _is_within(real_root, candidate):
+                raise AssetPathError("对象真实路径越出存储根目录")
         if not path.exists():
             return False
         path.unlink()

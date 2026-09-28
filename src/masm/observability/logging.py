@@ -5,6 +5,7 @@
 因此在白名单之外再做值级脱敏，覆盖 Bearer Token、API Key、数据 URL、连接串等。
 """
 
+import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
@@ -35,6 +36,24 @@ ALLOWED_LOG_FIELDS = frozenset(
         "agent_name",
         "attempts",
         "run_id",
+        "event",
+    }
+)
+
+# 固定事件名（事件代码）白名单：日志只能使用这些事件。
+ALLOWED_EVENTS = frozenset(
+    {
+        "log.record",
+        "http.request",
+        "http.response",
+        "search.completed",
+        "add.completed",
+        "model.call",
+        "model.failed",
+        "agent.degraded",
+        "deletion.completed",
+        "deletion.failed",
+        "dependency.unhealthy",
     }
 )
 
@@ -102,25 +121,46 @@ class RedactingFormatter(logging.Formatter):
     """在格式化阶段对消息参数与日志记录附加字段做脱敏。"""
 
     def format(self, record: logging.LogRecord) -> str:
-        saved = {
-            key: value
-            for key, value in vars(record).items()
-            if key not in _STD_RECORD_FIELDS
-        }
-        try:
-            if record.args:
-                record.args = tuple(redact_fields(arg) for arg in _as_tuple(record.args))
-            record.msg = redact_text(record.msg)
-            # 额外字段（logger.info(..., extra={...})）同样走白名单。
-            for key, value in saved.items():
-                setattr(record, key, redact_fields(value))
-            rendered = super().format(record)
-        finally:
-            record.args = saved.get("args", record.args)
-            record.msg = saved.get("msg", record.msg)
-            for key, value in saved.items():
-                setattr(record, key, value)
-        return redact_text(rendered)
+        """只输出固定事件名与白名单结构化元数据。
+
+        ``record.msg``、普通字符串参数与 ``str(exc)`` 一律不进入输出；本方法不修改
+        LogRecord（不写入任何属性），因此同一记录可安全地被其他 handler 处理。
+        """
+        payload: dict[str, Any] = {"event": _event_name(record), "status": record.levelname}
+        sources = _metadata_sources(record.args)
+        extra = getattr(record, "extra", None)
+        if isinstance(extra, Mapping):
+            sources = [*sources, extra]
+        for source in sources:
+            for key, value in redact_fields(source).items():
+                payload[key] = value
+        for key in ALLOWED_LOG_FIELDS:
+            if key in record.__dict__:
+                value = record.__dict__[key]
+                if isinstance(value, str | int | float | bool):
+                    payload[key] = redact_fields({key: value})[key]
+        if record.exc_info and record.exc_info[0] is not None:
+            # 只记录异常类型，绝不记录可能包含用户内容的 str(exc)。
+            payload["failure"] = record.exc_info[0].__name__
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _event_name(record: logging.LogRecord) -> str:
+    event = getattr(record, "event", None)
+    if isinstance(event, str) and event in ALLOWED_EVENTS:
+        return event
+    return "log.record"
+
+
+def _metadata_sources(args: Any) -> list[Mapping[str, Any]]:
+    """从 logging 参数中提取结构化 Mapping，忽略普通字符串参数与异常对象。"""
+    if args is None:
+        return []
+    if isinstance(args, Mapping):
+        return [args]
+    if isinstance(args, tuple):
+        return [item for item in args if isinstance(item, Mapping)]
+    return []
 
 
 _STD_RECORD_FIELDS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {

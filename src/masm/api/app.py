@@ -11,6 +11,7 @@ from masm.config import Settings
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.fakes import DeterministicFakeEmbeddingProvider
 from masm.retrieval.baseline import BaselineRetriever, load_channel_weights
+from masm.retrieval.response_packer import ResponsePacker
 from masm.services.add_service import AddService
 from masm.services.search_service import SearchService
 from masm.storage.assets import AssetStore
@@ -26,6 +27,7 @@ def create_app(
     limiter: RequestLimiter | None = None,
     embeddings: EmbeddingProvider | None = None,
     channel_weights: Mapping[str, float] | None = None,
+    packer: ResponsePacker | None = None,
 ) -> FastAPI:
     """根据配置构建 FastAPI 应用。"""
     application = FastAPI(title="MASM", version="0.1.0")
@@ -47,8 +49,13 @@ def create_app(
         application.state.embeddings,
         channel_weights if channel_weights is not None else load_channel_weights(),
     )
+    # 官方 /search 路径始终受响应字节上限保护，不依赖调用方手工注入。
     application.state.search_service = SearchService(
-        retriever, max_image_bytes=settings.max_image_bytes
+        retriever,
+        max_image_bytes=settings.max_image_bytes,
+        packer=packer
+        if packer is not None
+        else ResponsePacker(max_bytes=settings.max_search_response_bytes),
     )
 
     application.include_router(router)

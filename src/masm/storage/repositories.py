@@ -18,12 +18,14 @@ from sqlalchemy.orm import Session
 from masm.storage.db import Database
 from masm.storage.models import (
     Asset,
+    DeletionIntent,
     Memory,
     MemoryConflict,
     MemoryEmbedding,
     MemoryEntity,
     MemoryEvent,
     MemoryRelation,
+    ProcessingRun,
     RequestLedger,
     SessionRecord,
     SourceMessage,
@@ -151,6 +153,7 @@ class MemoryRepository:
             session.add(
                 Asset(
                     user_id=user_id,
+                    request_id=bundle.request_id,
                     object_uri=asset.object_uri,
                     media_type=asset.media_type,
                     content_hash=asset.content_hash,
@@ -685,9 +688,32 @@ class MemoryRepository:
                     for uri in _image_object_uris(content)
                 }
             )
+            # 运行级资产行：只删除属于本次运行的逻辑资产记录。
+            assets = _deleted_rows(
+                session,
+                delete(Asset).where(
+                    Asset.user_id == user_id, Asset.request_id == request_id
+                ),
+            )
             relations = 0
             conflicts = 0
             if memory_ids:
+                # 处理指向已删除记忆的悬空治理引用。
+                session.execute(
+                    update(Memory)
+                    .where(Memory.duplicate_of.in_(memory_ids))
+                    .values(duplicate_of=None)
+                )
+                session.execute(
+                    update(Memory).where(Memory.supersedes.in_(memory_ids)).values(supersedes=None)
+                )
+                for model in (MemoryEmbedding, MemoryEntity, MemoryEvent):
+                    _deleted_rows(
+                        session,
+                        delete(model).where(
+                            model.user_id == user_id, model.memory_id.in_(memory_ids)
+                        ),
+                    )
                 relations = _deleted_rows(
                     session,
                     delete(MemoryRelation).where(
@@ -705,16 +731,6 @@ class MemoryRepository:
                         MemoryConflict.memory_id.in_(memory_ids),
                     ),
                 )
-            assets = (
-                _deleted_rows(
-                    session,
-                    delete(Asset).where(
-                        Asset.user_id == user_id, Asset.object_uri.in_(object_uris)
-                    ),
-                )
-                if object_uris
-                else 0
-            )
             memories = _deleted_rows(
                 session,
                 delete(Memory).where(
@@ -728,18 +744,53 @@ class MemoryRepository:
                     SourceMessage.request_id == request_id,
                 ),
             )
+            ledger = _deleted_rows(
+                session,
+                delete(RequestLedger).where(
+                    RequestLedger.user_id == user_id,
+                    RequestLedger.request_id == request_id,
+                ),
+            )
+            runs = _deleted_rows(
+                session,
+                delete(ProcessingRun).where(
+                    ProcessingRun.user_id == user_id,
+                    ProcessingRun.request_id == request_id,
+                ),
+            )
+            # 会话只在其不再被任何运行引用时才删除。
+            for session_id in list(
+                session.execute(
+                    select(SessionRecord.id).where(SessionRecord.user_id == user_id)
+                ).scalars()
+            ):
+                remaining = int(
+                    session.execute(
+                        select(func.count()).select_from(Memory).where(
+                            Memory.session_id == session_id
+                        )
+                    ).scalar_one()
+                ) + int(
+                    session.execute(
+                        select(func.count()).select_from(SourceMessage).where(
+                            SourceMessage.session_id == session_id
+                        )
+                    ).scalar_one()
+                )
+                if remaining == 0:
+                    session.execute(delete(SessionRecord).where(SessionRecord.id == session_id))
             session.commit()
+            # 只有确认任何用户/运行都不再引用时，物理文件才允许删除。
             still_referenced = (
                 set(
                     session.execute(
-                        select(Asset.object_uri).where(
-                            Asset.user_id == user_id, Asset.object_uri.in_(object_uris)
-                        )
+                        select(Asset.object_uri).where(Asset.object_uri.in_(object_uris))
                     ).scalars()
                 )
                 if object_uris
                 else set()
             )
+            del ledger, runs
         return DeletedRun(
             request_id=request_id,
             memories=memories,
@@ -747,9 +798,111 @@ class MemoryRepository:
             sources=sources,
             relations=relations,
             conflicts=conflicts,
-            # 仍被同一用户其他运行引用的对象不删除，避免影响其他运行。
+            # 仍被任何用户/运行引用的对象不删除，避免影响其他运行。
             object_uris=tuple(uri for uri in object_uris if uri not in still_referenced),
+            shared_object_uris=tuple(sorted(still_referenced)),
         )
+
+    def deletable_object_uris(self, user_id: str, request_id: str) -> list[str]:
+        """返回该运行独占（无任何其他引用）的对象地址，供删除意图使用。"""
+        with self._database.session() as session:
+            messages: list[Any] = list(
+                session.execute(
+                    select(SourceMessage.content).where(
+                        SourceMessage.user_id == user_id,
+                        SourceMessage.request_id == request_id,
+                    )
+                ).scalars()
+            )
+            owned = sorted({uri for content in messages for uri in _image_object_uris(content)})
+            if not owned:
+                return []
+            referenced = set(
+                session.execute(
+                    select(Asset.object_uri)
+                    .where(
+                        Asset.object_uri.in_(owned),
+                        or_(
+                            Asset.user_id != user_id,
+                            Asset.request_id.is_(None),
+                            Asset.request_id != request_id,
+                        ),
+                    )
+                    .distinct()
+                ).scalars()
+            )
+        return [uri for uri in owned if uri not in referenced]
+
+    def register_deletion_intents(
+        self, user_id: str, request_id: str, object_uris: Sequence[str]
+    ) -> None:
+        """持久化对象删除意图（幂等）：已存在的 URI 保持原状态。"""
+        if not object_uris:
+            return
+        with self._database.session() as session:
+            existing = set(
+                session.execute(
+                    select(DeletionIntent.object_uri).where(
+                        DeletionIntent.user_id == user_id,
+                        DeletionIntent.request_id == request_id,
+                    )
+                ).scalars()
+            )
+            for uri in object_uris:
+                if uri in existing:
+                    continue
+                session.add(
+                    DeletionIntent(
+                        user_id=user_id,
+                        request_id=request_id,
+                        object_uri=uri,
+                        status="PENDING",
+                    )
+                )
+            session.commit()
+
+    def pending_deletion_uris(self, user_id: str, request_id: str) -> list[str]:
+        """返回仍未确认删除的对象地址（跨进程可恢复）。"""
+        with self._database.session() as session:
+            return list(
+                session.execute(
+                    select(DeletionIntent.object_uri)
+                    .where(
+                        DeletionIntent.user_id == user_id,
+                        DeletionIntent.request_id == request_id,
+                        DeletionIntent.status == "PENDING",
+                    )
+                    .order_by(DeletionIntent.object_uri)
+                ).scalars()
+            )
+
+    def mark_deletion_intent(
+        self,
+        user_id: str,
+        request_id: str,
+        object_uri: str,
+        *,
+        done: bool,
+        error: str | None = None,
+    ) -> None:
+        """把删除意图标记为完成，或累加一次失败尝试。"""
+        with self._database.session() as session:
+            intent = session.execute(
+                select(DeletionIntent).where(
+                    DeletionIntent.user_id == user_id,
+                    DeletionIntent.request_id == request_id,
+                    DeletionIntent.object_uri == object_uri,
+                )
+            ).scalar_one_or_none()
+            if intent is None:
+                return
+            if done:
+                intent.status = "DONE"
+                intent.last_error = None
+            else:
+                intent.attempts = intent.attempts + 1
+                intent.last_error = (error or "unknown")[:255]
+            session.commit()
 
     def conflict_peers(
         self, user_id: str, memory_ids: Sequence[UUID], limit: int

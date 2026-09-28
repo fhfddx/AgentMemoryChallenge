@@ -128,6 +128,7 @@ class DeletedRun:
     relations: int = 0
     conflicts: int = 0
     object_uris: Sequence[str] = ()
+    shared_object_uris: Sequence[str] = ()
 
 
 @dataclass(frozen=True)

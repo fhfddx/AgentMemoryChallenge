@@ -72,7 +72,7 @@ def test_migration_upgrade_downgrade_cycle(
 
     with engine.connect() as conn:
         version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0002"
+    assert version == "0003"
 
     # 0002 引入的冲突组唯一约束必须存在。
     constraint_names = {

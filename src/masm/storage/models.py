@@ -89,12 +89,16 @@ class SourceMessage(Base):
 
 
 class Asset(Base):
-    """对象地址、媒体类型、哈希、解码后大小和尺寸。"""
+    """对象地址、媒体类型、哈希、解码后大小和尺寸。
+
+    request_id 记录该资产属于哪一次运行，是运行级删除的唯一依据。
+    """
 
     __tablename__ = "assets"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     user_id: Mapped[str] = _user_fk()
+    request_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     object_uri: Mapped[str] = mapped_column(Text, nullable=False)
     media_type: Mapped[str] = mapped_column(String(128), nullable=False)
     content_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
@@ -222,6 +226,32 @@ class MemoryConflict(Base):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = _created_at()
+
+
+class DeletionIntent(Base):
+    """持久化的对象删除意图：保证删除可重试、可跨进程恢复。
+
+    status 为 PENDING 表示对象尚未确认删除（或不存在）；DONE 表示已删除或确定不存在。
+    """
+
+    __tablename__ = "deletion_intents"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "request_id", "object_uri", name="uq_deletion_intents_scope_uri"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    user_id: Mapped[str] = _user_fk()
+    request_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    object_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class ProcessingRun(Base):
