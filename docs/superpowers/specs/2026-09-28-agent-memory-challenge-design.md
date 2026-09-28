@@ -1,210 +1,210 @@
-# MASM: Agent Memory Challenge System Design
+# MASM：Agent Memory Challenge 系统设计规范
 
-**Date:** 2026-09-28  
-**Status:** Approved design, pending implementation planning  
-**Project root:** `E:\Competitions\AgentMemoryChallenge`  
-**Competition target:** Agent Memory Challenge Cycle 2, Multimodal Track, Open-source Methods Division
+**日期：** 2026-09-28  
+**状态：** 设计已批准，等待编写实施计划  
+**项目根目录：** `E:\Competitions\AgentMemoryChallenge`  
+**参赛目标：** Agent Memory Challenge Cycle 2，多模态赛道，开源方法组
 
-## 1. Purpose
+## 1. 项目目的
 
-MASM (Multi-Agent Structured Memory) is a competition-oriented multimodal long-term memory system. Its first priority is to deliver a stable, compliant Add/Search service before the competition deadline. Its second priority is to preserve clear research contributions, reproducible experiments, and ablation evidence for a later paper and prototype release.
+MASM（Multi-Agent Structured Memory，多智能体结构化记忆）是一个面向比赛的多模态长期记忆系统。第一优先级是在比赛截止前交付稳定、合规的 Add/Search 服务；第二优先级是保留明确的研究贡献、可复现实验与消融证据，用于后续论文和原型发布。
 
-The implementation must favor reliability, bounded cost, and a recoverable baseline over architectural complexity. Every advanced component must be removable without breaking the official API.
+实现时必须优先保证可靠性、成本可控和基线可恢复，避免不必要的架构复杂度。任何增强组件被移除后，都不得破坏官方 API。
 
-## 2. Success Criteria
+## 2. 成功标准
 
-The project is successful when all of the following are true:
+同时满足以下条件时，项目视为成功：
 
-1. The public Health, Add, and Search endpoints conform to the official competition contract.
-2. An accepted Add is durable and immediately searchable.
-3. No retrieval path can return data belonging to another user.
-4. A baseline system can be submitted even if advanced agent modules are disabled.
-5. The full MASM system can be compared with the baseline on at least one public benchmark.
-6. The repository, deployed endpoint, configuration, and experiment records are reproducible.
-7. Search returns memory evidence only and never generates or disguises a final answer.
+1. 公网 Health、Add 和 Search 接口符合比赛官方契约。
+2. Add 返回成功后，数据已经持久化并能立即被 Search 检索。
+3. 任何检索路径都不能返回其他用户的数据。
+4. 即使关闭高级智能体模块，基线系统仍可独立提交。
+5. 完整 MASM 系统能在至少一个公开基准上与基线进行对比。
+6. 仓库、线上服务、配置和实验记录均可复现。
+7. Search 只返回记忆证据，绝不生成最终答案，也不把答案伪装成记忆。
 
-## 3. Scope
+## 3. 项目范围
 
-### 3.1 Included
+### 3.1 本轮包含
 
-- Text memories.
-- Image memories.
-- Ordered mixed text-and-image messages.
-- Multi-user and multi-session isolation.
-- Structured memory extraction.
-- Text, image, lexical, temporal, metadata, and relation retrieval.
-- Duplicate, update, and conflict handling.
-- Official Health, Add, and Search endpoints.
-- Local evaluation, deployment, observability, and experiment tracking.
+- 文本记忆。
+- 图片记忆。
+- 保持原始顺序的文本与图片混合消息。
+- 多用户和多会话隔离。
+- 结构化记忆抽取。
+- 文本、图片、关键词、时间、元数据和关系检索。
+- 重复、更新和冲突处理。
+- 官方 Health、Add 和 Search 接口。
+- 本地评测、部署、可观测性和实验记录。
 
-### 3.2 Excluded from Cycle 2
+### 3.2 Cycle 2 暂不包含
 
-- Audio and video processing.
-- Unbounded autonomous agent loops.
-- A dedicated graph database.
-- Large-scale model training or fine-tuning.
-- An administrative web interface.
-- General chat functionality.
-- Final-answer generation inside Search.
+- 音频和视频处理。
+- 无边界的自治智能体循环。
+- 独立图数据库。
+- 大规模模型训练或微调。
+- 管理后台或前端界面。
+- 通用聊天功能。
+- Search 内部的最终答案生成。
 
-The data model may contain modality extension fields, but no implementation work is allocated to audio or video in this cycle.
+数据模型可以保留模态扩展字段，但 Cycle 2 不安排音频和视频的实现工作。
 
-## 4. Architecture
+## 4. 总体架构
 
-MASM is a modular monolith. It is deployed as one API application backed by PostgreSQL with pgvector and S3-compatible object storage. External model services are accessed through provider adapters.
+MASM 采用模块化单体架构。系统作为一个 API 应用部署，使用 PostgreSQL、pgvector 和兼容 S3 的对象存储。外部模型服务统一通过 Provider 适配层访问。
 
 ```text
-AML Evaluation Platform
+AML 评测平台
           |
-    API / Authentication
+     API / 身份认证
           |
  +--------+---------+
  |                  |
-Add Pipeline     Search Pipeline
+Add 写入流水线    Search 检索流水线
  |                  |
-Content Parser    Query Analyzer
+内容解析器         查询分析器
  |                  |
-Perception Agent  Hybrid Retrieval
+感知智能体         混合召回
  |                  |
-Temporal Agent    Relation Expansion
+时序关系智能体     关系扩展
  |                  |
-Curator Agent     Evidence Reranker
+记忆管理智能体     证据重排
  |                  |
-Persistence       Response Packer
+持久化             响应打包
  +--------+---------+
           |
  PostgreSQL + pgvector
           |
-  S3 Object Storage
+  S3 对象存储
 ```
 
-The agents are bounded roles invoked by a deterministic orchestrator. They are not independent services and cannot call one another in an unbounded loop.
+智能体是由确定性编排器调用的有限职责角色，不是独立服务，也不能互相发起无边界循环调用。
 
-## 5. Add Pipeline
+## 5. Add 写入流水线
 
-The Add path executes the following ordered stages:
+Add 按以下顺序执行：
 
-1. Authenticate the request.
-2. Validate the official request schema and payload limits.
-3. Check `request_id` for idempotency.
-4. Decode content parts without changing their original order.
-5. Store immutable source evidence and image assets.
-6. Run the Perception Agent.
-7. Run the Temporal-Relation Agent.
-8. Retrieve a bounded set of related memories for the same user.
-9. Run the Memory Curator Agent.
-10. Validate proposed actions with deterministic code.
-11. Persist structured data, embeddings, and relation edges in one transactional unit.
-12. Verify that the new memory is searchable.
-13. Record the request in the idempotency ledger and return success.
+1. 对请求进行身份认证。
+2. 校验官方请求 Schema 和载荷限制。
+3. 使用 `request_id` 检查幂等性。
+4. 解码内容分片，不改变原始顺序。
+5. 保存不可变的原始证据和图片资源。
+6. 执行感知智能体。
+7. 执行时序关系智能体。
+8. 在同一用户范围内召回数量受限的相关历史记忆。
+9. 执行记忆管理智能体。
+10. 使用确定性程序校验智能体提出的动作。
+11. 在同一事务单元中持久化结构化数据、向量和关系边。
+12. 验证新记忆已经能够被检索。
+13. 将请求写入幂等账本并返回成功。
 
-An Add response may report success only after durable persistence and indexing. A repeated `request_id` must return the prior logical result without creating duplicate memories.
+只有完成持久化和索引后，Add 才能返回成功。重复的 `request_id` 必须返回先前的逻辑结果，不能重复创建记忆。
 
-### 5.1 Graceful Degradation
+### 5.1 降级策略
 
-If an advanced agent fails or returns invalid structured output, the orchestrator retries or repairs the output once. If that also fails, the system stores the original evidence, a basic summary when available, and retrievable embeddings. Agent failure must not corrupt existing memories.
+如果高级智能体失败或返回不符合 Schema 的结构化输出，编排器最多进行一次重试或修复。如果仍然失败，系统保存原始证据、可获得的基础摘要和可检索向量。智能体故障不得破坏已有记忆。
 
-## 6. Agent Responsibilities
+## 6. 智能体职责
 
-### 6.1 Perception Agent
+### 6.1 感知智能体（Perception Agent）
 
-The Perception Agent receives ordered text and image content and returns schema-validated JSON containing:
+感知智能体接收保持原始顺序的文本和图片内容，返回通过 Schema 校验的 JSON，其中包括：
 
-- Faithful image descriptions.
-- OCR text.
-- People, objects, locations, and scenes.
-- Directly observable actions and events.
-- Retrieval keywords.
-- Language and modality metadata.
-- Confidence and provenance for derived fields.
+- 忠实的图片描述。
+- OCR 文字。
+- 人物、物体、地点和场景。
+- 可以直接观察到的动作和事件。
+- 检索关键词。
+- 语言和模态元数据。
+- 派生字段的置信度和来源。
 
-It must not infer facts that are not observable in the source.
+它不得推断原始证据中无法观察到的事实。
 
-### 6.2 Temporal-Relation Agent
+### 6.2 时序关系智能体（Temporal-Relation Agent）
 
-The Temporal-Relation Agent receives perception output and a bounded set of same-user historical candidates. It returns:
+时序关系智能体接收感知结果和数量受限的同用户历史候选，返回：
 
-- Absolute and relative time expressions.
-- Normalized event time and time precision.
-- Entity, event, and location relations.
-- Event ordering.
-- Candidate supplement, update, duplicate, and conflict links.
-- A confidence value and supporting source references for each relation.
+- 绝对和相对时间表达。
+- 归一化事件时间及其精度。
+- 实体、事件和地点关系。
+- 事件先后顺序。
+- 补充、更新、重复和冲突候选关系。
+- 每条关系的置信度及其原始证据引用。
 
-It proposes relations but cannot mutate storage.
+它只能提出关系建议，不能修改存储。
 
-### 6.3 Memory Curator Agent
+### 6.3 记忆管理智能体（Memory Curator Agent）
 
-The Memory Curator Agent may propose only these actions:
+记忆管理智能体只能提出以下动作：
 
-- `CREATE`: create a new memory.
-- `LINK`: connect the new evidence to existing memories.
-- `MERGE`: mark substantially duplicate content and combine retrieval metadata.
-- `SUPERSEDE`: mark a prior derived claim as replaced by explicit newer evidence.
-- `CONFLICT`: retain both claims and place them in the same conflict group.
+- `CREATE`：创建新记忆。
+- `LINK`：把新证据与已有记忆连接起来。
+- `MERGE`：标记高度重复的内容并合并检索元数据。
+- `SUPERSEDE`：将已有派生结论标记为被明确的新证据替代。
+- `CONFLICT`：保留双方，并将其加入同一个冲突组。
 
-All actions are validated by code. The agent never writes directly to the database. Immutable source evidence is never overwritten by a curator action.
+所有动作都必须经过确定性程序校验。智能体不能直接写数据库，任何管理动作都不得覆盖不可变的原始证据。
 
-## 7. Memory Model
+## 7. 记忆数据模型
 
-The logical memory record contains:
+逻辑记忆记录包含：
 
 ```text
 MemoryRecord
-+-- identity
++-- identity（身份）
 |   +-- memory_id
 |   +-- user_id
 |   +-- session_id
 |   +-- request_id
-+-- source
++-- source（来源）
 |   +-- ordered_content_parts
 |   +-- original_text
 |   +-- image_object_uri
-+-- semantics
++-- semantics（语义）
 |   +-- summary
 |   +-- entities
 |   +-- events
 |   +-- keywords
 |   +-- modality
-+-- temporal
++-- temporal（时间）
 |   +-- event_time
 |   +-- time_precision
 |   +-- observed_at
-+-- governance
++-- governance（治理）
 |   +-- confidence
 |   +-- status
 |   +-- duplicate_of
 |   +-- supersedes
 |   +-- conflict_group_id
-+-- retrieval
++-- retrieval（检索）
     +-- text_embedding
     +-- image_embedding
 ```
 
-### 7.1 Required Tables
+### 7.1 必需数据表
 
-- `users`: anonymous competition user identities.
-- `sessions`: sessions and timestamps.
-- `source_messages`: immutable source messages and ordered parts.
-- `assets`: object URI, media type, hash, decoded size, and dimensions.
-- `memories`: structured memory units.
-- `memory_entities`: people, locations, objects, and canonical labels.
-- `memory_events`: events and normalized temporal attributes.
-- `memory_relations`: directed typed edges among memories, entities, and events.
-- `memory_embeddings`: text and image embeddings with model versions.
-- `memory_conflicts`: conflict groups and version relationships.
-- `processing_runs`: model, prompt, code, latency, and outcome metadata.
-- `request_ledger`: idempotency state for Add requests.
+- `users`：匿名比赛用户标识。
+- `sessions`：会话及时间戳。
+- `source_messages`：不可变的原始消息和有序内容分片。
+- `assets`：对象地址、媒体类型、哈希、解码后大小和尺寸。
+- `memories`：结构化记忆单元。
+- `memory_entities`：人物、地点、物体和规范化标签。
+- `memory_events`：事件及归一化时间属性。
+- `memory_relations`：记忆、实体和事件之间的有向类型边。
+- `memory_embeddings`：带模型版本的文本和图片向量。
+- `memory_conflicts`：冲突组和版本关系。
+- `processing_runs`：模型、Prompt、代码版本、延迟和处理结果元数据。
+- `request_ledger`：Add 请求的幂等状态。
 
-Every queryable record must contain or resolve to `user_id`. Storage APIs must require a user scope rather than accepting it as an optional filter.
+每条可检索记录必须直接包含或能够解析出 `user_id`。存储层 API 必须强制要求用户作用域，不能把用户过滤设计为可选项。
 
-## 8. Search Pipeline
+## 8. Search 检索流水线
 
-Search runs four bounded stages: query analysis, hybrid recall, relation expansion, and evidence ranking.
+Search 包含四个有明确边界的阶段：查询分析、混合召回、关系扩展和证据排序。
 
-### 8.1 Query Analysis
+### 8.1 查询分析
 
-The analyzer emits a schema containing:
+查询分析器输出以下 Schema：
 
 ```json
 {
@@ -218,189 +218,189 @@ The analyzer emits a schema containing:
 }
 ```
 
-At most three subqueries may be produced. Rule-based parsing handles simple cases. A language model is used only for complex temporal or relational queries.
+最多生成三个子查询。简单情况使用规则解析，只有复杂时序或关系查询才调用语言模型。
 
-### 8.2 Hybrid Recall
+### 8.2 混合召回
 
-The system performs same-user retrieval through:
+系统始终在同一用户范围内执行以下检索：
 
-- PostgreSQL full-text search for names, OCR, and exact terms.
-- Text-vector search for semantic similarity.
-- Image-vector search for visual similarity and image queries.
-- Entity, location, and time filters.
+- 使用 PostgreSQL 全文检索匹配姓名、OCR 和精确词语。
+- 使用文本向量检索匹配语义。
+- 使用图片向量检索匹配视觉相似内容和图片查询。
+- 使用实体、地点和时间条件进行过滤。
 
-Results are combined with weighted Reciprocal Rank Fusion. Channel weights are configuration values selected on public development data, not embedded in application code.
+各通道结果使用加权倒数排名融合（Reciprocal Rank Fusion）合并。通道权重是通过公开开发数据选取的配置项，不得写死在业务代码中。
 
-### 8.3 Relation Expansion
+### 8.3 关系扩展
 
-Only high-ranked seed memories receive relation expansion, and expansion is limited to one hop. Expansion may add memories from the same event, adjacent events in time, linked entities, or the opposing member of a conflict group. The system does not perform recursive agentic graph exploration in Cycle 2.
+只有高排名种子记忆才执行关系扩展，并且最多扩展一跳。扩展可以补充同一事件的记忆、时间相邻事件、关联实体或冲突组中的另一条证据。Cycle 2 不执行递归式智能体图搜索。
 
-### 8.4 Evidence Ranking
+### 8.4 证据排序
 
-Candidates are scored by:
+候选项按以下因素评分：
 
-- Query relevance.
-- Entity, time, location, and relation match.
-- Evidence completeness and provenance.
-- Duplication penalty.
-- Conflict-group coverage.
-- Result diversity.
+- 与查询的相关性。
+- 实体、时间、地点和关系匹配程度。
+- 证据完整性和来源。
+- 重复惩罚。
+- 冲突组覆盖。
+- 结果多样性。
 
-Deterministic rules first reduce the set. A lightweight reranker may score the remaining leading candidates. The reranker judges relevance only and cannot write an answer.
+系统先使用确定性规则缩小候选集，再由轻量重排器对排名靠前的候选评分。重排器只能判断相关性，不能生成答案。
 
-### 8.5 Response Packing
+### 8.5 响应打包
 
-The packer returns no more than the requested `top_k`, including requests with `top_k=100`. It enforces per-image and total response limits, preserves multimodal part order, avoids repeated evidence, and keeps the highest-ranked complete items when truncation is necessary. Visual queries prioritize relevant image evidence; text queries do not include unrelated images merely because they are available.
+打包器返回的证据数量不能超过请求中的 `top_k`，包括 `top_k=100` 的情况。它必须限制单张图片和总响应大小、保持多模态内容顺序、避免重复证据，并在需要裁剪时保留排名最高的完整证据。视觉查询优先返回相关图片证据；文本查询不能因为图片存在就返回无关图片。
 
-## 9. Public API
+## 9. 公共 API
 
-The only required public endpoints are:
+必须公开的接口只有：
 
 - `GET /health`
 - `POST /add`
 - `POST /search`
 
-The public adapter must match the official request and response schemas. Internal domain models may be richer but must not leak extra answer-like content into the official Search response.
+公共适配层必须符合官方请求和响应 Schema。内部领域模型可以包含更丰富的信息，但不得在官方 Search 响应中泄露类似最终答案的额外内容。
 
-Supported authentication methods are configurable Bearer, Token, or `X-Api-Key`. The service enforces schema validation, image decoding and format validation, payload limits, idempotency, request timeouts, rate limits, and bounded concurrency.
+可配置支持 Bearer、Token 或 `X-Api-Key` 身份认证。服务必须执行 Schema 校验、图片解码与格式校验、载荷限制、幂等控制、请求超时、速率限制和并发限制。
 
-### 9.1 Error Semantics
+### 9.1 错误语义
 
-| HTTP status | Meaning |
+| HTTP 状态码 | 含义 |
 | --- | --- |
-| 400 | Malformed JSON or invalid content structure |
-| 401/403 | Missing or invalid authentication |
-| 413 | Image or request exceeds configured limits |
-| 422 | Valid schema but content cannot be processed |
-| 429 | Rate or concurrency limit reached |
-| 500 | Unexpected internal failure |
-| 503 | Required model or storage dependency unavailable |
+| 400 | JSON 格式错误或内容结构无效 |
+| 401/403 | 缺少认证或认证无效 |
+| 413 | 图片或请求超过配置限制 |
+| 422 | Schema 合法但内容无法处理 |
+| 429 | 达到速率或并发限制 |
+| 500 | 未预期的内部故障 |
+| 503 | 必需的模型或存储依赖不可用 |
 
-Retriable errors include a machine-readable error code and request identifier but never raw competition content.
+可重试错误应包含机器可读的错误码和请求标识，但不能包含原始比赛内容。
 
-## 10. Model and Provider Strategy
+## 10. 模型与 Provider 策略
 
-All models are accessed through interfaces that record model name, version, prompt version, token usage, latency, and outcome. The initial model policy is:
+所有模型都通过统一接口访问，并记录模型名称、版本、Prompt 版本、token 用量、延迟和处理结果。初始模型策略为：
 
-- Perception and relation extraction: an adapter compatible with the model required or allowed by the official competition rules, initially `gpt-4o-mini` where applicable.
-- Text embedding: a replaceable multilingual embedding provider.
-- Image embedding: a lightweight CLIP- or SigLIP-family encoder.
-- Reranking: a lightweight reranker or tightly constrained relevance-scoring model.
+- 感知和关系抽取：适配比赛官方要求或允许的模型，在适用时初始使用 `gpt-4o-mini`。
+- 文本向量：可替换的多语言 Embedding Provider。
+- 图片向量：轻量 CLIP 或 SigLIP 系列编码器。
+- 重排：轻量 Reranker 或受到严格约束的相关性评分模型。
 
-DeepSeek is used primarily as an implementation harness and may be used for offline analysis. The deployed system must not depend on undocumented harness behavior. No provider-specific object may cross the provider adapter boundary.
+DeepSeek 主要作为实现 Harness，也可用于离线分析。线上系统不能依赖未形成文档的 Harness 行为。Provider 特有的数据对象不能越过 Provider 适配层边界。
 
-## 11. Deployment
+## 11. 部署设计
 
-The reference deployment uses one low-cost CPU cloud host and external model APIs:
+参考部署使用一台低成本 CPU 云主机，并调用外部模型 API：
 
 ```text
-Caddy or Nginx
+Caddy 或 Nginx
       |
-   HTTPS
+    HTTPS
       |
-FastAPI application
+FastAPI 应用
       |
 PostgreSQL + pgvector
       |
-Persistent volume
+持久化磁盘
 
-External dependencies:
-- S3-compatible private object storage
-- Model APIs
+外部依赖：
+- 私有的兼容 S3 对象存储
+- 模型 API
 ```
 
-The implementation stack is Python 3.11, FastAPI, Pydantic, SQLAlchemy, Alembic, PostgreSQL, pgvector, an S3-compatible client, HTTPX, Docker Compose, Pytest, and Caddy or Nginx.
+实现技术栈为 Python 3.11、FastAPI、Pydantic、SQLAlchemy、Alembic、PostgreSQL、pgvector、兼容 S3 的客户端、HTTPX、Docker Compose、Pytest，以及 Caddy 或 Nginx。
 
-Secrets are injected through environment variables. Only `.env.example` is committed. The deployment must survive application restarts without losing accepted memories.
+密钥通过环境变量注入，仓库只提交 `.env.example`。服务必须在应用重启后保留所有已经接受的记忆。
 
-## 12. Security, Privacy, and Compliance
+## 12. 安全、隐私与合规
 
-The system must:
+系统必须做到：
 
-- Enforce user, session, task, and evaluation-run isolation.
-- Keep API secrets out of source control and logs.
-- Avoid logging raw text, images, Base64 data, or model prompts containing evaluation content.
-- Keep the database and object storage private.
-- Use HTTPS for public traffic.
-- Never use evaluation data for training.
-- Provide deletion by evaluation run and retention deadline.
-- Avoid hard-coded questions, answers, benchmark-specific rules, or leaked data.
-- Disclose reused papers, repositories, licenses, and modifications.
+- 严格隔离用户、会话、任务和评测运行。
+- API 密钥不得进入源代码和日志。
+- 日志不得记录原始文本、图片、Base64 数据或包含评测内容的模型 Prompt。
+- 数据库和对象存储不得公开访问。
+- 公网流量使用 HTTPS。
+- 评测数据不得用于训练。
+- 支持按评测运行和保留期限删除数据。
+- 禁止硬编码问题、答案、基准特征或泄漏数据。
+- 披露复用的论文、仓库、许可证和修改内容。
 
-Evaluation content must be deleted within the official retention period. Operational metadata may remain only if it cannot reconstruct evaluation content.
+评测内容必须在官方规定的保留期限内删除。只有在无法重建评测内容的前提下，才可继续保留运行元数据。
 
-## 13. Observability
+## 13. 可观测性
 
-Structured logs and metrics include:
+结构化日志和指标包括：
 
-- Request identifier and anonymized user identifier.
-- Add and Search latency.
-- Agent execution status and degradation reason.
-- Model request count, token use, latency, and estimated cost.
-- Candidate counts from each retrieval channel.
-- Returned evidence count.
-- HTTP status and dependency health.
+- 请求标识和匿名化用户标识。
+- Add 和 Search 延迟。
+- 智能体执行状态和降级原因。
+- 模型请求次数、token 用量、延迟和估算成本。
+- 各检索通道的候选数量。
+- 返回证据数量。
+- HTTP 状态和依赖健康状态。
 
-Required aggregate metrics are Add/Search success rates, P50/P95 latency, model failure rate, mean request cost, degradation rate, and storage health. Raw competition content is excluded.
+必须提供的聚合指标包括 Add/Search 成功率、P50/P95 延迟、模型失败率、平均请求成本、降级率和存储健康状态。不得记录原始比赛内容。
 
-## 14. Testing Strategy
+## 14. 测试策略
 
-### 14.1 Unit Tests
+### 14.1 单元测试
 
-- Official and internal schemas.
-- Base64 and media validation.
-- User-scope enforcement.
-- Add idempotency.
-- Temporal normalization.
-- Duplicate and conflict rules.
-- Rank fusion.
-- Response-size and context-budget enforcement.
+- 官方和内部 Schema。
+- Base64 与媒体格式校验。
+- 用户作用域强制检查。
+- Add 幂等性。
+- 时间归一化。
+- 重复和冲突规则。
+- 排名融合。
+- 响应大小和上下文预算控制。
 
-### 14.2 Integration Tests
+### 14.2 集成测试
 
-- Add followed by immediate Search.
-- Text-to-text retrieval.
-- Image-to-text and text-to-image retrieval.
-- Mixed-content part ordering.
-- Multiple sessions for one user.
-- Similar memories belonging to different users.
-- New and old information conflicts.
-- Model timeout and graceful degradation.
-- Database rollback and service restart durability.
+- Add 后立即 Search。
+- 文本到文本检索。
+- 图片到文本和文本到图片检索。
+- 混合内容分片顺序。
+- 同一用户的多个会话。
+- 不同用户拥有相似记忆。
+- 新旧信息冲突。
+- 模型超时和降级处理。
+- 数据库事务回滚和服务重启后的持久性。
 
-### 14.3 Contract Tests
+### 14.3 契约测试
 
-- Official field names and response shapes.
-- Authentication variants.
-- `top_k`, including 100.
-- Supported image types and size limits.
-- Health behavior.
-- 429 and retry semantics.
+- 官方字段名和响应结构。
+- 各种认证方式。
+- `top_k`，包括 100。
+- 支持的图片类型和大小限制。
+- Health 行为。
+- 429 和重试语义。
 
-### 14.4 Isolation Tests
+### 14.4 隔离测试
 
-Isolation tests are release blockers. They create nearly identical memories for multiple users and verify that every lexical, vector, metadata, relation, conflict, and fallback path returns only the requested user's evidence.
+隔离测试是发布阻断项。测试应为多个用户创建高度相似的记忆，并验证全文、向量、元数据、关系、冲突和降级路径都只返回目标用户的证据。
 
-## 15. Experimental Design
+## 15. 实验设计
 
-Three systems are compared:
+对比以下三个系统：
 
-- **B0:** image description plus one vector retrieval channel.
-- **B1:** structured memory plus hybrid retrieval.
-- **MASM:** three-agent structured write pipeline, hybrid retrieval, relation expansion, and conflict-aware reranking.
+- **B0：** 图片描述加单一向量检索通道。
+- **B1：** 结构化记忆加混合检索。
+- **MASM：** 三智能体结构化写入、混合检索、关系扩展和冲突感知重排。
 
-Ablations remove one of the following at a time:
+每次消融实验移除以下一个组件：
 
-- Temporal-Relation Agent.
-- Memory Curator Agent.
-- Relation expansion.
-- Image-vector retrieval.
-- Conflict handling.
-- Multi-channel retrieval.
+- 时序关系智能体。
+- 记忆管理智能体。
+- 关系扩展。
+- 图片向量检索。
+- 冲突处理。
+- 多通道检索。
 
-Metrics include Recall@10, Recall@100, MRR, nDCG, downstream answer accuracy, Add/Search latency, API cost, model calls, and degradation rate. Experiments begin with controlled subsets of ATM-Bench and Mem-Gallery. Dataset size is increased only after the full pipeline and metrics are stable.
+指标包括 Recall@10、Recall@100、MRR、nDCG、下游问答正确率、Add/Search 延迟、API 成本、模型调用次数和降级率。实验从 ATM-Bench 和 Mem-Gallery 的可控子集开始，只在完整流程和指标稳定后扩大数据规模。
 
-## 16. Repository Layout
+## 16. 仓库目录
 
 ```text
 E:\Competitions\AgentMemoryChallenge
@@ -439,60 +439,60 @@ E:\Competitions\AgentMemoryChallenge
 +-- artifacts
 ```
 
-Runtime artifacts, databases, caches, images, secrets, and evaluation data are excluded from version control.
+运行产物、数据库、缓存、图片、密钥和评测数据均不得进入版本控制。
 
-## 17. Responsibilities and Handoff Contract
+## 17. 职责与交接契约
 
-### 17.1 Architecture Owner
+### 17.1 架构负责人
 
-Codex owns architecture, public and internal contracts, task decomposition, acceptance criteria, implementation review, experiment analysis, and scope control.
+Codex 负责总体架构、公共与内部契约、任务拆分、验收标准、实现审查、实验分析和范围控制。
 
-### 17.2 Implementation Harness
+### 17.2 实现 Harness
 
-DeepSeek Harness implements bounded tasks, adds corresponding tests, runs required verification commands, and reports unresolved failures. It must not change frozen public interfaces, storage invariants, or module boundaries without an approved design amendment.
+DeepSeek Harness 负责执行边界明确的任务、补充相应测试、运行要求的验证命令并报告未解决故障。未经设计变更批准，它不得修改已冻结的公共接口、存储不变量或模块边界。
 
-Every harness task must state:
+每个 Harness 任务必须明确：
 
-- Objective.
-- Allowed files.
-- Forbidden boundaries.
-- Input and output contracts.
-- Implementation constraints.
-- Test commands.
-- Acceptance criteria.
-- Failure report format.
+- 任务目标。
+- 允许修改的文件。
+- 禁止修改的边界。
+- 输入和输出契约。
+- 实现约束。
+- 测试命令。
+- 验收标准。
+- 失败报告格式。
 
-## 18. Delivery Sequence
+## 18. 交付顺序
 
-1. Repository skeleton and official API schemas.
-2. PostgreSQL, object storage, migrations, and user isolation.
-3. Baseline Add and Search.
-4. Docker deployment and official Smoke readiness.
-5. Three-agent Add pipeline.
-6. Hybrid retrieval and one-hop relation expansion.
-7. Conflict handling and evidence reranking.
-8. Public benchmark experiments and ablations.
-9. Reliability, cost, privacy, and security review.
-10. Version freeze and Full evaluation.
+1. 仓库骨架和官方 API Schema。
+2. PostgreSQL、对象存储、数据库迁移和用户隔离。
+3. 基线 Add 和 Search。
+4. Docker 部署并达到官方 Smoke 测试要求。
+5. 三智能体 Add 流水线。
+6. 混合检索和一跳关系扩展。
+7. 冲突处理和证据重排。
+8. 公开基准实验和消融实验。
+9. 可靠性、成本、隐私和安全审查。
+10. 冻结版本并执行 Full 评测。
 
-Each numbered stage must leave a runnable version. Advanced work cannot remove the ability to deploy the last accepted baseline.
+每个阶段结束时都必须留下可运行版本。高级功能开发不能破坏上一个已验收基线的部署能力。
 
-## 19. Release Gates
+## 19. 发布门槛
 
-A competition release is blocked unless:
+存在以下任一情况时，不得发布比赛版本：
 
-- Health, Add, and Search contract tests pass.
-- Add is durable and immediately searchable.
-- All isolation tests pass.
-- The endpoint is reachable over public HTTPS.
-- Restart durability is verified.
-- Model failures produce a controlled error or documented degradation.
-- Logs contain no raw evaluation content.
-- The README enables third-party reproduction.
-- The deployed version matches the frozen repository revision.
-- At least one public benchmark compares a baseline with MASM.
-- A rollback-ready baseline image and configuration are retained.
+- Health、Add 或 Search 契约测试未通过。
+- Add 结果不能持久化或无法立即检索。
+- 任一隔离测试未通过。
+- 公网 HTTPS 无法访问服务。
+- 未验证重启后的数据持久性。
+- 模型故障不能产生受控错误或文档化降级。
+- 日志包含原始评测内容。
+- README 不能支持第三方复现。
+- 线上版本与冻结仓库版本不一致。
+- 未在至少一个公开基准上比较基线与 MASM。
+- 没有保留可回滚的基线镜像和配置。
 
-## 20. Design Rationale
+## 20. 设计理由
 
-The chosen design sits between a low-risk multimodal RAG baseline and a high-risk autonomous graph-memory system. Structured role separation provides a publishable multi-agent contribution, while deterministic orchestration and a modular baseline keep the competition submission feasible. PostgreSQL with pgvector is sufficient for the expected scale and avoids operating an additional graph database. Provider adapters preserve model flexibility, and strict evidence-only Search behavior keeps the system aligned with the competition's evaluation boundary.
+本设计位于低风险多模态 RAG 基线和高风险自治图记忆系统之间。职责清晰的智能体拆分能够形成可发表的多智能体贡献；确定性编排和模块化基线则保证比赛提交的可行性。PostgreSQL 与 pgvector 足以支持预期规模，无需额外运维图数据库。Provider 适配层保留模型替换能力，严格的“只返回证据”Search 行为则保证系统符合比赛评测边界。
