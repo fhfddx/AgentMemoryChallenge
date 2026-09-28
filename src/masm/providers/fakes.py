@@ -1,11 +1,20 @@
-"""确定性的 Fake Embedding Provider（测试与本地开发使用，不访问付费 API）。"""
+"""确定性 Fake Provider（测试与本地开发使用，不访问付费 API）。"""
 
 import hashlib
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any, TypeVar
+
+from pydantic import BaseModel
 
 from masm.providers.embeddings import EmbeddingProvider
+from masm.providers.llm import ModelRequest, StructuredLLM
+
+T = TypeVar("T", bound=BaseModel)
+
+# 预置响应可以是 Schema 实例、可校验的映射，或需要原样抛出的异常。
+FakeResponse = BaseModel | Mapping[str, Any] | Exception
 
 _TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]+")
 
@@ -57,3 +66,40 @@ def _normalize(values: list[float], dimensions: int) -> list[float]:
         uniform = 1.0 / math.sqrt(dimensions)
         return [uniform] * dimensions
     return [value / norm for value in values]
+
+
+class FakeStructuredLLM(StructuredLLM):
+    """确定性结构化 Provider：按顺序返回预置响应，并记录每次请求与调用元数据。"""
+
+    def __init__(
+        self,
+        responses: Sequence[FakeResponse] = (),
+        *,
+        model: str = "fake-llm",
+    ) -> None:
+        super().__init__()
+        self.model = model
+        self.requests: list[ModelRequest] = []
+        self._responses: list[FakeResponse] = list(responses)
+
+    def queue(self, *responses: FakeResponse) -> None:
+        """追加预置响应。"""
+        self._responses.extend(responses)
+
+    def complete_json(self, request: ModelRequest, output_type: type[T]) -> T:
+        """返回下一个预置响应；异常响应按原样抛出，不触发重试。"""
+        self.requests.append(request)
+        if not self._responses:
+            self._record(
+                request, output_type, attempts=1, latency_ms=0.0, succeeded=False
+            )
+            raise AssertionError("FakeStructuredLLM 没有预置响应")
+        value = self._responses.pop(0)
+        if isinstance(value, Exception):
+            self._record(
+                request, output_type, attempts=1, latency_ms=0.0, succeeded=False
+            )
+            raise value
+        result = value if isinstance(value, output_type) else output_type.model_validate(value)
+        self._record(request, output_type, attempts=1, latency_ms=0.0, succeeded=True)
+        return result
