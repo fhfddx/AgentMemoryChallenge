@@ -2,6 +2,8 @@
 
 import base64
 import io
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -16,7 +18,7 @@ from masm.services.deletion_service import DeletionService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 from masm.storage.models import Asset, Memory, SessionRecord, SourceMessage, User
-from masm.storage.repositories import MemoryRepository
+from masm.storage.repositories import MemoryRepository, try_lock_run_lifecycle
 
 
 def _uid(prefix: str) -> str:
@@ -57,9 +59,15 @@ def _count(database: Database, model: type, user_id: str) -> int:
 
 
 def _objects(store: AssetStore) -> list[Path]:
+    """已发布（正式）对象文件；暂存目录内的私有文件不计入。"""
     if not store.base_dir.exists():
         return []
-    return [path for path in store.base_dir.rglob("*") if path.is_file()]
+    staging_root = store.base_dir / "staging"
+    return [
+        path
+        for path in store.base_dir.rglob("*")
+        if path.is_file() and staging_root not in path.parents
+    ]
 
 
 def _service(database: Database, store: AssetStore, settings, embeddings) -> DeletionService:
@@ -454,8 +462,6 @@ def _race_add_and_delete(
     new_run: str,
 ):
     """在同一个 Barrier 上同时放行 Add 与 Delete，返回线程与共享错误列表。"""
-    import threading
-
     barrier = threading.Barrier(2)
     errors: list[BaseException] = []
     add = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
@@ -481,3 +487,174 @@ def _race_add_and_delete(
     writer.start()
     deleter.start()
     return writer, deleter, errors
+
+
+def _staging_files(store: AssetStore) -> list[Path]:
+    """暂存目录里的私有文件（发布失败后可能残留）。"""
+    staging_root = store.base_dir / "staging"
+    if not staging_root.exists():
+        return []
+    return [path for path in staging_root.rglob("*") if path.is_file()]
+
+
+def _staging_dirs(store: AssetStore) -> list[Path]:
+    """暂存目录本身（存在即为隐私数据残留）。"""
+    staging_root = store.base_dir / "staging"
+    if not staging_root.exists():
+        return []
+    return [path for path in staging_root.rglob("*") if path.is_dir()]
+
+
+def test_add_finalize_then_publish_is_serialized_with_delete(
+    database: Database, asset_store: AssetStore, settings, embeddings, monkeypatch
+) -> None:
+    """确定性复现「Add finalize 后暂停 -> Delete -> Add publish」竞态。
+
+    顺序完全由事件控制，不依赖随机线程交错：
+    1. Add 完成数据库 finalize，在 publish 之前阻塞；
+    2. 此时 Delete 无法进入（同一 user_id + request_id 的生命周期锁被 Add 持有）；
+    3. 放行 Add，它发布对象并返回；Delete 随后完成，清理数据库行、正式对象与暂存目录；
+    4. 最终不存在任何孤儿对象，暂存目录也不存在。
+    """
+    from masm.storage.assets import _publish_object
+
+    user_id = _uid("u")
+    run_id = _uid("r")
+    allow_publish = threading.Event()
+    publish_blocked = threading.Event()
+
+    def _blocking_publish(staged: Path, final: Path) -> None:
+        publish_blocked.set()
+        assert allow_publish.wait(30), "测试未能放行 publish"
+        _publish_object(staged, final)
+
+    monkeypatch.setattr("masm.storage.assets._publish_object", _blocking_publish)
+
+    add = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    errors: list[BaseException] = []
+
+    def _run_add() -> None:
+        try:
+            _add(add, run_id, user_id)
+        except BaseException as exc:  # pragma: no cover - 失败时用于诊断
+            errors.append(exc)
+
+    add_thread = threading.Thread(target=_run_add, daemon=True)
+    add_thread.start()
+    assert publish_blocked.wait(30), "Add 未到达 publish 阶段"
+
+    # 生命周期锁此刻被 Add 持有：Delete 与任何并发 Add 都无法进入。
+    assert try_lock_run_lifecycle(database.engine, user_id, run_id, lock_timeout_seconds=1) is False
+
+    report_holder: dict = {}
+
+    def _run_delete() -> None:
+        try:
+            report_holder["report"] = _service(
+                database, asset_store, settings, embeddings
+            ).delete_run(run_id, user_id=user_id)
+        except BaseException as exc:  # pragma: no cover - 失败时用于诊断
+            errors.append(exc)
+
+    delete_thread = threading.Thread(target=_run_delete, daemon=True)
+    delete_thread.start()
+    # Delete 必须被 Add 挡住，而不是抢先把行删完、再让 Add 发布孤儿对象。
+    time.sleep(1.0)
+    assert delete_thread.is_alive(), "Delete 未等待 Add 的 finalize->publish 完成"
+
+    allow_publish.set()
+    add_thread.join(30)
+    delete_thread.join(30)
+
+    assert errors == [], f"并发执行出现异常: {errors!r}"
+    assert not add_thread.is_alive() and not delete_thread.is_alive()
+
+    report = report_holder["report"]
+    assert report.complete is True
+    # 最终不变量：数据库行、正式对象、暂存文件与暂存目录都不存在。
+    assert _count(database, Memory, user_id) == 0
+    assert _asset_uris(database, user_id, run_id) == []
+    assert _objects(asset_store) == []
+    assert _staging_files(asset_store) == []
+    assert _staging_dirs(asset_store) == []
+    assert try_lock_run_lifecycle(database.engine, user_id, run_id) is True
+
+
+def test_delete_cleans_staging_left_by_failed_publish(
+    database: Database, asset_store: AssetStore, settings, embeddings, monkeypatch
+) -> None:
+    """publish 失败会遗留暂存私有图片；Delete 必须同时清理正式对象与暂存目录。"""
+    user_id = _uid("u")
+    run_id = _uid("r")
+
+    def _failing_publish(staged: Path, final: Path) -> None:
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr("masm.storage.assets._publish_object", _failing_publish)
+
+    with pytest.raises(OSError):
+        _add(
+            AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings),
+            run_id,
+            user_id,
+        )
+
+    # 数据库已提交（账本 COMMITTED），正式对象未发布，暂存里的私有图片仍在。
+    assert _count(database, Memory, user_id) == 1
+    assert _objects(asset_store) == []
+    assert _staging_files(asset_store), "publish 失败后暂存文件应当仍在"
+
+    report = _service(database, asset_store, settings, embeddings).delete_run(
+        run_id, user_id=user_id
+    )
+
+    assert report.complete is True
+    assert _count(database, Memory, user_id) == 0
+    assert _asset_uris(database, user_id, run_id) == []
+    assert _objects(asset_store) == []
+    assert _staging_files(asset_store) == []
+    assert MemoryRepository(database).pending_deletion_uris(user_id, run_id) == []
+
+
+def test_staging_cleanup_failure_is_persisted_and_retried(
+    database: Database, asset_store: AssetStore, settings, embeddings, monkeypatch
+) -> None:
+    """暂存清理失败绝不能被静默吞掉：第一次 complete=False，恢复后重试才 complete=True。"""
+    user_id = _uid("u")
+    run_id = _uid("r")
+    repo = MemoryRepository(database)
+
+    def _failing_publish(staged: Path, final: Path) -> None:
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr("masm.storage.assets._publish_object", _failing_publish)
+    with pytest.raises(OSError):
+        _add(
+            AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings),
+            run_id,
+            user_id,
+        )
+    assert _staging_files(asset_store)
+
+    original_cleanup = AssetStore.cleanup_staging
+
+    def _explode(self, user_id_arg: str, request_id_arg: str, owner_token) -> bool:
+        raise OSError("staging locked")
+
+    monkeypatch.setattr(AssetStore, "cleanup_staging", _explode, raising=False)
+    first = _service(database, asset_store, settings, embeddings).delete_run(
+        run_id, user_id=user_id
+    )
+
+    assert first.complete is False
+    assert first.failed_object_uris, "暂存清理失败必须出现在待重试清单里"
+    assert _staging_files(asset_store), "失败时暂存文件必须保留以便重试"
+
+    monkeypatch.setattr(AssetStore, "cleanup_staging", original_cleanup, raising=False)
+    second = _service(database, asset_store, settings, embeddings).delete_run(
+        run_id, user_id=user_id
+    )
+
+    assert second.complete is True
+    assert _staging_files(asset_store) == []
+    assert repo.pending_deletion_uris(user_id, run_id) == []

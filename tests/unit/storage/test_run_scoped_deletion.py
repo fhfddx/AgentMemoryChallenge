@@ -18,6 +18,11 @@ from masm.storage.repositories import MemoryRepository
 from masm.storage.types import MemoryBundle, MemoryDraft
 
 
+def _no_staging(uri: str) -> bool:
+    """仓库层测试不关心暂存清理回调（服务层另有专门测试）。"""
+    return True
+
+
 def _uid(prefix: str) -> str:
     """生成每次运行都唯一的标识，避免跨测试污染。"""
     return f"{prefix}-{uuid4().hex[:12]}"
@@ -207,7 +212,7 @@ def test_retry_uses_persisted_intents_after_source_messages_are_gone(database: D
     def _explode(uri: str) -> bool:
         raise OSError("storage unavailable")
 
-    first = repo.retry_pending_object_deletions(user_id, run_id, _explode)
+    first = repo.retry_pending_object_deletions(user_id, run_id, _explode, _no_staging)
     assert first.deleted == 0
     assert first.failed == ((object_uri, "OSError"),)
     assert repo.pending_deletion_uris(user_id, run_id) == [object_uri]
@@ -219,7 +224,7 @@ def test_retry_uses_persisted_intents_after_source_messages_are_gone(database: D
         calls.append(uri)
         return True
 
-    second = repo.retry_pending_object_deletions(user_id, run_id, _recover)
+    second = repo.retry_pending_object_deletions(user_id, run_id, _recover, _no_staging)
 
     assert calls == [object_uri]
     assert second.deleted == 1
@@ -242,7 +247,7 @@ def test_retry_completes_inside_the_object_lock(database: Database, monkeypatch)
         probes.append(_locks_object_uri(database, uri))
         return True
 
-    repo.retry_pending_object_deletions(user_id, run_id, _probe)
+    repo.retry_pending_object_deletions(user_id, run_id, _probe, _no_staging)
 
     assert handed_to_store == [object_uri]
     assert probes == [False], "临界区内不应有其他连接能取得同一把对象锁"
@@ -256,7 +261,7 @@ def test_retry_releases_lock_after_finishing(database: Database) -> None:
     _run_with_object(repo, user_id, run_id, object_uri)
     repo.delete_run(user_id, run_id)
 
-    repo.retry_pending_object_deletions(user_id, run_id, lambda uri: True)
+    repo.retry_pending_object_deletions(user_id, run_id, lambda uri: True, _no_staging)
 
     assert _locks_object_uri(database, object_uri) is True
 
@@ -271,7 +276,7 @@ def test_retry_keeps_shared_objects(database: Database) -> None:
     _run_with_object(repo, user_id, run_two, shared_uri)
 
     deleted = repo.delete_run(user_id, run_one)
-    outcome = repo.retry_pending_object_deletions(user_id, run_one, lambda uri: True)
+    outcome = repo.retry_pending_object_deletions(user_id, run_one, lambda uri: True, _no_staging)
 
     assert deleted.object_uris == ()
     assert deleted.shared_object_uris == (shared_uri,)
@@ -289,7 +294,7 @@ def test_retry_keeps_objects_referenced_by_null_request_assets(database: Databas
     deleted = repo.delete_run(user_id, run_id)
     calls: list[str] = []
     outcome = repo.retry_pending_object_deletions(
-        user_id, run_id, lambda uri: calls.append(uri) or True
+        user_id, run_id, lambda uri: calls.append(uri) or True, _no_staging
     )
 
     assert deleted.object_uris == ()
@@ -322,7 +327,9 @@ def test_retry_keeps_objects_referenced_by_other_runs_messages(database: Databas
 
     deleted = repo.delete_run(user_id, run_one)
     calls: list[str] = []
-    repo.retry_pending_object_deletions(user_id, run_one, lambda uri: calls.append(uri) or True)
+    repo.retry_pending_object_deletions(
+        user_id, run_one, lambda uri: calls.append(uri) or True, _no_staging
+    )
 
     assert calls == []
     assert deleted.object_uris == ()
@@ -337,7 +344,7 @@ def test_retry_reports_missing_objects_as_done(database: Database) -> None:
     _run_with_object(repo, user_id, run_id, object_uri)
     repo.delete_run(user_id, run_id)
 
-    outcome = repo.retry_pending_object_deletions(user_id, run_id, lambda uri: False)
+    outcome = repo.retry_pending_object_deletions(user_id, run_id, lambda uri: False, _no_staging)
 
     assert outcome.missing == 1
     assert outcome.deleted == 0
@@ -355,7 +362,7 @@ def test_retry_keeps_intent_pending_when_delete_fails(database: Database) -> Non
     def _explode(uri: str) -> bool:
         raise OSError("locked object")
 
-    outcome = repo.retry_pending_object_deletions(user_id, run_id, _explode)
+    outcome = repo.retry_pending_object_deletions(user_id, run_id, _explode, _no_staging)
 
     assert outcome.failed == ((object_uri, "OSError"),)
     assert repo.pending_deletion_uris(user_id, run_id) == [object_uri]
@@ -424,7 +431,9 @@ def test_retry_waits_for_lock_then_succeeds(database: Database) -> None:
     result: dict = {}
 
     def _worker() -> None:
-        result["outcome"] = repo.retry_pending_object_deletions(user_id, run_id, lambda uri: True)
+        result["outcome"] = repo.retry_pending_object_deletions(
+            user_id, run_id, lambda uri: True, _no_staging
+        )
 
     worker = threading.Thread(target=_worker, daemon=True)
     worker.start()

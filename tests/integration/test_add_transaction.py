@@ -29,7 +29,11 @@ from masm.storage.assets import (
 )
 from masm.storage.db import Database
 from masm.storage.models import Asset, Memory, SourceMessage
-from masm.storage.repositories import LedgerStateError, MemoryRepository
+from masm.storage.repositories import (
+    LedgerStateError,
+    MemoryRepository,
+    try_lock_run_lifecycle,
+)
 from masm.storage.types import MemoryBundle, MemoryDraft, SourceMessageDraft
 
 
@@ -314,7 +318,11 @@ def test_takeover_isolates_old_owner_resources(
     asset_store: AssetStore,
     settings,
 ) -> None:
-    """确定的接管时序：旧处理者不得提交，也不得清理新所有者资源。"""
+    """确定的接管时序：旧处理者不得提交，也不得清理新所有者资源。
+
+    运行级生命周期锁把「finalize -> publish」串行化，因此接管者的 publish 必须等
+    旧处理者退出临界区之后才会发生；本测试据此断言旧处理者既不能提交、也不能碰新资源。
+    """
     clock = _FakeClock()
     user_id, request_id = _uid("u"), _uid("r")
     request = _image_request(request_id, user_id)
@@ -322,8 +330,8 @@ def test_takeover_isolates_old_owner_resources(
 
     old_blocked = threading.Event()
     release_old = threading.Event()
-    new_blocked = threading.Event()
-    release_new = threading.Event()
+    new_finalized = threading.Event()
+    publish_seen: list[object] = []
 
     original_finalize = MemoryRepository.finalize_request
     original_publish = AssetStore.publish
@@ -332,12 +340,12 @@ def test_takeover_isolates_old_owner_resources(
         if owner_token == old_token:
             old_blocked.set()
             release_old.wait(timeout=10)
+        else:
+            new_finalized.set()
         return original_finalize(self, uid, rid, bundle, owner_token=owner_token)
 
     def publish(self, uid, rid, owner_token):
-        if owner_token != old_token:
-            new_blocked.set()
-            release_new.wait(timeout=10)
+        publish_seen.append(owner_token)
         return original_publish(self, uid, rid, owner_token)
 
     monkeypatch.setattr(MemoryRepository, "finalize_request", finalize)
@@ -370,13 +378,18 @@ def test_takeover_isolates_old_owner_resources(
     clock.advance(120)
     new_thread = threading.Thread(target=_new)
     new_thread.start()
-    assert new_blocked.wait(timeout=10), "新处理者未能完成 DB 提交"
+
+    # 旧处理者仍持有运行级生命周期锁：接管者被挡住，无法进入 finalize/publish。
+    assert try_lock_run_lifecycle(
+        database.engine, user_id, request_id, lock_timeout_seconds=1
+    ) is False
+    assert not new_finalized.wait(timeout=1), "接管者不应在旧处理者退出前进入 finalize"
+    assert publish_seen == []
 
     release_old.set()
     old_thread.join(timeout=10)
     assert not old_thread.is_alive()
 
-    release_new.set()
     new_thread.join(timeout=10)
     assert not new_thread.is_alive()
 
@@ -384,6 +397,9 @@ def test_takeover_isolates_old_owner_resources(
     assert "old" not in results
     new_response = results["new"]
     assert getattr(new_response, "success", None) is True
+    assert len(publish_seen) == 1, "只有接管者允许发布对象"
+    # 旧处理者退出后锁必须释放。
+    assert try_lock_run_lifecycle(database.engine, user_id, request_id) is True
 
     repo = MemoryRepository(database)
     assert repo.get_ledger_status(user_id, request_id) == "COMMITTED"
@@ -419,7 +435,6 @@ def test_stale_owner_failure_does_not_touch_new_owner(
             release_old.wait(timeout=10)
             raise RuntimeError("injected old-owner failure")
         return original_finalize(self, uid, rid, bundle, owner_token=owner_token)
-
     monkeypatch.setattr(MemoryRepository, "finalize_request", finalize)
 
     failures: list[BaseException] = []

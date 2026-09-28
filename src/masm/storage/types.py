@@ -122,7 +122,8 @@ class DeletedRun:
     """一次运行删除的**数据库阶段**结果。
 
     只描述可回滚的数据库工作：``object_uris`` 是本运行独占（无任何用户/运行再引用）、
-    已登记为 PENDING 删除意图的对象地址；``shared_object_uris`` 是仍被引用的对象地址。
+    已登记为 PENDING 删除意图的对象地址；``shared_object_uris`` 是仍被引用的对象地址；
+    ``staging_uris`` 是该运行各所有者需要清理的暂存目录意图地址。
     物理删除结果由 :class:`ObjectDeletionOutcome` 单独报告。
     """
 
@@ -134,17 +135,23 @@ class DeletedRun:
     conflicts: int = 0
     object_uris: Sequence[str] = ()
     shared_object_uris: Sequence[str] = ()
+    staging_uris: Sequence[str] = ()
 
 
 @dataclass(frozen=True)
 class ObjectDeletionOutcome:
-    """一次物理对象删除重试的结果。"""
+    """一次物理删除重试的结果。
+
+    ``failed`` 同时包含对象删除失败与暂存清理失败：两者都必须保持 PENDING 以便重试，
+    因此报告的 ``complete`` 必须为 False。
+    """
 
     deleted: int = 0
     missing: int = 0
     failed: Sequence[tuple[str, str]] = ()
     still_referenced: Sequence[str] = ()
-    pending: Sequence[str] = ()
+    staging_cleaned: int = 0
+    staging_failed: Sequence[tuple[str, str]] = ()
 
 
 @dataclass(frozen=True)

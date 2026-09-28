@@ -321,6 +321,18 @@ class AssetStore:
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
 
+    def cleanup_staging(self, user_id: str, request_id: str, owner_token: datetime) -> bool:
+        """合规删除：彻底移除该运行该所有者的暂存目录，返回是否已不存在。
+
+        与 :meth:`discard` 不同，这里**绝不静默吞错**：任何失败都向上抛出，由调用方
+        持久化为待重试状态（否则暂存内的私有图片会残留却报告删除成功）。
+        """
+        staging_dir = self.staging_dir(user_id, request_id, owner_token)
+        if not staging_dir.exists():
+            return False
+        shutil.rmtree(staging_dir)
+        return not staging_dir.exists()
+
     @staticmethod
     def _atomic_write(target: Path, data: bytes) -> None:
         """通过同目录临时文件 + os.replace 原子落盘，避免半文件。"""

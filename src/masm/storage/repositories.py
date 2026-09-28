@@ -5,9 +5,9 @@
 """
 
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -72,8 +72,51 @@ _OBJECT_UNLOCK_STATEMENT = "SELECT pg_advisory_unlock(hashtext(:object_uri)::big
 # 尝试获取对象锁前必须先设置 lock_timeout，否则可能无限等待持锁的并发写入方。
 _LOCK_TIMEOUT_SECONDS = 30
 
+# 运行级生命周期锁：Add 的「finalize -> publish」与 Delete 的「删行 -> 删对象 -> 清暂存」
+# 必须互斥，否则删除完成后旧 Add 仍能把暂存文件重新发布成孤儿对象。
+# 与对象锁使用不同的键空间（加前缀）；分隔符必须避开 NUL（PostgreSQL text 不接受 0x00）。
+_LIFECYCLE_LOCK_PREFIX = "lifecycle\x1f"
+_LIFECYCLE_LOCK_SEPARATOR = "\x1f"
+
 # 内部错误码：删除意图登记为 PENDING、等待物理删除（绝不写外部/自由文本）。
 INTERNAL_ERROR_PENDING_PHYSICAL_DELETE = "pending_physical_delete"
+# 内部错误码：暂存目录清理失败，需要重试（合规删除不得静默吞错）。
+INTERNAL_ERROR_PENDING_STAGING_CLEANUP = "pending_staging_cleanup"
+
+
+def lifecycle_lock_key(user_id: str, request_id: str) -> str:
+    """运行级生命周期锁的键（同一 user_id + request_id 的 Add 与 Delete 共用）。"""
+    return f"{_LIFECYCLE_LOCK_PREFIX}{user_id}{_LIFECYCLE_LOCK_SEPARATOR}{request_id}"
+
+
+# 暂存清理意图的地址前缀：它不是对象地址，而是「该运行该所有者的暂存目录」。
+_STAGING_URI_PREFIX = "staging://"
+
+
+def staging_uri_for(owner_token: datetime) -> str:
+    """把所有者标识编码成暂存清理意图地址（沿用 owner_token 隔离语义）。"""
+    return f"{_STAGING_URI_PREFIX}{_owner_token_text(owner_token)}"
+
+
+def is_staging_uri(uri: str) -> bool:
+    """该删除意图地址是否代表暂存目录清理。"""
+    return uri.startswith(_STAGING_URI_PREFIX)
+
+
+def parse_staging_uri(uri: str) -> datetime:
+    """从暂存清理意图地址还原所有者标识（时间统一按 UTC 解析）。"""
+    if not is_staging_uri(uri):
+        raise ValueError("不是暂存清理意图地址")
+    return datetime.strptime(
+        uri[len(_STAGING_URI_PREFIX) :], "%Y%m%dT%H%M%S.%f"
+    ).replace(tzinfo=UTC)
+
+
+def _owner_token_text(owner_token: datetime) -> str:
+    """所有者标识的稳定文本形式（与 AssetStore 的暂存命名保持一致，统一到 UTC）。"""
+    if owner_token.tzinfo is None:
+        owner_token = owner_token.replace(tzinfo=UTC)
+    return owner_token.astimezone(UTC).strftime("%Y%m%dT%H%M%S.%f")
 
 
 def _referencing_object_uris(
@@ -128,39 +171,99 @@ def lock_object_uris_in_transaction(session: Session, object_uris: Sequence[str]
         session.execute(text(_OBJECT_XACT_LOCK_STATEMENT), {"object_uri": object_uri})
 
 
+def _advisory_lock_keys(keys: Sequence[str]) -> list[str]:
+    """把任意键转换为 advisory 锁键，保持稳定顺序。"""
+    return sorted(set(keys))
+
+
 @contextmanager
-def lock_object_uris(
+def _session_locks(
     connection: Connection,
-    object_uris: Sequence[str],
+    keys: Sequence[str],
     *,
     lock_timeout_seconds: int | None = None,
 ) -> Iterator[None]:
-    """在**独立连接**上跨事务持有对象地址的会话级 advisory 锁（固定字典序，避免死锁）。
+    """在给定连接上取得并最终释放这些会话级 advisory 锁。
 
-    必须使用独占连接而不是 Session：``delete_run`` 的行删除事务、物理删除与状态标记是
-    多个独立事务，事务级锁会在第一个提交处释放。它同时保证 ``lock_timeout`` 在**尝试
-    加锁之前**设置、连接归还连接池前复位，因此持锁的并发写入方不会让删除方无限等待。
+    会话级锁必须跨事务：``delete_run`` 的行删除、物理删除与状态标记是多个独立事务，
+    事务级锁会在第一个 commit 处失效。``lock_timeout`` 在**尝试加锁之前**设置，连接归还
+    连接池前复位，因此持锁的并发写入方不会让删除方无限等待，也不会污染后续使用者。
     """
     timeout = _LOCK_TIMEOUT_SECONDS if lock_timeout_seconds is None else int(lock_timeout_seconds)
     connection.execute(text(f"SET lock_timeout = '{timeout}s'"))
     connection.commit()
     acquired: list[str] = []
     try:
-        for object_uri in sorted(set(object_uris)):
-            connection.execute(text(_OBJECT_LOCK_STATEMENT), {"object_uri": object_uri})
+        for key in _advisory_lock_keys(keys):
+            connection.execute(text(_OBJECT_LOCK_STATEMENT), {"object_uri": key})
             connection.commit()
-            acquired.append(object_uri)
+            acquired.append(key)
         yield
     finally:
-        for object_uri in reversed(acquired):
+        for key in reversed(acquired):
             with suppress(Exception):
                 connection.rollback()
-                connection.execute(text(_OBJECT_UNLOCK_STATEMENT), {"object_uri": object_uri})
+                connection.execute(text(_OBJECT_UNLOCK_STATEMENT), {"object_uri": key})
                 connection.commit()
         with suppress(Exception):
             connection.rollback()
             connection.execute(text("RESET lock_timeout"))
             connection.commit()
+
+
+def lock_object_uris(
+    connection: Connection,
+    object_uris: Sequence[str],
+    *,
+    lock_timeout_seconds: int | None = None,
+) -> AbstractContextManager[None]:
+    """锁住这批对象地址（删除方使用；调用方需提供独占连接）。"""
+    return _session_locks(
+        connection, list(object_uris), lock_timeout_seconds=lock_timeout_seconds
+    )
+
+
+@contextmanager
+def lock_run_lifecycle(
+    connection: Connection,
+    user_id: str,
+    request_id: str,
+    *,
+    lock_timeout_seconds: int | None = None,
+) -> Iterator[None]:
+    """运行级生命周期锁：覆盖 Add 的「finalize -> publish」与 Delete 的整段删除。
+
+    锁顺序约定为「先生命周期锁，后对象锁」，两侧一致，因此不会死锁。
+    """
+    with _session_locks(
+        connection,
+        [lifecycle_lock_key(user_id, request_id)],
+        lock_timeout_seconds=lock_timeout_seconds,
+    ):
+        yield
+
+
+def try_lock_run_lifecycle(
+    engine: Engine,
+    user_id: str,
+    request_id: str,
+    *,
+    lock_timeout_seconds: int = 2,
+) -> bool:
+    """用独立连接尝试取得运行级生命周期锁（供测试与诊断使用）。"""
+    with engine.connect() as connection:
+        try:
+            with lock_run_lifecycle(
+                connection,
+                user_id,
+                request_id,
+                lock_timeout_seconds=lock_timeout_seconds,
+            ):
+                pass
+        except Exception:
+            connection.rollback()
+            return False
+    return True
 
 
 def try_lock_object_uris(
@@ -227,6 +330,10 @@ class MemoryRepository:
         """``commit`` 是提交点注入（测试用于模拟提交失败，默认调用 ``Session.commit``）。"""
         self._database = database
         self._commit = commit or (lambda session: session.commit())
+
+    def lifecycle_connection(self) -> Connection:
+        """用于持有所在运行生命周期锁的独占连接（调用方负责关闭）。"""
+        return self._database.engine.connect()
 
     def add_bundle(self, user_id: str, bundle: MemoryBundle) -> AddCommit:
         """在同一事务单元中持久化一个记忆束（不含幂等账本，供测试夹具与低层调用）。"""
@@ -829,10 +936,28 @@ class MemoryRepository:
             object_uris = sorted(
                 {uri for content in messages for uri in _image_object_uris(content)}
             )
+            # 删除账本前先取出所有者标识：暂存目录按 owner_token 隔离，删掉账本就再也
+            # 无法定位该运行的暂存私有图片（合规删除必须能清理它们）。
+            owner_tokens = self._ledger_owner_tokens(session, user_id, request_id)
             # 这里不加对象锁：本阶段只做可回滚的数据库工作，锁竞争不应该让删行失败。
             # 对象锁只保护「重检引用 -> 物理删除」这一段（见 retry_pending_object_deletions），
             # 因此并发写入要么在重检时被看到（对象保留），要么因持锁而排在物理删除之后。
-            return self._delete_run_rows(session, user_id, request_id, memory_ids, object_uris)
+            return self._delete_run_rows(
+                session, user_id, request_id, memory_ids, object_uris, owner_tokens
+            )
+
+    def _ledger_owner_tokens(
+        self, session: Session, user_id: str, request_id: str
+    ) -> list[datetime]:
+        """读取该运行账本记录的所有者标识（暂存目录命名依据），删除前调用。"""
+        return list(
+            session.execute(
+                select(RequestLedger.updated_at).where(
+                    RequestLedger.user_id == user_id,
+                    RequestLedger.request_id == request_id,
+                )
+            ).scalars()
+        )
 
     def _delete_run_rows(
         self,
@@ -841,6 +966,7 @@ class MemoryRepository:
         request_id: str,
         memory_ids: list[UUID],
         object_uris: Sequence[str],
+        owner_tokens: Sequence[datetime] = (),
     ) -> DeletedRun:
         """执行可回滚的行删除与 PENDING 意图登记（提交由本方法完成）。"""
         # 运行级资产行：只删除属于本次运行的逻辑资产记录。
@@ -952,6 +1078,18 @@ class MemoryRepository:
                 bump_attempts=False,
                 error=INTERNAL_ERROR_PENDING_PHYSICAL_DELETE,
             )
+        # 暂存目录同样登记为待清理意图：publish 失败时暂存里可能残留私有图片，
+        # 合规删除必须清理它们，且清理失败要能被重试而不是静默吞掉。
+        for owner_token in owner_tokens:
+            self._upsert_deletion_intent(
+                session,
+                user_id,
+                request_id,
+                staging_uri_for(owner_token),
+                status="PENDING",
+                bump_attempts=False,
+                error=INTERNAL_ERROR_PENDING_STAGING_CLEANUP,
+            )
         # 提交前不得有任何物理删除：提交失败即整体回滚（含意图）。
         self._commit(session)
         del ledger, runs
@@ -964,6 +1102,9 @@ class MemoryRepository:
             conflicts=conflicts,
             object_uris=tuple(uri for uri in object_uris if uri not in shared),
             shared_object_uris=tuple(sorted(shared)),
+            staging_uris=tuple(
+                staging_uri_for(owner_token) for owner_token in owner_tokens
+            ),
         )
 
     def retry_pending_object_deletions(
@@ -971,29 +1112,38 @@ class MemoryRepository:
         user_id: str,
         request_id: str,
         delete_object: Callable[[str], bool],
+        cleanup_staging: Callable[[str], bool],
     ) -> ObjectDeletionOutcome:
         """对已持久化的 PENDING 删除意图重试物理删除。
 
         **不依赖 SourceMessage 推导 URI**：第一次删除失败后原始消息已随运行一起删除，
         因此这里唯一可信的来源是 `deletion_intents` 中的 PENDING 行。
 
-        顺序保证（每项对象独立处理）：
-        1. 在会话级对象锁下重新做权威存活性检查（资产行 + 原始消息）；仍被引用则保留
+        顺序保证：
+        1. 暂存清理只在**该运行的全部对象意图都已终结**后才执行：对象删除失败时暂存里的
+           原始图片仍是重放/重试所需的数据，不能先删；
+        2. 对象在会话级对象锁下重新做权威存活性检查（资产行 + 原始消息），仍被引用则保留
            PENDING 并跳过，绝不删除共享对象；
-        2. 取得并重新校验通过后，才执行不可回滚的物理删除；
-        3. 成功后用**独立事务**把意图标记为 DONE（失败则累加 attempts 保持 PENDING）。
+        3. 取得并重新校验通过后才执行不可回滚的物理删除；成功后用同一持锁连接把意图标记为
+           DONE（失败则累加 attempts 保持 PENDING）。
         """
         pending = self.pending_deletion_intents(user_id, request_id)
         if not pending:
             return ObjectDeletionOutcome()
+        object_targets = [row for row in pending if not is_staging_uri(row.object_uri)]
+        staging_targets = [row for row in pending if is_staging_uri(row.object_uri)]
         outcomes = {
             row.object_uri: _IntentTarget(
                 user_id=row.user_id, request_id=row.request_id, object_uri=row.object_uri
             )
-            for row in pending
+            for row in object_targets
         }
 
         with self._database.engine.connect() as connection:
+            deleted = 0
+            missing = 0
+            failed: list[tuple[str, str]] = []
+            live: set[str] = set()
             with lock_object_uris(connection, sorted(outcomes)):
                 live = self._shared_object_uris_for_intents(connection, user_id, outcomes)
                 # 仍被任何用户/运行引用的对象：标记 DONE（无需再删），绝不删除物理对象。
@@ -1002,9 +1152,6 @@ class MemoryRepository:
                         connection, user_id, request_id, object_uri, done=True, error=""
                     )
                 deletable = {uri: t for uri, t in outcomes.items() if uri not in live}
-                deleted = 0
-                missing = 0
-                failed: list[tuple[str, str]] = []
                 for object_uri in sorted(deletable):
                     target = deletable[object_uri]
                     try:
@@ -1037,11 +1184,44 @@ class MemoryRepository:
                     )
                 # 物理删除与意图状态必须一起对临界区可见：在释放对象锁之前提交。
                 connection.commit()
+
+            staging_failed: list[tuple[str, str]] = []
+            staging_cleaned = 0
+            # 对象未删完时不清理暂存：暂存里的原始图片仍是重试/重放所必需的数据。
+            if not failed:
+                for row in staging_targets:
+                    object_uri = row.object_uri
+                    try:
+                        removed = cleanup_staging(object_uri)
+                    except Exception as exc:
+                        staging_failed.append((object_uri, type(exc).__name__))
+                        continue
+                    if removed:
+                        staging_cleaned += 1
+                    self._settle_intent_on_connection(
+                        connection,
+                        row.user_id,
+                        row.request_id,
+                        object_uri,
+                        done=True,
+                        error="",
+                    )
+                for object_uri, reason in staging_failed:
+                    self._settle_intent_on_connection(
+                        connection,
+                        user_id,
+                        request_id,
+                        object_uri,
+                        done=False,
+                        error=reason,
+                    )
         return ObjectDeletionOutcome(
             deleted=deleted,
             missing=missing,
-            failed=tuple(failed),
+            failed=tuple([*failed, *staging_failed]),
             still_referenced=tuple(sorted(live)),
+            staging_cleaned=staging_cleaned,
+            staging_failed=tuple(staging_failed),
         )
 
     def _shared_object_uris_for_intents(
