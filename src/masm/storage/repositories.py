@@ -10,6 +10,7 @@ from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import CursorResult, func, or_, select, update
+from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -154,16 +155,18 @@ class MemoryRepository:
             session.add(memory)
             session.flush()
             memory_ids.append(memory.id)
-            if draft.embedding is not None:
+            for draft_embedding in (draft.embedding, *draft.image_embeddings):
+                if draft_embedding is None:
+                    continue
                 session.add(
                     MemoryEmbedding(
                         user_id=user_id,
                         memory_id=memory.id,
-                        modality=draft.embedding.modality,
-                        model_name=draft.embedding.model_name,
-                        model_version=draft.embedding.model_version,
-                        dimensions=draft.embedding.dimensions,
-                        vector=list(draft.embedding.vector),
+                        modality=draft_embedding.modality,
+                        model_name=draft_embedding.model_name,
+                        model_version=draft_embedding.model_version,
+                        dimensions=draft_embedding.dimensions,
+                        vector=list(draft_embedding.vector),
                     )
                 )
         return memory_ids
@@ -406,6 +409,35 @@ class MemoryRepository:
                 score=0.0,
             )
             for memory in memories
+        ]
+
+    def metadata_candidates(
+        self,
+        user_id: str,
+        *,
+        modality: str | None = None,
+        keywords: Sequence[str] = (),
+        limit: int,
+    ) -> list[MemoryCandidate]:
+        """元数据召回：按模态与关键词过滤，SQL 查询阶段即按 user_id 过滤。"""
+        with self._database.session() as session:
+            statement = select(Memory).where(Memory.user_id == user_id)
+            if modality is not None:
+                statement = statement.where(Memory.modality == modality)
+            if keywords:
+                statement = statement.where(
+                    Memory.keywords.op("?|")(pg_array(list(keywords)))
+                )
+            statement = statement.order_by(Memory.observed_at.desc(), Memory.id).limit(limit)
+            rows = session.execute(statement).scalars().all()
+        return [
+            MemoryCandidate(
+                memory_id=row.id,
+                user_id=row.user_id,
+                content=row.summary,
+                score=0.0,
+            )
+            for row in rows
         ]
 
     def add_relation(

@@ -32,7 +32,10 @@ class EmbeddingDraft:
 
 @dataclass(frozen=True)
 class MemoryDraft:
-    """一条结构化记忆草稿。"""
+    """一条结构化记忆草稿。
+
+    embedding 是文本向量；image_embeddings 是该记忆关联图片的图片向量。
+    """
 
     summary: str
     original_text: str
@@ -42,6 +45,7 @@ class MemoryDraft:
     time_precision: str | None = None
     confidence: float | None = None
     embedding: EmbeddingDraft | None = None
+    image_embeddings: Sequence[EmbeddingDraft] = ()
 
 
 @dataclass(frozen=True)

@@ -11,7 +11,11 @@ from sqlalchemy.exc import OperationalError
 
 from masm.api.app import create_app
 from masm.config import Settings
+from masm.providers.embeddings import EmbeddingProvider
+from masm.providers.fakes import DeterministicFakeEmbeddingProvider
+from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever
 from masm.services.add_service import AddService
+from masm.services.search_service import SearchService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 from masm.storage.repositories import MemoryRepository
@@ -65,13 +69,50 @@ def asset_store(tmp_path: Path) -> AssetStore:
     return AssetStore(tmp_path / "assets")
 
 
+@pytest.fixture(scope="session")
+def embeddings() -> EmbeddingProvider:
+    """确定性 Fake Embedding Provider（测试绝不访问付费 API）。"""
+    return DeterministicFakeEmbeddingProvider()
+
+
 @pytest.fixture()
-def add_service(database: Database, asset_store: AssetStore, settings: Settings) -> AddService:
+def add_service(
+    database: Database,
+    asset_store: AssetStore,
+    settings: Settings,
+    embeddings: EmbeddingProvider,
+) -> AddService:
     """基于测试数据库与本地对象存储的 AddService。"""
-    return AddService(MemoryRepository(database), asset_store, settings)
+    return AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    )
 
 
 @pytest.fixture()
-def client(settings: Settings, database: Database, asset_store: AssetStore) -> TestClient:
-    """带完整 /add 路由的测试客户端。"""
-    return TestClient(create_app(settings, database=database, asset_store=asset_store))
+def retriever(database: Database, embeddings: EmbeddingProvider) -> BaselineRetriever:
+    """基于测试数据库的基线混合检索器。"""
+    return BaselineRetriever(MemoryRepository(database), embeddings, DEFAULT_CHANNEL_WEIGHTS)
+
+
+@pytest.fixture()
+def search_service(retriever: BaselineRetriever, settings: Settings) -> SearchService:
+    """基线 Search 应用服务。"""
+    return SearchService(retriever, max_image_bytes=settings.max_image_bytes)
+
+
+@pytest.fixture()
+def client(
+    settings: Settings,
+    database: Database,
+    asset_store: AssetStore,
+    embeddings: EmbeddingProvider,
+) -> TestClient:
+    """带完整 /add 与 /search 路由的测试客户端。"""
+    return TestClient(
+        create_app(
+            settings,
+            database=database,
+            asset_store=asset_store,
+            embeddings=embeddings,
+        )
+    )

@@ -1,5 +1,6 @@
 """FastAPI 应用工厂。"""
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -7,7 +8,11 @@ from fastapi import FastAPI
 from masm.api.limits import RequestLimiter
 from masm.api.routes import router
 from masm.config import Settings
+from masm.providers.embeddings import EmbeddingProvider
+from masm.providers.fakes import DeterministicFakeEmbeddingProvider
+from masm.retrieval.baseline import BaselineRetriever, load_channel_weights
 from masm.services.add_service import AddService
+from masm.services.search_service import SearchService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 from masm.storage.repositories import MemoryRepository
@@ -19,6 +24,8 @@ def create_app(
     database: Database | None = None,
     asset_store: AssetStore | None = None,
     limiter: RequestLimiter | None = None,
+    embeddings: EmbeddingProvider | None = None,
+    channel_weights: Mapping[str, float] | None = None,
 ) -> FastAPI:
     """根据配置构建 FastAPI 应用。"""
     application = FastAPI(title="MASM", version="0.1.0")
@@ -26,10 +33,23 @@ def create_app(
     application.state.database = database or Database.create(settings.database_url)
     application.state.asset_store = asset_store or AssetStore(Path("artifacts/assets"))
     application.state.limiter = limiter or RequestLimiter()
+    application.state.embeddings = embeddings or DeterministicFakeEmbeddingProvider()
+
+    repository = MemoryRepository(application.state.database)
     application.state.add_service = AddService(
-        MemoryRepository(application.state.database),
+        repository,
         application.state.asset_store,
         settings,
+        embeddings=application.state.embeddings,
     )
+    retriever = BaselineRetriever(
+        repository,
+        application.state.embeddings,
+        channel_weights if channel_weights is not None else load_channel_weights(),
+    )
+    application.state.search_service = SearchService(
+        retriever, max_image_bytes=settings.max_image_bytes
+    )
+
     application.include_router(router)
     return application

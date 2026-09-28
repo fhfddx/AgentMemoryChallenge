@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -108,6 +109,35 @@ def _is_within(base: Path, candidate: Path) -> bool:
     base_text = os.path.normcase(_strip_extended_prefix(str(base)))
     candidate_text = os.path.normcase(_strip_extended_prefix(str(candidate)))
     return candidate_text == base_text or candidate_text.startswith(base_text + os.sep)
+
+
+# Windows 上多线程并发替换同一目标路径会瞬时返回“拒绝访问”，需要有限重试。
+_MOVE_ATTEMPTS = 6
+_MOVE_BACKOFF_SECONDS = 0.02
+
+
+def _publish_object(staged: Path, final: Path) -> None:
+    """把暂存对象发布到最终内容寻址位置。
+
+    文件名就是内容哈希，因此目标已存在时内容必然相同，直接丢弃暂存副本即可；
+    否则做有限退避重试，以覆盖 Windows 并发替换同一路径时的瞬时拒绝访问。
+    """
+    if final.exists():
+        with contextlib.suppress(OSError):
+            staged.unlink()
+        return
+    for attempt in range(_MOVE_ATTEMPTS):
+        try:
+            os.replace(staged, final)
+            return
+        except PermissionError:
+            if final.exists():
+                with contextlib.suppress(OSError):
+                    staged.unlink()
+                return
+            if attempt == _MOVE_ATTEMPTS - 1:
+                raise
+            time.sleep(_MOVE_BACKOFF_SECONDS * (attempt + 1))
 
 
 def _owner_text(owner_token: datetime) -> str:
@@ -246,7 +276,7 @@ class AssetStore:
     def publish(self, user_id: str, request_id: str, owner_token: datetime) -> list[str]:
         """把本次处理尝试暂存的对象原子发布到内容寻址的最终位置。
 
-        已存在同名最终对象时用相同内容覆盖（内容寻址天然幂等），因此并发发布安全。
+        内容寻址天然幂等：目标已存在时内容必然相同，因此并发发布同一对象是安全的。
         """
         staging_dir = self.staging_dir(user_id, request_id, owner_token)
         if not staging_dir.exists():
@@ -258,7 +288,7 @@ class AssetStore:
             relative = f"{self._user_namespace(user_id)}/{staged.name}"
             final = self._resolve_within_root(relative)
             final.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(staged, final)
+            _publish_object(staged, final)
             published.append(relative)
         with contextlib.suppress(OSError):
             staging_dir.rmdir()

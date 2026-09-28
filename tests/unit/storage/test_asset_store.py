@@ -203,23 +203,27 @@ def test_concurrent_first_write_same_namespace_stress(tmp_path: Path) -> None:
 
 
 def test_concurrent_publish_same_content_is_safe(tmp_path: Path) -> None:
-    """并发发布相同内容到同一最终键是安全的。"""
+    """并发发布相同内容到同一最终键是安全的（多轮施压，覆盖 Windows 替换竞争）。"""
     store = AssetStore(tmp_path / "assets")
     payload = b"same-bytes"
-    barrier = threading.Barrier(6)
     errors: list[BaseException] = []
+    workers = 6
+    rounds = 6
+    barrier = threading.Barrier(workers)
 
-    def worker(index: int) -> None:
+    def worker(seed: int) -> None:
         try:
-            barrier.wait()
-            token = _token(index)
-            store.put("shared-user", f"req-{index}", token, _image(payload))
-            store.publish("shared-user", f"req-{index}", token)
+            for round_index in range(rounds):
+                barrier.wait()
+                token = _token(seed * 100 + round_index)
+                request_id = f"req-{seed}-{round_index}"
+                store.put("shared-user", request_id, token, _image(payload))
+                store.publish("shared-user", request_id, token)
         except BaseException as exc:  # noqa: BLE001
             errors.append(exc)
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        list(pool.map(worker, range(6)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(worker, range(workers)))
 
     assert errors == []
     finals = _files(store.base_dir)
