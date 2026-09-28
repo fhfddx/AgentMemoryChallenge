@@ -294,6 +294,18 @@ class AssetStore:
             staging_dir.rmdir()
         return published
 
+    def delete_object(self, relative: str) -> bool:
+        """安全删除一个已发布对象。
+
+        路径先经 ``_resolve_within_root`` 解析，越界（目录穿越）会抛 ``AssetPathError``；
+        对象不存在时返回 False，便于调用方区分「已删除」与「本来就不存在」。
+        """
+        path = self._resolve_within_root(relative)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
     def discard(self, user_id: str, request_id: str, owner_token: datetime) -> None:
         """丢弃本次处理尝试的暂存目录；绝不触碰已发布或其它所有者的对象。"""
         staging_dir = self.staging_dir(user_id, request_id, owner_token)

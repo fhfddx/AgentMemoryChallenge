@@ -118,6 +118,19 @@ class MemoryCandidate:
 
 
 @dataclass(frozen=True)
+class DeletedRun:
+    """一次运行删除后统计到的数据库记录与对象地址。"""
+
+    request_id: str
+    memories: int = 0
+    assets: int = 0
+    sources: int = 0
+    relations: int = 0
+    conflicts: int = 0
+    object_uris: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
 class AddCommit:
     """一次 Add 提交的结果。"""
 

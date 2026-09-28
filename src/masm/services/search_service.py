@@ -10,6 +10,7 @@ from masm.retrieval.baseline import BaselineRetriever, ParsedQuery
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.reranker import EvidenceReranker, RankedEvidence
+from masm.retrieval.response_packer import ResponsePacker
 from masm.schemas.api import MemoryEvidence, SearchRequest, SearchResponse
 from masm.storage.assets import decode_image_data_url
 from masm.storage.types import MemoryCandidate
@@ -26,12 +27,14 @@ class SearchService:
         analyzer: QueryAnalyzer | None = None,
         expander: RelationExpander | None = None,
         reranker: EvidenceReranker | None = None,
+        packer: ResponsePacker | None = None,
     ) -> None:
         self._retriever = retriever
         self._max_image_bytes = max_image_bytes
         self._analyzer = analyzer
         self._expander = expander
         self._reranker = reranker
+        self._packer = packer
 
     def search(self, request: SearchRequest) -> SearchResponse:
         """执行查询分析、混合召回、关系扩展与证据重排。"""
@@ -41,6 +44,10 @@ class SearchService:
         if self._expander is not None:
             candidates = self._with_expansion(request.user_id, candidates, top_k)
         ranked = self._rank(parsed, candidates)
+        # 重排顺序不因打包改变；打包只做严格前缀裁剪。
+        packed = (
+            self._packer.pack(ranked, top_k) if self._packer is not None else ranked[:top_k]
+        )
         return SearchResponse(
             data=[
                 MemoryEvidence(
@@ -48,7 +55,7 @@ class SearchService:
                     content=evidence.content,
                     score=evidence.score,
                 )
-                for evidence in ranked[:top_k]
+                for evidence in packed
             ]
         )
 

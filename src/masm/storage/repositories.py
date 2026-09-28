@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import CursorResult, func, or_, select, update
+from sqlalchemy import CursorResult, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -31,11 +31,30 @@ from masm.storage.models import (
 )
 from masm.storage.types import (
     AddCommit,
+    DeletedRun,
     LedgerState,
     MemoryBundle,
     MemoryCandidate,
     ValidatedActions,
 )
+
+
+def _deleted_rows(session: Session, statement: Any) -> int:
+    """执行一条 DELETE 并返回受影响行数。"""
+    result = cast(CursorResult[Any], session.execute(statement))
+    return int(result.rowcount or 0)
+
+
+def _image_object_uris(content: Any) -> list[str]:
+    """从原始消息内容中提取图片对象地址。"""
+    found: list[str] = []
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                url = part.get("image_url", {}).get("url")
+                if isinstance(url, str):
+                    found.append(url)
+    return found
 
 # 关系边允许的节点类型。
 _ALLOWED_NODE_TYPES = {"memory", "entity", "event"}
@@ -634,6 +653,103 @@ class MemoryRepository:
             )
             for memory in memories
         ]
+
+    def delete_run(self, user_id: str, request_id: str) -> DeletedRun:
+        """删除该用户该运行（request_id）的数据库记录，返回待清理的对象地址。
+
+        所有删除都在 SQL 阶段按 user_id + request_id 过滤，因此不会影响其他用户或
+        同一用户的其他运行。对象地址取自该运行的原始消息内容。
+        """
+        with self._database.session() as session:
+            memory_ids = list(
+                session.execute(
+                    select(Memory.id).where(
+                        Memory.user_id == user_id, Memory.request_id == request_id
+                    )
+                ).scalars()
+            )
+            messages: list[Any] = list(
+                session.execute(
+                    select(SourceMessage.content).where(
+                        SourceMessage.user_id == user_id,
+                        SourceMessage.request_id == request_id,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            object_uris = sorted(
+                {
+                    uri
+                    for content in messages
+                    for uri in _image_object_uris(content)
+                }
+            )
+            relations = 0
+            conflicts = 0
+            if memory_ids:
+                relations = _deleted_rows(
+                    session,
+                    delete(MemoryRelation).where(
+                        MemoryRelation.user_id == user_id,
+                        or_(
+                            MemoryRelation.source_id.in_(memory_ids),
+                            MemoryRelation.target_id.in_(memory_ids),
+                        ),
+                    ),
+                )
+                conflicts = _deleted_rows(
+                    session,
+                    delete(MemoryConflict).where(
+                        MemoryConflict.user_id == user_id,
+                        MemoryConflict.memory_id.in_(memory_ids),
+                    ),
+                )
+            assets = (
+                _deleted_rows(
+                    session,
+                    delete(Asset).where(
+                        Asset.user_id == user_id, Asset.object_uri.in_(object_uris)
+                    ),
+                )
+                if object_uris
+                else 0
+            )
+            memories = _deleted_rows(
+                session,
+                delete(Memory).where(
+                    Memory.user_id == user_id, Memory.request_id == request_id
+                ),
+            )
+            sources = _deleted_rows(
+                session,
+                delete(SourceMessage).where(
+                    SourceMessage.user_id == user_id,
+                    SourceMessage.request_id == request_id,
+                ),
+            )
+            session.commit()
+            still_referenced = (
+                set(
+                    session.execute(
+                        select(Asset.object_uri).where(
+                            Asset.user_id == user_id, Asset.object_uri.in_(object_uris)
+                        )
+                    ).scalars()
+                )
+                if object_uris
+                else set()
+            )
+        return DeletedRun(
+            request_id=request_id,
+            memories=memories,
+            assets=assets,
+            sources=sources,
+            relations=relations,
+            conflicts=conflicts,
+            # 仍被同一用户其他运行引用的对象不删除，避免影响其他运行。
+            object_uris=tuple(uri for uri in object_uris if uri not in still_referenced),
+        )
 
     def conflict_peers(
         self, user_id: str, memory_ids: Sequence[UUID], limit: int
