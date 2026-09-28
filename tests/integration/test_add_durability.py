@@ -6,6 +6,7 @@ import threading
 from collections.abc import Sequence
 from uuid import uuid4
 
+import pytest
 from PIL import Image
 from sqlalchemy import func, select
 
@@ -93,6 +94,36 @@ class _BlockingProvider(EmbeddingProvider):
 
     def embed_images(self, images: Sequence[bytes]) -> list[list[float]]:
         return self._delegate.embed_images(images)
+
+
+class _BlockingFailingProvider(EmbeddingProvider):
+    """在文本向量生成处阻塞，释放后固定抛错。
+
+    用于确定性构造：A 阻塞在 Provider 阶段期间，B 用同一 request_id 完成提交，
+    随后 A 的 Provider 报错。
+    """
+
+    model_name = "blocking-failing-multimodal"
+    model_version = "v1"
+
+    def __init__(
+        self,
+        delegate: EmbeddingProvider,
+        entered: threading.Event,
+        release: threading.Event,
+    ) -> None:
+        self._delegate = delegate
+        self.dimensions = delegate.dimensions
+        self._entered = entered
+        self._release = release
+
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        self._entered.set()
+        self._release.wait(timeout=10)
+        raise RuntimeError("embedding provider failed after concurrent commit")
+
+    def embed_images(self, images: Sequence[bytes]) -> list[list[float]]:
+        raise RuntimeError("embedding provider failed after concurrent commit")
 
 
 def _text_request(request_id: str, user_id: str, text: str) -> AddRequest:
@@ -217,3 +248,66 @@ def test_commit_during_prepare_is_replayed_without_duplicates(
     assert getattr(results["winner"], "success", None) is True
     assert _count(database, Memory, user_id) == 1
     assert _count(database, SourceMessage, user_id) == 1
+
+
+def test_prepare_failure_after_concurrent_commit_replays(
+    database: Database, asset_store: AssetStore, settings, embeddings: EmbeddingProvider
+) -> None:
+    """A 在 Provider 阶段阻塞期间 B 完成提交：A 的 Provider 报错必须回放成功结果。"""
+    user_id, request_id = f"u-{_uid()}", f"r-{_uid()}"
+    request = _text_request(request_id, user_id, "concurrent durable memory")
+
+    entered = threading.Event()
+    release = threading.Event()
+    slow_service = AddService(
+        MemoryRepository(database),
+        asset_store,
+        settings,
+        embeddings=_BlockingFailingProvider(embeddings, entered, release),
+    )
+    results: dict[str, object] = {}
+    errors: list[BaseException] = []
+
+    def _slow_add() -> None:
+        try:
+            results["slow"] = slow_service.add(request)
+        except BaseException as exc:  # noqa: BLE001 - 记录任何异常用于断言
+            errors.append(exc)
+
+    thread = threading.Thread(target=_slow_add)
+    thread.start()
+    assert entered.wait(timeout=10), "A 未能进入 Provider 调用"
+
+    winner = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    results["winner"] = winner.add(request)
+
+    release.set()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+
+    # A 绝不能暴露 Provider 异常，必须回放 B 的成功结果。
+    assert errors == []
+    assert getattr(results["slow"], "success", None) is True
+    assert results["slow"] == results["winner"]
+
+    assert _count(database, Memory, user_id) == 1
+    assert _count(database, SourceMessage, user_id) == 1
+    assert MemoryRepository(database).get_ledger_status(user_id, request_id) == "COMMITTED"
+
+
+def test_provider_failure_leaves_no_ledger_or_writes(
+    database: Database, asset_store: AssetStore, settings, embeddings: EmbeddingProvider
+) -> None:
+    """无并发提交时 Provider 失败：不得遗留 PROCESSING，也不得产生任何写入。"""
+    provider = _FaultyProvider(embeddings)
+    provider.unavailable = True
+    service = AddService(MemoryRepository(database), asset_store, settings, embeddings=provider)
+    user_id, request_id = f"u-{_uid()}", f"r-{_uid()}"
+
+    with pytest.raises(RuntimeError):
+        service.add(_text_request(request_id, user_id, "failing provider memory"))
+
+    repo = MemoryRepository(database)
+    assert repo.get_ledger(user_id, request_id) is None
+    assert _count(database, Memory, user_id) == 0
+    assert _count(database, SourceMessage, user_id) == 0

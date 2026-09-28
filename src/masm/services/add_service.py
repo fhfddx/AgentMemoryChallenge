@@ -101,7 +101,16 @@ class AddService:
             return self._replay(request)
 
         # 摘要与向量仍在 claim 之前生成，Provider 故障不会遗留 PROCESSING。
-        prepared = self._prepare(request, images)
+        # 只包住 _prepare：媒体解码与校验在上方，400/413/422 语义不受影响。
+        try:
+            prepared = self._prepare(request, images)
+        except Exception:
+            # prepare 期间其他处理者可能已用同一 request_id 完成提交；
+            # 此时已经成功的请求不得因为本次 Provider 故障而暴露异常。
+            ledger = self._repo.get_ledger(request.user_id, request.request_id)
+            if ledger is not None and ledger.status == "COMMITTED":
+                return self._replay(request)
+            raise
 
         owner_token = self._acquire(request, now)
         if owner_token is None:
