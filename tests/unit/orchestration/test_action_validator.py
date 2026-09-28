@@ -118,6 +118,48 @@ def test_conflict_assigns_shared_group() -> None:
     assert actions.conflict_targets == (candidate.memory_id,)
 
 
+def test_conflict_continues_existing_group() -> None:
+    """目标已属于某个冲突组时，新记忆必须加入同一组而不是新建组。"""
+    group_id = uuid4()
+    candidate = _candidate(conflict_group_id=group_id)
+    decision = CuratorDecision(actions=(_action(ActionKind.CONFLICT, candidate.memory_id),))
+
+    actions = validate_actions(_USER, decision, [candidate])
+
+    assert actions.conflict_group_id == group_id
+
+
+def test_multiple_existing_conflict_groups_are_rejected() -> None:
+    """一次决策同时指向两个不同冲突组时必须确定性拒绝。"""
+    first = _candidate(0, conflict_group_id=uuid4())
+    second = _candidate(1, conflict_group_id=uuid4())
+    decision = CuratorDecision(
+        actions=(
+            _action(ActionKind.CONFLICT, first.memory_id),
+            _action(ActionKind.CONFLICT, second.memory_id),
+        )
+    )
+
+    with pytest.raises(ActionValidationError):
+        validate_actions(_USER, decision, [first, second])
+
+
+def test_multiple_conflict_targets_in_same_group_are_accepted() -> None:
+    group_id = uuid4()
+    first = _candidate(0, conflict_group_id=group_id)
+    second = _candidate(1, conflict_group_id=group_id)
+    decision = CuratorDecision(
+        actions=(
+            _action(ActionKind.CONFLICT, first.memory_id),
+            _action(ActionKind.CONFLICT, second.memory_id),
+        )
+    )
+
+    actions = validate_actions(_USER, decision, [first, second])
+
+    assert actions.conflict_group_id == group_id
+
+
 def test_cyclic_supersede_is_rejected() -> None:
     """循环替代必须被确定性拒绝。"""
     first = _candidate(0)

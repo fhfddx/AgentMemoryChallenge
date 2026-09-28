@@ -36,7 +36,10 @@ def validate_actions(
 ) -> ValidatedActions:
     """把智能体决策转换为可执行动作，任何违规都被拒绝。"""
     # 候选是同一用户范围内的召回结果；不在其中即跨用户或不存在。
-    allowed_ids = {candidate.memory_id for candidate in candidates if candidate.user_id == user_id}
+    by_id = {
+        candidate.memory_id: candidate for candidate in candidates if candidate.user_id == user_id
+    }
+    allowed_ids = set(by_id)
 
     relations: list[RelationDraft] = []
     duplicate_of: UUID | None = None
@@ -81,9 +84,27 @@ def validate_actions(
         relations=tuple(relations),
         duplicate_of=duplicate_of,
         supersedes=supersedes,
-        conflict_group_id=uuid4() if conflict_targets else None,
+        conflict_group_id=_resolve_conflict_group(conflict_targets, by_id),
         conflict_targets=tuple(conflict_targets),
     )
+
+
+def _resolve_conflict_group(
+    conflict_targets: Sequence[UUID], by_id: dict[UUID, MemoryCandidate]
+) -> UUID | None:
+    """延续已有冲突组；一次决策同时指向多个不同组时确定性拒绝。"""
+    if not conflict_targets:
+        return None
+    existing_groups = {
+        by_id[target].conflict_group_id
+        for target in conflict_targets
+        if by_id[target].conflict_group_id is not None
+    }
+    if len(existing_groups) > 1:
+        raise ActionValidationError("一次决策不得同时指向多个不同的冲突组")
+    if existing_groups:
+        return next(iter(existing_groups))
+    return uuid4()
 
 
 def _has_supersede_cycle(target: UUID, candidates: Sequence[MemoryCandidate]) -> bool:

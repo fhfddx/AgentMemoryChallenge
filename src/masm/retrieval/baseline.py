@@ -98,6 +98,9 @@ class BaselineRetriever:
                     user_id=source.user_id,
                     content=source.content,
                     score=item.score,
+                    supersedes=source.supersedes,
+                    status=source.status,
+                    conflict_group_id=source.conflict_group_id,
                 )
             )
         return results

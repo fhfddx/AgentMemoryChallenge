@@ -5,6 +5,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
+from masm.agents import MAX_HISTORY
 from masm.agents.curator import MemoryCuratorAgent
 from masm.providers.fakes import FakeStructuredLLM
 from masm.schemas.agents import (
@@ -97,6 +98,24 @@ def test_history_is_bounded_by_configuration() -> None:
 def test_negative_max_history_is_rejected() -> None:
     with pytest.raises(ValueError):
         MemoryCuratorAgent(FakeStructuredLLM(), max_history=-1)
+
+
+def test_max_history_above_hard_cap_is_clamped() -> None:
+    """组件级配置不得突破集中定义的硬上限。"""
+    agent = MemoryCuratorAgent(FakeStructuredLLM(), max_history=10_000)
+
+    assert agent.max_history == MAX_HISTORY
+
+
+def test_zero_max_history_is_legal_and_sends_no_history() -> None:
+    history = [_candidate(index) for index in range(5)]
+    llm = FakeStructuredLLM([CuratorDecision()])
+    agent = MemoryCuratorAgent(llm, max_history=0)
+
+    agent.propose(_draft(), history)
+
+    assert agent.max_history == 0
+    assert llm.requests[0].payload["history"] == []
 
 
 def test_records_model_and_prompt_version() -> None:

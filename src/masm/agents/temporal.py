@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 
-from masm.agents import load_prompt
+from masm.agents import MAX_HISTORY, load_prompt, resolve_max_history
 from masm.providers.llm import ModelRequest, StructuredLLM
 from masm.schemas.agents import PerceptionResult, TemporalRelationResult
 from masm.storage.types import MemoryCandidate
@@ -10,8 +10,8 @@ from masm.storage.types import MemoryCandidate
 PROMPT_FILE = "temporal_v1.txt"
 PROMPT_VERSION = "v1"
 
-# 传入模型的同用户历史候选上限（配置项）。
-DEFAULT_MAX_HISTORY = 8
+# 传入模型的同用户历史候选上限；不得超过集中定义的硬上限。
+DEFAULT_MAX_HISTORY = MAX_HISTORY
 
 
 class AgentOutputError(ValueError):
@@ -32,12 +32,10 @@ class TemporalRelationAgent:
         prompt_version: str = PROMPT_VERSION,
         max_history: int = DEFAULT_MAX_HISTORY,
     ) -> None:
-        if max_history < 0:
-            raise ValueError("max_history 必须为非负整数")
         self._llm = llm
         self._model = model or llm.model
         self._prompt_version = prompt_version
-        self._max_history = max_history
+        self._max_history = resolve_max_history(max_history)
         self._prompt = load_prompt(PROMPT_FILE)
 
     @property

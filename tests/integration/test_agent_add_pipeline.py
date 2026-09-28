@@ -2,14 +2,17 @@
 
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+import pytest
+from sqlalchemy import func, select, update
 
+from masm.agents import MAX_HISTORY
 from masm.agents.curator import MemoryCuratorAgent
 from masm.agents.perception import PerceptionAgent
 from masm.agents.temporal import TemporalRelationAgent
+from masm.orchestration.action_validator import ActionValidationError, validate_actions
 from masm.orchestration.add_pipeline import AddPipeline, PipelineState
 from masm.providers.fakes import FakeStructuredLLM
-from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever
+from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever, ParsedQuery
 from masm.schemas.agents import (
     ActionKind,
     CuratorAction,
@@ -301,6 +304,195 @@ def test_conflict_creates_group_and_conflict_rows(
     assert len(conflicting) == 2
     assert len(conflicts) == 2
     assert {row.memory_id for row in conflicts} == {row.id for row in conflicting}
+
+
+def _memory_ids(database: Database, user_id: str) -> list[UUID]:
+    with database.session() as session:
+        return list(
+            session.execute(
+                select(Memory.id)
+                .where(Memory.user_id == user_id)
+                .order_by(Memory.created_at, Memory.id)
+            ).scalars()
+        )
+
+
+def _evidence_map(database: Database, user_id: str) -> dict:
+    with database.session() as session:
+        return {
+            row.id: (row.position, row.role, row.content)
+            for row in session.execute(
+                select(SourceMessage).where(SourceMessage.user_id == user_id)
+            ).scalars()
+        }
+
+
+def _set_supersede(database: Database, source_id: UUID, target_id: UUID) -> None:
+    with database.session() as session:
+        session.execute(
+            update(Memory).where(Memory.id == source_id).values(supersedes=target_id)
+        )
+        session.commit()
+
+
+def _retrieve_history(database: Database, embeddings, user_id: str, text: str):
+    return BaselineRetriever(
+        MemoryRepository(database), embeddings, DEFAULT_CHANNEL_WEIGHTS
+    ).retrieve(user_id, ParsedQuery(text_queries=(text,), intent="fact"), 10)
+
+
+def _add_with_decision(
+    database, asset_store, settings, embeddings, user_id, request_id, text, kind, target
+):
+    pipeline, _llms = _build_pipeline(database, embeddings, decision=_decision(kind, target))
+    service = AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings, pipeline=pipeline
+    )
+    return service.add(_request(request_id, user_id, text))
+
+
+def test_real_recall_preserves_governance_fields(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """真实召回链路必须完整保留 supersedes / status / conflict_group_id。"""
+    baseline = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    user_id = _uid("u")
+    baseline.add(_request(_uid("r"), user_id, "governed memory alpha"))
+    baseline.add(_request(_uid("r"), user_id, "governed memory beta"))
+    first_id, second_id = _memory_ids(database, user_id)
+    _set_supersede(database, first_id, second_id)
+    group_id = uuid4()
+    with database.session() as session:
+        session.execute(
+            update(Memory)
+            .where(Memory.id == first_id)
+            .values(status="superseded", conflict_group_id=group_id)
+        )
+        session.commit()
+
+    by_id = {
+        candidate.memory_id: candidate
+        for candidate in _retrieve_history(database, embeddings, user_id, "governed memory")
+    }
+
+    assert by_id[first_id].supersedes == second_id
+    assert by_id[first_id].status == "superseded"
+    assert by_id[first_id].conflict_group_id == group_id
+
+
+def test_supersede_cycle_is_rejected_through_real_recall_path(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """Repository 通道 -> BaselineRetriever -> validate_actions：替代环必须让 SUPERSEDE 被拒绝。"""
+    baseline = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    user_id = _uid("u")
+    baseline.add(_request(_uid("r"), user_id, "cycle memory one"))
+    baseline.add(_request(_uid("r"), user_id, "cycle memory two"))
+    first_id, second_id = _memory_ids(database, user_id)
+    _set_supersede(database, first_id, second_id)
+    _set_supersede(database, second_id, first_id)
+
+    history = _retrieve_history(database, embeddings, user_id, "cycle memory")
+
+    assert {candidate.memory_id for candidate in history} >= {first_id, second_id}
+    assert any(candidate.supersedes is not None for candidate in history)
+
+    decision = CuratorDecision(actions=(_action(ActionKind.SUPERSEDE, first_id),))
+    with pytest.raises(ActionValidationError):
+        validate_actions(user_id, decision, history)
+
+
+def test_conflict_group_continues_across_decisions(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """A 与 B 成组后 C 与 A 冲突：A/B/C 同一组，每成员恰好一条记录，原始证据不变。"""
+    baseline = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    user_id = _uid("u")
+    request_a = _uid("r")
+    baseline.add(_request(request_a, user_id, "the meeting is on Monday"))
+    memory_a = _memory_row(database, user_id, request_a)
+
+    request_b = _uid("r")
+    _add_with_decision(
+        database, asset_store, settings, embeddings, user_id, request_b,
+        "the meeting is on Tuesday", ActionKind.CONFLICT, memory_a.id,
+    )
+    memory_b = _memory_row(database, user_id, request_b)
+    evidence_before = _evidence_map(database, user_id)
+
+    request_c = _uid("r")
+    _add_with_decision(
+        database, asset_store, settings, embeddings, user_id, request_c,
+        "the meeting is on Wednesday", ActionKind.CONFLICT, memory_a.id,
+    )
+    memory_c = _memory_row(database, user_id, request_c)
+
+    member_ids = [memory_a.id, memory_b.id, memory_c.id]
+    with database.session() as session:
+        groups = {
+            row.id: row.conflict_group_id
+            for row in session.execute(
+                select(Memory).where(Memory.id.in_(member_ids))
+            ).scalars()
+        }
+        conflicts = list(
+            session.execute(
+                select(MemoryConflict).where(MemoryConflict.user_id == user_id)
+            ).scalars()
+        )
+
+    assert set(groups) == set(member_ids)
+    assert len(set(groups.values())) == 1
+    assert None not in groups.values()
+
+    assert len(conflicts) == 3
+    assert {row.memory_id for row in conflicts} == set(member_ids)
+    assert {row.conflict_group_id for row in conflicts} == set(groups.values())
+    assert len({row.version for row in conflicts}) == 3
+
+    evidence_after = _evidence_map(database, user_id)
+    assert {key: value for key, value in evidence_after.items() if key in evidence_before} == (
+        evidence_before
+    )
+
+
+def test_pipeline_history_never_exceeds_hard_cap(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """超大配置被安全截断，传给模型的历史绝不超过硬上限。"""
+    baseline = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    user_id = _uid("u")
+    for index in range(MAX_HISTORY + 4):
+        baseline.add(_request(_uid("r"), user_id, f"hard cap memory {index}"))
+
+    pipeline, llms = _build_pipeline(database, embeddings, max_history=10_000)
+    assert pipeline.max_history == MAX_HISTORY
+    service = AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings, pipeline=pipeline
+    )
+    service.add(_request(_uid("r"), user_id, "hard cap memory"))
+
+    _perception_llm, temporal_llm, curator_llm = llms
+    assert len(temporal_llm.requests[0].payload["history"]) <= MAX_HISTORY
+    assert len(curator_llm.requests[0].payload["history"]) <= MAX_HISTORY
+
+
+def test_zero_history_pipeline_still_adds(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """max_history=0 是合法配置：不召回历史，但 Add 仍然成功。"""
+    pipeline, llms = _build_pipeline(database, embeddings, max_history=0)
+    service = AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings, pipeline=pipeline
+    )
+    user_id = _uid("u")
+
+    response = service.add(_request(_uid("r"), user_id, "no history memory"))
+
+    assert response.success is True
+    _perception_llm, temporal_llm, curator_llm = llms
+    assert temporal_llm.requests[0].payload["history"] == []
+    assert curator_llm.requests[0].payload["history"] == []
 
 
 def test_source_message_count_matches_request(

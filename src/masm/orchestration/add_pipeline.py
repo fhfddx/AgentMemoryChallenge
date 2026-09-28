@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
+from masm.agents import MAX_HISTORY, resolve_max_history
 from masm.agents.curator import MemoryCuratorAgent
 from masm.agents.perception import PerceptionAgent
 from masm.agents.temporal import TemporalRelationAgent
@@ -19,8 +20,8 @@ from masm.schemas.api import AddRequest
 from masm.schemas.content import ContentPart, TextPart
 from masm.storage.types import MemoryBundle, MemoryDraft, ValidatedActions
 
-# 召回并传给智能体的同用户历史候选上限（固定上限，防止无界上下文）。
-DEFAULT_MAX_HISTORY = 8
+# 召回并传给智能体的同用户历史候选上限；不得超过集中定义的硬上限。
+DEFAULT_MAX_HISTORY = MAX_HISTORY
 
 
 class PipelineState(StrEnum):
@@ -95,13 +96,11 @@ class AddPipeline:
         retriever: BaselineRetriever,
         max_history: int = DEFAULT_MAX_HISTORY,
     ) -> None:
-        if max_history < 0:
-            raise ValueError("max_history 必须为非负整数")
         self._perception = perception
         self._temporal = temporal
         self._curator = curator
         self._retriever = retriever
-        self._max_history = max_history
+        self._max_history = resolve_max_history(max_history)
 
     @property
     def max_history(self) -> int:

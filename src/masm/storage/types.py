@@ -103,7 +103,8 @@ class LedgerState:
 class MemoryCandidate:
     """检索返回的记忆候选。
 
-    supersedes / status 供确定性动作校验判断替代链与治理状态。
+    supersedes / status / conflict_group_id 是治理字段：召回通道与检索器都必须完整保留，
+    确定性动作校验据此判断替代链与冲突组延续。
     """
 
     memory_id: UUID
@@ -112,6 +113,7 @@ class MemoryCandidate:
     score: float
     supersedes: UUID | None = None
     status: str = "active"
+    conflict_group_id: UUID | None = None
 
 
 @dataclass(frozen=True)

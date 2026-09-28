@@ -233,17 +233,33 @@ class MemoryRepository:
                 target = session.get(Memory, target_id)
                 if target is None or target.user_id != user_id:
                     raise LedgerStateError("冲突目标不属于该用户")
+                # 延续已有冲突组：目标原属的组必须与本次组一致。
+                if target.conflict_group_id not in (None, actions.conflict_group_id):
+                    raise LedgerStateError("冲突目标已属于另一个冲突组")
                 target.conflict_group_id = actions.conflict_group_id
                 members.append(target_id)
-            for version, member_id in enumerate(dict.fromkeys(members), start=1):
+            session.flush()
+            # 已有成员不得重复插入；新成员版本号在该组现有最大版本之后追加。
+            registered = session.execute(
+                select(MemoryConflict).where(
+                    MemoryConflict.user_id == user_id,
+                    MemoryConflict.conflict_group_id == actions.conflict_group_id,
+                )
+            ).scalars().all()
+            known = {row.memory_id for row in registered}
+            next_version = max((row.version for row in registered), default=0) + 1
+            for member_id in dict.fromkeys(members):
+                if member_id in known:
+                    continue
                 session.add(
                     MemoryConflict(
                         user_id=user_id,
                         conflict_group_id=actions.conflict_group_id,
                         memory_id=member_id,
-                        version=version,
+                        version=next_version,
                     )
                 )
+                next_version += 1
 
     def get_by_request(self, user_id: str, request_id: str) -> AddCommit | None:
         """按 user_id + request_id 返回已提交结果；不存在时返回 None。"""
@@ -393,6 +409,7 @@ class MemoryRepository:
                 score=float(row.rank),
                 supersedes=row.Memory.supersedes,
                 status=row.Memory.status,
+                conflict_group_id=row.Memory.conflict_group_id,
             )
             for row in rows
         ]
@@ -423,6 +440,7 @@ class MemoryRepository:
                     Memory.summary.label("summary"),
                     Memory.supersedes.label("supersedes"),
                     Memory.status.label("status"),
+                    Memory.conflict_group_id.label("conflict_group_id"),
                     distance,
                 )
                 .join(MemoryEmbedding, MemoryEmbedding.memory_id == Memory.id)
@@ -444,6 +462,7 @@ class MemoryRepository:
                     scored.c.summary,
                     scored.c.supersedes,
                     scored.c.status,
+                    scored.c.conflict_group_id,
                     best_distance.label("distance"),
                 )
                 .group_by(
@@ -452,6 +471,7 @@ class MemoryRepository:
                     scored.c.summary,
                     scored.c.supersedes,
                     scored.c.status,
+                    scored.c.conflict_group_id,
                 )
                 .order_by(best_distance, scored.c.memory_id)
                 .limit(limit)
@@ -465,6 +485,7 @@ class MemoryRepository:
                 score=1.0 - float(row.distance),
                 supersedes=row.supersedes,
                 status=row.status,
+                conflict_group_id=row.conflict_group_id,
             )
             for row in rows
         ]
@@ -515,6 +536,9 @@ class MemoryRepository:
                 user_id=memory.user_id,
                 content=memory.summary,
                 score=0.0,
+                supersedes=memory.supersedes,
+                status=memory.status,
+                conflict_group_id=memory.conflict_group_id,
             )
             for memory in memories
         ]
@@ -546,6 +570,7 @@ class MemoryRepository:
                 score=0.0,
                 supersedes=row.supersedes,
                 status=row.status,
+                conflict_group_id=row.conflict_group_id,
             )
             for row in rows
         ]
