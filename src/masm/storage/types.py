@@ -57,10 +57,15 @@ class MemoryBundle:
 
 @dataclass(frozen=True)
 class LedgerState:
-    """幂等账本状态快照（含租约时间戳）。"""
+    """幂等账本状态快照。
+
+    owner_token 是持久化在 RequestLedger 上的所有者标识（每次 claim/takeover 都会产生新值），
+    同时充当租约时间戳与 fencing token：旧所有者持有旧 token，无法再提交、标记失败或清理
+    新所有者的资源。
+    """
 
     status: str
-    updated_at: datetime
+    owner_token: datetime
 
 
 @dataclass(frozen=True)

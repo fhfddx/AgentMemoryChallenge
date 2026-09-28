@@ -6,10 +6,10 @@
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import CursorResult, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -67,12 +67,13 @@ class MemoryRepository:
         )
 
     def finalize_request(
-        self, user_id: str, request_id: str, bundle: MemoryBundle
+        self, user_id: str, request_id: str, bundle: MemoryBundle, *, owner_token: datetime
     ) -> AddCommit:
         """在单个数据库事务中完成最终提交。
 
-        事务边界：锁定 RequestLedger -> 校验 PROCESSING -> 写入
-        Session/Asset/SourceMessage/Memory -> 账本置 COMMITTED -> 一次性 commit。
+        事务边界：锁定 RequestLedger -> 原子校验 owner_token 且状态为 PROCESSING ->
+        写入 Session/Asset/SourceMessage/Memory -> 账本置 COMMITTED（保留 owner_token，
+        供提交后崩溃重试找到并发布正确所有者的暂存对象）-> 一次性 commit。
         """
         with self._database.session() as session:
             ledger = session.execute(
@@ -87,8 +88,18 @@ class MemoryRepository:
                 raise LedgerStateError("幂等账本不存在，无法完成提交")
             if ledger.status != "PROCESSING":
                 raise LedgerStateError(f"幂等账本状态不是 PROCESSING: {ledger.status}")
+            if ledger.updated_at != owner_token:
+                raise LedgerStateError("所有者标识已失效，拒绝提交")
             memory_ids = self._write_bundle(session, user_id, bundle)
-            ledger.status = "COMMITTED"
+            # 显式写入 updated_at，既保留 fencing token，也避免 onupdate 覆盖它。
+            session.execute(
+                update(RequestLedger)
+                .where(
+                    RequestLedger.user_id == user_id,
+                    RequestLedger.request_id == request_id,
+                )
+                .values(status="COMMITTED", updated_at=owner_token)
+            )
             session.commit()
         return AddCommit(
             request_id=bundle.request_id,
@@ -189,7 +200,7 @@ class MemoryRepository:
         return state.status if state is not None else None
 
     def get_ledger(self, user_id: str, request_id: str) -> LedgerState | None:
-        """返回幂等账本状态与租约时间戳。"""
+        """返回幂等账本状态与所有者标识（fencing token）。"""
         with self._database.session() as session:
             ledger = session.execute(
                 select(RequestLedger).where(
@@ -199,12 +210,12 @@ class MemoryRepository:
             ).scalar_one_or_none()
         if ledger is None:
             return None
-        return LedgerState(status=ledger.status, updated_at=ledger.updated_at)
+        return LedgerState(status=ledger.status, owner_token=ledger.updated_at)
 
     def claim_request(
         self, user_id: str, request_id: str, session_id: str, *, now: datetime
-    ) -> bool:
-        """原子地写入 PROCESSING 账本；返回 True 表示成功取得所有权。"""
+    ) -> datetime | None:
+        """原子地写入 PROCESSING 账本；返回本次所有者标识，已被占用时返回 None。"""
         with self._database.session() as session:
             self._ensure_user(session, user_id)
             # 先落库 User，避免 RequestLedger 外键在未排序的 flush 中失败。
@@ -222,8 +233,8 @@ class MemoryRepository:
                 session.commit()
             except IntegrityError:
                 session.rollback()
-                return False
-        return True
+                return None
+        return now
 
     def takeover_request(
         self,
@@ -232,52 +243,47 @@ class MemoryRepository:
         *,
         now: datetime,
         stale_before: datetime,
-    ) -> bool:
-        """原子接管已过期的 PROCESSING 租约；成功返回 True。"""
+    ) -> datetime | None:
+        """原子接管已过期的 PROCESSING 租约；返回新所有者标识，失败返回 None。"""
         with self._database.session() as session:
-            ledger = session.execute(
-                select(RequestLedger)
-                .where(
-                    RequestLedger.user_id == user_id,
-                    RequestLedger.request_id == request_id,
-                )
-                .with_for_update()
-            ).scalar_one_or_none()
-            if ledger is None or ledger.status != "PROCESSING":
-                return False
-            if ledger.updated_at >= stale_before:
-                return False
-            ledger.updated_at = now
+            result = cast(
+                CursorResult[Any],
+                session.execute(
+                    update(RequestLedger)
+                    .where(
+                        RequestLedger.user_id == user_id,
+                        RequestLedger.request_id == request_id,
+                        RequestLedger.status == "PROCESSING",
+                        RequestLedger.updated_at < stale_before,
+                    )
+                    .values(updated_at=now)
+                ),
+            )
             session.commit()
-            return True
+            claimed = result.rowcount == 1
+        return now if claimed else None
 
     def mark_request(
-        self,
-        user_id: str,
-        request_id: str,
-        status: str,
-        *,
-        now: datetime,
-        expect: str | None = None,
+        self, user_id: str, request_id: str, status: str, *, owner_token: datetime
     ) -> bool:
-        """更新幂等账本状态；expect 指定时仅当当前状态匹配才更新。"""
+        """按所有者标识原子更新账本状态；token 不匹配时不产生任何影响。"""
         with self._database.session() as session:
-            ledger = session.execute(
-                select(RequestLedger)
-                .where(
-                    RequestLedger.user_id == user_id,
-                    RequestLedger.request_id == request_id,
-                )
-                .with_for_update()
-            ).scalar_one_or_none()
-            if ledger is None:
-                return False
-            if expect is not None and ledger.status != expect:
-                return False
-            ledger.status = status
-            ledger.updated_at = now
+            result = cast(
+                CursorResult[Any],
+                session.execute(
+                    update(RequestLedger)
+                    .where(
+                        RequestLedger.user_id == user_id,
+                        RequestLedger.request_id == request_id,
+                        RequestLedger.status == "PROCESSING",
+                        RequestLedger.updated_at == owner_token,
+                    )
+                    .values(status=status, updated_at=owner_token)
+                ),
+            )
             session.commit()
-            return True
+            updated = result.rowcount == 1
+        return updated
 
     def has_committed_data(self, user_id: str, request_id: str) -> bool:
         """该 request_id 是否已经有已提交的记忆数据。"""

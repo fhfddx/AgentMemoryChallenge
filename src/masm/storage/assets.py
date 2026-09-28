@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
@@ -109,6 +110,11 @@ def _is_within(base: Path, candidate: Path) -> bool:
     return candidate_text == base_text or candidate_text.startswith(base_text + os.sep)
 
 
+def _owner_text(owner_token: datetime) -> str:
+    """把所有者标识规范化为与数据库往返无关的稳定文本（统一到 UTC）。"""
+    return owner_token.astimezone(UTC).strftime("%Y%m%dT%H%M%S.%f")
+
+
 def _parse_image(data: bytes) -> tuple[str, int, int]:
     """使用 Pillow 实际解析并 verify 图片，返回 (media_type, width, height)。"""
     try:
@@ -190,8 +196,9 @@ class AssetStore:
     def _user_namespace(self, user_id: str) -> str:
         return hashlib.sha256(user_id.encode("utf-8")).hexdigest()
 
-    def _request_namespace(self, user_id: str, request_id: str) -> str:
-        payload = f"{user_id}\x00{request_id}".encode()
+    def _attempt_namespace(self, user_id: str, request_id: str, owner_token: datetime) -> str:
+        """按「用户 + 请求 + 处理尝试（所有者标识）」隔离暂存命名空间。"""
+        payload = f"{user_id}\x00{request_id}\x00{_owner_text(owner_token)}".encode()
         return hashlib.sha256(payload).hexdigest()
 
     def _resolve_within_root(self, relative: str) -> Path:
@@ -201,19 +208,25 @@ class AssetStore:
             raise AssetPathError(f"对象路径越出存储根目录: {relative}")
         return candidate
 
-    def staging_dir(self, user_id: str, request_id: str) -> Path:
-        """本请求的暂存目录（仅本请求可见）。"""
-        namespace = self._request_namespace(user_id, request_id)
+    def staging_dir(self, user_id: str, request_id: str, owner_token: datetime) -> Path:
+        """本次处理尝试的暂存目录（仅该所有者可见）。"""
+        namespace = self._attempt_namespace(user_id, request_id, owner_token)
         return self._resolve_within_root(f"{_STAGING_DIRNAME}/{namespace}")
 
-    def put(self, user_id: str, request_id: str, image: DecodedImage) -> AssetRef:
-        """把对象写入本请求的暂存目录，返回最终内容寻址引用。"""
+    def put(
+        self,
+        user_id: str,
+        request_id: str,
+        owner_token: datetime,
+        image: DecodedImage,
+    ) -> AssetRef:
+        """把对象写入本次处理尝试的暂存目录，返回最终内容寻址引用。"""
         extension = _EXT_BY_MEDIA_TYPE[image.media_type]
         content_hash = hashlib.sha256(image.data).hexdigest()
         filename = f"{content_hash}{extension}"
         object_uri = f"{self._user_namespace(user_id)}/{filename}"
 
-        staging_dir = self.staging_dir(user_id, request_id)
+        staging_dir = self.staging_dir(user_id, request_id, owner_token)
         staging_dir.mkdir(parents=True, exist_ok=True)
         staged = staging_dir / filename
         created = not staged.exists()
@@ -230,12 +243,12 @@ class AssetStore:
             created=created,
         )
 
-    def publish(self, user_id: str, request_id: str) -> list[str]:
-        """把本请求暂存的对象原子发布到内容寻址的最终位置。
+    def publish(self, user_id: str, request_id: str, owner_token: datetime) -> list[str]:
+        """把本次处理尝试暂存的对象原子发布到内容寻址的最终位置。
 
         已存在同名最终对象时用相同内容覆盖（内容寻址天然幂等），因此并发发布安全。
         """
-        staging_dir = self.staging_dir(user_id, request_id)
+        staging_dir = self.staging_dir(user_id, request_id, owner_token)
         if not staging_dir.exists():
             return []
         published: list[str] = []
@@ -251,9 +264,9 @@ class AssetStore:
             staging_dir.rmdir()
         return published
 
-    def discard(self, user_id: str, request_id: str) -> None:
-        """丢弃本请求的暂存目录；绝不触碰已发布或其它请求的对象。"""
-        staging_dir = self.staging_dir(user_id, request_id)
+    def discard(self, user_id: str, request_id: str, owner_token: datetime) -> None:
+        """丢弃本次处理尝试的暂存目录；绝不触碰已发布或其它所有者的对象。"""
+        staging_dir = self.staging_dir(user_id, request_id, owner_token)
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
 
