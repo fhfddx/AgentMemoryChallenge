@@ -1,14 +1,16 @@
 """数据库迁移集成测试。"""
 
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect
-from sqlalchemy.engine import make_url
 
+from conftest import require_masm_test_database
 from masm.storage.db import Database
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -30,14 +32,6 @@ REQUIRED_TABLES = {
 }
 
 
-def _require_masm_test(url: str) -> str:
-    """破坏性迁移操作前必须确认目标数据库是 masm_test。"""
-    name = make_url(url).database
-    if name != "masm_test":
-        raise RuntimeError(f"拒绝在非 masm_test 数据库上重建迁移: {name}")
-    return name
-
-
 def _alembic_config(url: str) -> Config:
     """构造指向仓库 alembic 目录与目标数据库的配置。"""
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
@@ -52,19 +46,26 @@ def database(database_url: str) -> Database:
     return Database.create(database_url)
 
 
-def test_migration_upgrade_downgrade_cycle(database_url: str) -> None:
-    """从空库 downgrade、upgrade、再 upgrade 的完整循环。"""
-    _require_masm_test(database_url)
-    cfg = _alembic_config(database_url)
-    engine = create_engine(database_url)
+def test_migration_upgrade_downgrade_cycle(
+    database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """从空库 downgrade、upgrade 的完整循环，且只作用于已验证的 masm_test。"""
+    validated = require_masm_test_database(database_url)
+    cfg = _alembic_config(validated)
+    engine = create_engine(validated)
 
-    command.downgrade(cfg, "base")
-    remaining = set(inspect(engine).get_table_names())
-    assert not (REQUIRED_TABLES & remaining), (
-        f"downgrade 后业务表仍存在: {REQUIRED_TABLES & remaining}"
-    )
+    # 模拟外部 DATABASE_URL 指向其他库（危险场景）。
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://postgres@localhost:5433/production")
+    # 用已验证的 masm_test URL 覆盖，确保 alembic/env.py 实际使用的是安全库。
+    with patch.dict(os.environ, {"DATABASE_URL": validated}):
+        command.downgrade(cfg, "base")
+        remaining = set(inspect(engine).get_table_names())
+        assert not (REQUIRED_TABLES & remaining), (
+            f"downgrade 后业务表仍存在: {REQUIRED_TABLES & remaining}"
+        )
 
-    command.upgrade(cfg, "head")
+        command.upgrade(cfg, "head")
+
     tables = set(inspect(engine).get_table_names())
     missing = REQUIRED_TABLES - tables
     assert not missing, f"upgrade head 后缺少表: {sorted(missing)}"
