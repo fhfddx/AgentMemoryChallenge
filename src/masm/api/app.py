@@ -1,10 +1,10 @@
 """FastAPI 应用工厂。"""
 
 from collections.abc import Mapping
-from pathlib import Path
 
 from fastapi import FastAPI
 
+from masm.api.health import probe_dependencies
 from masm.api.limits import RequestLimiter
 from masm.api.routes import router
 from masm.config import Settings
@@ -33,9 +33,13 @@ def create_app(
     application = FastAPI(title="MASM", version="0.1.0")
     application.state.settings = settings
     application.state.database = database or Database.create(settings.database_url)
-    application.state.asset_store = asset_store or AssetStore(Path("artifacts/assets"))
+    application.state.asset_store = asset_store or AssetStore(settings.asset_dir)
     application.state.limiter = limiter or RequestLimiter()
     application.state.embeddings = embeddings or DeterministicFakeEmbeddingProvider()
+    # 仅供容器编排/运维代码直接调用，不注册新的公共 HTTP 路由。
+    application.state.dependency_probe = lambda: probe_dependencies(
+        application.state.database, application.state.asset_store
+    )
 
     repository = MemoryRepository(application.state.database)
     application.state.add_service = AddService(
@@ -60,3 +64,8 @@ def create_app(
 
     application.include_router(router)
     return application
+
+
+def create_app_from_env() -> FastAPI:
+    """供 Uvicorn ``--factory`` 使用的环境变量应用工厂。"""
+    return create_app(Settings.from_env())

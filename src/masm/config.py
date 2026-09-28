@@ -5,6 +5,7 @@
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 def _int_env(name: str, default: int) -> int:
@@ -24,6 +25,7 @@ class Settings:
 
     database_url: str
     api_keys: tuple[str, ...] = ()
+    asset_dir: Path = Path("artifacts/assets")
     max_image_bytes: int = 10485760  # 单图解码后上限 10 MiB
     max_add_image_bytes: int = 31457280  # 单次 Add 图片总量上限 30 MiB
     max_search_response_bytes: int = 31457280  # Search 响应总量上限 30 MiB
@@ -37,6 +39,7 @@ class Settings:
         return cls(
             database_url=database_url,
             api_keys=api_keys,
+            asset_dir=Path(os.getenv("MASM_ASSET_DIR", "artifacts/assets")),
             max_image_bytes=_int_env("MASM_MAX_IMAGE_BYTES", 10485760),
             max_add_image_bytes=_int_env("MASM_MAX_ADD_IMAGE_BYTES", 31457280),
             max_search_response_bytes=_int_env("MASM_MAX_SEARCH_RESPONSE_BYTES", 31457280),

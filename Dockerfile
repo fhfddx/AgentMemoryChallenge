@@ -1,0 +1,26 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    MASM_ASSET_DIR=/data/assets
+
+WORKDIR /app
+
+RUN groupadd --system masm && useradd --system --gid masm --home-dir /app masm \
+    && mkdir -p /data/assets && chown -R masm:masm /data /app
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN python -m pip install --no-cache-dir .
+
+COPY alembic.ini ./
+COPY alembic ./alembic
+
+USER masm
+EXPOSE 8000
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"
+
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn masm.api.app:create_app_from_env --factory --host 0.0.0.0 --port 8000"]

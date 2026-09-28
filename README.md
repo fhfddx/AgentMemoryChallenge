@@ -36,6 +36,21 @@ copy .env.example .env
 .venv\Scripts\mypy src
 ```
 
+测试默认连接本机 `127.0.0.1:5433/masm_test`；可通过 `MASM_TEST_DATABASE_URL` 覆盖，
+但数据库名必须严格为 `masm_test`。
+
+## 容器部署与 Smoke
+
+```bash
+# .env 中至少修改 MASM_API_KEYS 和 POSTGRES_PASSWORD
+docker compose up -d --build
+python scripts/smoke_test.py --base-url http://localhost:8000 --api-key test-key
+```
+
+Smoke 覆盖公开 Health、Add、立即 Search 和重复 Add。复制它输出的三个标识，重启 API 后运行
+`--verify-request-id`、`--verify-user-id`、`--verify-marker` 可验证持久性。HTTPS、备份、健康检查
+和当前对象存储边界见 `deployments/README.md`。
+
 ## 目录结构
 
 ```text
@@ -45,8 +60,10 @@ src/masm/
   config.py    应用配置
 tests/
   contract/    官方 HTTP 契约测试
+experiments/   可复现实验配置、公开 API 运行器与汇总工具
 ```
 
 ## 当前状态
 
-任务 1：项目基础、配置与官方 API Schema。
+已完成结构化记忆写入、混合检索、多智能体治理、隐私删除、容器候选部署与可复现实验框架。
+公共线上接口仍严格限制为 `GET /health`、`POST /add`、`POST /search`。

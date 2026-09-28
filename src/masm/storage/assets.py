@@ -223,6 +223,13 @@ class AssetStore:
     def base_dir(self) -> Path:
         return self._base_dir
 
+    def check_ready(self) -> None:
+        """验证对象目录可创建且可写；探针文件即时删除，不返回路径或异常细节。"""
+        self._base_dir.mkdir(parents=True, exist_ok=True)
+        handle, probe_name = tempfile.mkstemp(dir=str(self._base_dir), prefix=".health-")
+        os.close(handle)
+        os.unlink(probe_name)
+
     def _user_namespace(self, user_id: str) -> str:
         return hashlib.sha256(user_id.encode("utf-8")).hexdigest()
 

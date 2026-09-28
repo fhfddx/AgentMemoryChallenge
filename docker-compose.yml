@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-masm}
+      POSTGRES_USER: ${POSTGRES_USER:-masm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-masm-local-only}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-masm}:${POSTGRES_PASSWORD:-masm-local-only}@postgres:5432/${POSTGRES_DB:-masm}
+      MASM_API_KEYS: ${MASM_API_KEYS:-test-key}
+      MASM_ASSET_DIR: /data/assets
+      MASM_MAX_IMAGE_BYTES: ${MASM_MAX_IMAGE_BYTES:-10485760}
+      MASM_MAX_ADD_IMAGE_BYTES: ${MASM_MAX_ADD_IMAGE_BYTES:-31457280}
+      MASM_MAX_SEARCH_RESPONSE_BYTES: ${MASM_MAX_SEARCH_RESPONSE_BYTES:-31457280}
+      MASM_MAX_TOP_K: ${MASM_MAX_TOP_K:-100}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "${MASM_HTTP_PORT:-8000}:8000"
+    volumes:
+      - asset_data:/data/assets
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8-alpine
+    profiles: ["https"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      MASM_DOMAIN: ${MASM_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deployments/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  asset_data:
+  caddy_data:
+  caddy_config:
