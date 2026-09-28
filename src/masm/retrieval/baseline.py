@@ -101,6 +101,7 @@ class BaselineRetriever:
                     supersedes=source.supersedes,
                     status=source.status,
                     conflict_group_id=source.conflict_group_id,
+                    duplicate_of=source.duplicate_of,
                 )
             )
         return results

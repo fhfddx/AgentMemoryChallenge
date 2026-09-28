@@ -69,10 +69,7 @@ class EvidenceReranker:
         """按相关性、匹配度、冲突覆盖与重复惩罚排序。"""
         if not candidates:
             return []
-        pool = sorted(
-            list(candidates)[: self._max_candidates],
-            key=lambda item: (-item.score, str(item.memory_id)),
-        )
+        pool = self._admit(candidates)
         provider_scores = self._provider_scores(query, pool)
         group_counts: dict[UUID, int] = {}
         for candidate in pool:
@@ -115,6 +112,47 @@ class EvidenceReranker:
                 )
             )
         return ranked
+
+    def _admit(self, candidates: Sequence[MemoryCandidate]) -> list[MemoryCandidate]:
+        """有界候选准入策略。
+
+        先保证需要补全的冲突证据（同组 ≥2 条）进入重排池，剩余名额按确定性的
+        基础分数与 memory_id 选取；既不截断调用方输入前缀，也不突破硬上限。
+        """
+        by_id: dict[UUID, MemoryCandidate] = {}
+        for candidate in candidates:
+            by_id.setdefault(candidate.memory_id, candidate)
+
+        grouped: dict[UUID, list[MemoryCandidate]] = {}
+        for candidate in by_id.values():
+            if candidate.conflict_group_id is not None:
+                grouped.setdefault(candidate.conflict_group_id, []).append(candidate)
+
+        selected: list[MemoryCandidate] = []
+        selected_ids: set[UUID] = set()
+        for group_id in sorted(grouped, key=str):
+            members = grouped[group_id]
+            if len(members) < 2:
+                continue
+            for member in sorted(members, key=lambda item: (-item.score, str(item.memory_id))):
+                if len(selected) >= self._max_candidates:
+                    return selected
+                if member.memory_id in selected_ids:
+                    continue
+                selected.append(member)
+                selected_ids.add(member.memory_id)
+        if len(selected) >= self._max_candidates:
+            return selected
+
+        rest = sorted(
+            (item for key, item in by_id.items() if key not in selected_ids),
+            key=lambda item: (-item.score, str(item.memory_id)),
+        )
+        for candidate in rest:
+            if len(selected) >= self._max_candidates:
+                break
+            selected.append(candidate)
+        return selected
 
     def _score(
         self,

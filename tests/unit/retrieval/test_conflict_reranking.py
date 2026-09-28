@@ -151,6 +151,37 @@ def test_hard_cap_is_enforced() -> None:
     assert len(ranked) <= MAX_RERANK_CANDIDATES
 
 
+def test_high_score_candidate_at_input_tail_is_admitted() -> None:
+    """无冲突时不得按输入顺序丢弃尾部的高分候选。"""
+    from masm.retrieval.reranker import MAX_RERANK_CANDIDATES
+
+    filler = [_candidate(f"filler {index}", score=0.1) for index in range(MAX_RERANK_CANDIDATES)]
+    best = _candidate("best evidence", score=0.99)
+
+    ranked = EvidenceReranker().rank(ParsedQuery(text_queries=("best",)), [*filler, best])
+
+    assert ranked[0].memory_id == best.memory_id
+    assert len(ranked) <= MAX_RERANK_CANDIDATES
+
+
+def test_conflict_peers_survive_candidate_admission() -> None:
+    """初始候选占满硬上限、冲突同伴位于输入尾部时仍必须进入重排池。"""
+    from masm.retrieval.reranker import MAX_RERANK_CANDIDATES
+
+    group = uuid4()
+    filler = [_candidate(f"filler {index}", score=0.5) for index in range(MAX_RERANK_CANDIDATES)]
+    first = _candidate("conflict one", score=0.2, conflict_group_id=group)
+    peer = _candidate("conflict two", score=0.1, conflict_group_id=group)
+
+    ranked = EvidenceReranker().rank(
+        ParsedQuery(text_queries=("conflict",)), [*filler, first, peer]
+    )
+
+    ids = {item.memory_id for item in ranked}
+    assert {first.memory_id, peer.memory_id} <= ids
+    assert len(ranked) <= MAX_RERANK_CANDIDATES
+
+
 def test_isolation_of_ids_in_ranked_evidence() -> None:
     candidate = _candidate("doc", score=0.5)
     ranked = EvidenceReranker().rank(ParsedQuery(text_queries=("doc",)), [candidate])

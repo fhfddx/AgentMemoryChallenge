@@ -115,6 +115,57 @@ def test_empty_seeds_return_no_expansion() -> None:
     assert repository.related_calls == []
 
 
+def test_conflict_peers_win_the_budget_over_plain_neighbours() -> None:
+    """普通邻居占满预算时，命中冲突组的同伴仍必须出现。"""
+    seed_a, peer, neighbour_one, neighbour_two = uuid4(), uuid4(), uuid4(), uuid4()
+    group = uuid4()
+    repository = _GraphRepository({seed_a: [neighbour_one, neighbour_two]})
+    repository.conflict_members = {seed_a: [peer], peer: [seed_a]}
+    seed = MemoryCandidate(
+        memory_id=seed_a, user_id=_USER, content="a", score=1.0, conflict_group_id=group
+    )
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [seed], 2)
+
+    ids = [candidate.memory_id for candidate in expanded]
+    assert peer in ids, "冲突组同伴被普通邻居挤掉"
+    assert len(ids) <= 2
+
+
+def test_multiple_conflict_groups_use_deterministic_order() -> None:
+    """多个冲突组同时出现时结果与集合迭代顺序无关。"""
+    first_seed, first_peer = uuid4(), uuid4()
+    second_seed, second_peer = uuid4(), uuid4()
+    group_one, group_two = uuid4(), uuid4()
+    repository = _GraphRepository()
+    repository.conflict_members = {
+        first_seed: [first_peer],
+        first_peer: [first_seed],
+        second_seed: [second_peer],
+        second_peer: [second_seed],
+    }
+    seeds = [
+        MemoryCandidate(
+            memory_id=first_seed, user_id=_USER, content="a", score=1.0,
+            conflict_group_id=group_one,
+        ),
+        MemoryCandidate(
+            memory_id=second_seed, user_id=_USER, content="b", score=0.5,
+            conflict_group_id=group_two,
+        ),
+    ]
+    expander = RelationExpander(repository)
+
+    first = expander.expand(_USER, seeds, 2)
+    second = expander.expand(_USER, seeds, 2)
+
+    assert [candidate.memory_id for candidate in first] == [
+        candidate.memory_id for candidate in second
+    ]
+    assert len(first) <= 2
+
+
 def test_conflict_peers_are_completed_and_marked() -> None:
     """冲突组命中一侧时补全另一侧，并保留冲突身份。"""
     a, b = uuid4(), uuid4()

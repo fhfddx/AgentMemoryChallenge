@@ -118,6 +118,36 @@ def test_mixed_query_keeps_order_and_intent() -> None:
     assert parsed.intent == "visual"
 
 
+@pytest.mark.parametrize(
+    "empty_output",
+    [
+        {},
+        {"text_queries": []},
+        {"text_queries": ["", "  "]},
+    ],
+)
+def test_empty_llm_output_falls_back_to_original_query(empty_output: dict) -> None:
+    """LLM 输出语义不可用时，必须用原始查询做规则降级而不是丢失查询。"""
+    query = "what happened before the meeting last week and who attended it"
+    analyzer = _analyzer(llm=FakeStructuredLLM([empty_output]))
+
+    parsed = analyzer.parse(query)
+
+    assert parsed.text_queries
+    assert len(parsed.text_queries) <= MAX_SUBQUERIES
+    assert query.split()[0] in " ".join(parsed.text_queries)
+
+
+@pytest.mark.parametrize("bad_intent", ["nonsense", "", "ANSWER"])
+def test_invalid_intent_is_never_carried_over(bad_intent: str) -> None:
+    llm = FakeStructuredLLM([{"text_queries": ["meeting"], "intent": bad_intent}])
+    analyzer = _analyzer(llm=llm)
+
+    parsed = analyzer.parse("who was related to the meeting before last week")
+
+    assert parsed.intent in {"fact", "temporal", "relational", "visual"}
+
+
 @pytest.mark.parametrize("configured", [4, 100, 10_000])
 def test_max_subqueries_cannot_exceed_hard_cap(configured: int) -> None:
     analyzer = _analyzer(max_subqueries=configured)

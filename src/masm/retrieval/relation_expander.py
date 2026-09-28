@@ -60,12 +60,17 @@ class RelationExpander:
             return []
 
         seed_ids = [seed.memory_id for seed in bounded_seeds]
-        related = self._repo.related(user_id, seed_ids, budget)
+        # 冲突补全优先占用预算，剩余预算才给普通一跳邻居。
         peers = self._complete_conflicts(user_id, bounded_seeds, budget)
+        related = self._repo.related(user_id, seed_ids, budget)
+        ordered = [
+            *sorted(peers, key=lambda item: (str(item.conflict_group_id), str(item.memory_id))),
+            *sorted(related, key=lambda item: (-item.score, str(item.memory_id))),
+        ]
 
         results: list[MemoryCandidate] = []
         seen = set(seed_ids)
-        for candidate in [*related, *peers]:
+        for candidate in ordered:
             if candidate.memory_id in seen:
                 continue
             seen.add(candidate.memory_id)

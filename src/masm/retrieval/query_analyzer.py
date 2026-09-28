@@ -117,13 +117,15 @@ class QueryAnalyzer:
         if self._llm is None or not _is_complex(joined):
             return self._rule_based(joined, images)
         try:
-            analysis = self._llm.complete_json(
-                self._request(joined), QueryAnalysis
-            )
+            analysis = self._llm.complete_json(self._request(joined), QueryAnalysis)
         except Exception:
             # 任何 Provider/解析/校验失败都可靠降级为规则结果。
             return self._rule_based(joined, images)
-        return self._from_analysis(analysis, images)
+        subqueries = tuple(text for text in analysis.text_queries if text.strip())
+        if not subqueries:
+            # 空列表/全部空白等语义不可用输出：用**原始查询**做规则降级。
+            return self._rule_based(joined, images)
+        return self._from_analysis(analysis, subqueries[: self._max_subqueries], images)
 
     def _request(self, text: str) -> ModelRequest:
         return ModelRequest(
@@ -147,12 +149,10 @@ class QueryAnalyzer:
                 )
         return texts, images
 
-    def _from_analysis(self, analysis: QueryAnalysis, images: Sequence[bytes]) -> ParsedQuery:
-        subqueries = tuple(
-            text for text in analysis.text_queries if text.strip()
-        )[: self._max_subqueries]
-        if not subqueries:
-            return self._rule_based("", images, intent=analysis.intent)
+    def _from_analysis(
+        self, analysis: QueryAnalysis, subqueries: Sequence[str], images: Sequence[bytes]
+    ) -> ParsedQuery:
+        """只接受已校验的非空子查询；intent 一律经白名单归一化。"""
         return ParsedQuery(
             text_queries=subqueries,
             visual_queries=tuple(images),
