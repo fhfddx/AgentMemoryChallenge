@@ -53,7 +53,15 @@ class RelationValidationError(ValueError):
 
 
 class LedgerStateError(RuntimeError):
-    """幂等账本状态不符合预期（例如所有权已被接管）。"""
+    """幂等账本状态或所有权不符合预期（例如所有权已被接管）。"""
+
+
+class ActionApplicationError(RuntimeError):
+    """治理动作无法安全应用（目标缺失、冲突组不兼容或并发写入冲突）。
+
+    与 :class:`LedgerStateError` 严格区分：这类失败不代表所有权失效，调用方应当用同一个
+    owner token 降级提交纯基线记忆束，而不是返回冲突。
+    """
 
 
 class MemoryRepository:
@@ -190,21 +198,23 @@ class MemoryRepository:
         """按 ValidatedActions 写入治理字段、关系边与冲突组。
 
         只允许修改治理状态（duplicate_of / supersedes / conflict_group_id / status）；
-        绝不触碰原始证据、原始消息或既有记忆正文。
+        绝不触碰原始证据、原始消息或既有记忆正文。治理规则不满足时抛
+        :class:`ActionApplicationError`，由调用方降级为纯基线提交。
         """
         memory = session.get(Memory, memory_id)
         if memory is None:
-            raise LedgerStateError("待应用动作的记忆不存在")
+            raise ActionApplicationError("待应用动作的记忆不存在")
 
-        memory.duplicate_of = actions.duplicate_of
-        memory.supersedes = actions.supersedes
-        if actions.conflict_group_id is not None:
-            memory.conflict_group_id = actions.conflict_group_id
+        target_ids: set[UUID] = {relation.target_id for relation in actions.relations}
+        target_ids.update(actions.conflict_targets)
+        if actions.supersedes is not None:
+            target_ids.add(actions.supersedes)
+        if actions.duplicate_of is not None:
+            target_ids.add(actions.duplicate_of)
+        # 一次性按 memory_id 升序锁定全部治理目标：全局确定顺序，避免死锁。
+        locked = self._lock_action_targets(session, user_id, sorted(target_ids, key=str))
 
         for relation in actions.relations:
-            target = session.get(Memory, relation.target_id)
-            if target is None or target.user_id != user_id:
-                raise LedgerStateError("关系目标不属于该用户")
             session.add(
                 MemoryRelation(
                     user_id=user_id,
@@ -221,45 +231,121 @@ class MemoryRepository:
             )
 
         if actions.supersedes is not None:
-            superseded = session.get(Memory, actions.supersedes)
-            if superseded is None or superseded.user_id != user_id:
-                raise LedgerStateError("替代目标不属于该用户")
+            memory.supersedes = actions.supersedes
             # 仅修改治理状态：原始证据与正文保持不可变。
-            superseded.status = "superseded"
+            locked[actions.supersedes].status = "superseded"
+
+        if actions.duplicate_of is not None:
+            memory.duplicate_of = actions.duplicate_of
 
         if actions.conflict_group_id is not None:
-            members = [memory_id]
-            for target_id in actions.conflict_targets:
-                target = session.get(Memory, target_id)
-                if target is None or target.user_id != user_id:
-                    raise LedgerStateError("冲突目标不属于该用户")
-                # 延续已有冲突组：目标原属的组必须与本次组一致。
-                if target.conflict_group_id not in (None, actions.conflict_group_id):
-                    raise LedgerStateError("冲突目标已属于另一个冲突组")
-                target.conflict_group_id = actions.conflict_group_id
-                members.append(target_id)
-            session.flush()
-            # 已有成员不得重复插入；新成员版本号在该组现有最大版本之后追加。
-            registered = session.execute(
+            self._apply_conflict_group(session, user_id, memory, actions, locked)
+
+    def _lock_action_targets(
+        self, session: Session, user_id: str, target_ids: Sequence[UUID]
+    ) -> dict[UUID, Memory]:
+        """按 memory_id 升序锁定全部治理目标，并在锁后重新读取最新值。"""
+        locked: dict[UUID, Memory] = {}
+        for target_id in target_ids:
+            if target_id in locked:
+                continue
+            row = session.execute(
+                select(Memory)
+                .where(Memory.id == target_id, Memory.user_id == user_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ).scalar_one_or_none()
+            if row is None:
+                raise ActionApplicationError("治理目标记忆不属于该用户或不存在")
+            locked[target_id] = row
+        return locked
+
+    def _lock_conflict_group(
+        self, session: Session, user_id: str, group_id: UUID
+    ) -> list[MemoryConflict]:
+        """按 memory_id 升序锁定冲突组既有成员行，串行化成员追加与版本分配。"""
+        return list(
+            session.execute(
+                select(MemoryConflict)
+                .where(
+                    MemoryConflict.user_id == user_id,
+                    MemoryConflict.conflict_group_id == group_id,
+                )
+                .order_by(MemoryConflict.memory_id)
+                .with_for_update()
+            ).scalars()
+        )
+
+    def _conflict_members(
+        self, session: Session, user_id: str, group_id: UUID
+    ) -> list[MemoryConflict]:
+        """锁后重新读取该组全部成员（新语句 => 新快照，可见并发事务已提交的成员）。"""
+        return list(
+            session.execute(
                 select(MemoryConflict).where(
                     MemoryConflict.user_id == user_id,
-                    MemoryConflict.conflict_group_id == actions.conflict_group_id,
+                    MemoryConflict.conflict_group_id == group_id,
                 )
-            ).scalars().all()
-            known = {row.memory_id for row in registered}
-            next_version = max((row.version for row in registered), default=0) + 1
-            for member_id in dict.fromkeys(members):
+            ).scalars()
+        )
+
+    def _apply_conflict_group(
+        self,
+        session: Session,
+        user_id: str,
+        memory: Memory,
+        actions: ValidatedActions,
+        locked: dict[UUID, Memory],
+    ) -> None:
+        """在行锁内确定有效冲突组并追加成员。
+
+        目标是复用已确定的组而不是无条件覆盖；版本号必须在取得组锁并用新语句重新
+        读取之后才计算，避免并发事务分配出相同版本。
+        """
+        proposed_group_id = actions.conflict_group_id
+        if proposed_group_id is None:
+            return
+
+        existing_groups: set[UUID] = set()
+        for target_id in actions.conflict_targets:
+            target_group_id = locked[target_id].conflict_group_id
+            if target_group_id is not None:
+                existing_groups.add(target_group_id)
+        if len(existing_groups) > 1:
+            raise ActionApplicationError("冲突目标分属多个不同的冲突组")
+        group_id = next(iter(existing_groups)) if existing_groups else proposed_group_id
+
+        # 串行化点：锁定该组既有成员行，之后才允许分配版本号。
+        self._lock_conflict_group(session, user_id, group_id)
+
+        memory.conflict_group_id = group_id
+        for target_id in actions.conflict_targets:
+            target = locked[target_id]
+            if target.conflict_group_id not in (None, group_id):
+                raise ActionApplicationError("冲突目标已属于另一个冲突组")
+            target.conflict_group_id = group_id
+        session.flush()
+
+        members = self._conflict_members(session, user_id, group_id)
+        known = {row.memory_id for row in members}
+        next_version = max((row.version for row in members), default=0) + 1
+        try:
+            for member_id in [memory.id, *sorted(set(actions.conflict_targets), key=str)]:
                 if member_id in known:
                     continue
                 session.add(
                     MemoryConflict(
                         user_id=user_id,
-                        conflict_group_id=actions.conflict_group_id,
+                        conflict_group_id=group_id,
                         memory_id=member_id,
                         version=next_version,
                     )
                 )
                 next_version += 1
+            session.flush()
+        except IntegrityError as exc:
+            # 唯一约束兜底：并发写入冲突时由调用方降级为基线提交。
+            raise ActionApplicationError("冲突组成员并发写入冲突") from exc
 
     def get_by_request(self, user_id: str, request_id: str) -> AddCommit | None:
         """按 user_id + request_id 返回已提交结果；不存在时返回 None。"""

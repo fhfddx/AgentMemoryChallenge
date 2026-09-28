@@ -205,6 +205,14 @@ class MemoryConflict(Base):
     """冲突组和版本关系。"""
 
     __tablename__ = "memory_conflicts"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "conflict_group_id", "memory_id", name="uq_memory_conflicts_group_memory"
+        ),
+        UniqueConstraint(
+            "user_id", "conflict_group_id", "version", name="uq_memory_conflicts_group_version"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     user_id: Mapped[str] = _user_fk()

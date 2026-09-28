@@ -72,7 +72,17 @@ def test_migration_upgrade_downgrade_cycle(
 
     with engine.connect() as conn:
         version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0001"
+    assert version == "0002"
+
+    # 0002 引入的冲突组唯一约束必须存在。
+    constraint_names = {
+        constraint["name"]
+        for constraint in inspect(engine).get_unique_constraints("memory_conflicts")
+    }
+    assert {
+        "uq_memory_conflicts_group_memory",
+        "uq_memory_conflicts_group_version",
+    } <= constraint_names
 
 
 def test_all_required_tables_exist(database: Database) -> None:

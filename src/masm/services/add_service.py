@@ -23,7 +23,11 @@ from masm.storage.assets import (
     ImageTooLargeError,
     decode_image_data_url,
 )
-from masm.storage.repositories import LedgerStateError, MemoryRepository
+from masm.storage.repositories import (
+    ActionApplicationError,
+    LedgerStateError,
+    MemoryRepository,
+)
 from masm.storage.types import (
     EmbeddingDraft,
     MemoryBundle,
@@ -143,6 +147,9 @@ class AddService:
                 self._build_bundle(request, asset_refs, prepared, plan),
                 owner_token=owner_token,
             )
+        except ActionApplicationError:
+            # 治理动作不安全：本次请求仍然持有 PROCESSING 账本，降级提交纯基线记忆束。
+            return self._degrade(request, asset_refs, prepared, owner_token)
         except LedgerStateError as exc:
             # 已失去所有权：只丢弃本次尝试的暂存，绝不触碰新所有者资源。
             self._discard(request, owner_token)
@@ -152,6 +159,40 @@ class AddService:
             raise
 
         # 数据库已提交后发布本次尝试的暂存对象；失败会抛出 500，重试时由 _replay 修复。
+        self._assets.publish(request.user_id, request.request_id, owner_token)
+        return AddResponse(
+            success=True,
+            request_id=request.request_id,
+            user_id=request.user_id,
+            session_id=request.session_id,
+        )
+
+    def _degrade(
+        self,
+        request: AddRequest,
+        asset_refs: list[AssetRef],
+        prepared: _Prepared,
+        owner_token: datetime,
+    ) -> AddResponse:
+        """治理动作应用失败时的降级提交。
+
+        用**同一个 owner token** 原子提交纯基线记忆束：不应用 relation / supersede /
+        conflict 等治理动作，账本最终为 COMMITTED，基线记忆与来源可被 Search 检索。
+        若期间所有权已被接管，则只丢弃本次尝试的暂存并返回冲突，绝不触碰新 owner 的数据。
+        """
+        try:
+            self._repo.finalize_request(
+                request.user_id,
+                request.request_id,
+                self._build_bundle(request, asset_refs, prepared, None),
+                owner_token=owner_token,
+            )
+        except LedgerStateError as exc:
+            self._discard(request, owner_token)
+            raise AddConflictError("请求所有权已失效") from exc
+        except Exception:
+            self._fail(request, owner_token)
+            raise
         self._assets.publish(request.user_id, request.request_id, owner_token)
         return AddResponse(
             success=True,
