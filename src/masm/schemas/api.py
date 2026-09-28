@@ -39,7 +39,7 @@ class AddRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: str = Field(min_length=1)
-    messages: list[Message] = Field(min_length=1, max_length=20)
+    messages: list[Message] = Field(min_length=1)
     user_id: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
 
@@ -49,7 +49,7 @@ class AddResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    success: bool
+    success: Literal[True]
     request_id: str
     user_id: str
     session_id: str
@@ -75,6 +75,19 @@ class SearchRequest(BaseModel):
             raise ValueError("query 数组不能为空")
         return value
 
+    @field_validator("options")
+    @classmethod
+    def _options_valid(cls, value: list[str] | None) -> list[str] | None:
+        """options 可选；若提供则数组非空且每项非空白。"""
+        if value is None:
+            return value
+        if not value:
+            raise ValueError("options 数组不能为空")
+        for option in value:
+            if not option.strip():
+                raise ValueError("options 不能包含空或纯空白字符串")
+        return value
+
 
 class MemoryEvidence(BaseModel):
     """Search 返回的单条记忆证据。"""
@@ -83,6 +96,18 @@ class MemoryEvidence(BaseModel):
 
     id: str = Field(min_length=1)
     content: str | list[ContentPart]
+    score: float | None = None
+    created_at: str | None = None
+
+    @field_validator("content")
+    @classmethod
+    def _content_non_empty(cls, value: str | list[ContentPart]) -> str | list[ContentPart]:
+        """content 必须非空：空字符串、纯空格、空数组均拒绝。"""
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("content 不能为空")
+        if isinstance(value, list) and not value:
+            raise ValueError("content 数组不能为空")
+        return value
 
 
 class SearchResponse(BaseModel):

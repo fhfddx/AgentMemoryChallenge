@@ -24,6 +24,14 @@ class TextPart(BaseModel):
     type: Literal["text"] = "text"
     text: str = Field(min_length=1)
 
+    @field_validator("text")
+    @classmethod
+    def _text_non_blank(cls, value: str) -> str:
+        """文本必须非空且不能仅含空白字符。"""
+        if not value.strip():
+            raise ValueError("text 不能为空或仅含空白")
+        return value
+
 
 class ImageURL(BaseModel):
     """图片数据 URL（仅限 `data:image/...;base64,...`）。"""
