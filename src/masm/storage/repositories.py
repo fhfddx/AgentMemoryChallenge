@@ -331,13 +331,22 @@ class MemoryRepository:
         model_version: str,
         limit: int,
     ) -> list[MemoryCandidate]:
-        """向量检索：调用方必须明确目标向量空间（模态 + 模型 + 维度）。"""
+        """向量检索：调用方必须明确目标向量空间（模态 + 模型 + 维度）。
+
+        每个 memory_id 最多返回一次：先按 memory_id 聚合出该记忆的最佳（最小）余弦距离，
+        再按距离排序并应用 limit，避免同一记忆的多条图片向量重复占用召回名额。
+        """
         query_vector = list(vector)
         dimensions = len(query_vector)
         with self._database.session() as session:
-            distance = MemoryEmbedding.vector.cosine_distance(query_vector)
-            stmt = (
-                select(Memory, distance.label("distance"))
+            distance = MemoryEmbedding.vector.cosine_distance(query_vector).label("distance")
+            scored = (
+                select(
+                    Memory.id.label("memory_id"),
+                    Memory.user_id.label("user_id"),
+                    Memory.summary.label("summary"),
+                    distance,
+                )
                 .join(MemoryEmbedding, MemoryEmbedding.memory_id == Memory.id)
                 .where(
                     Memory.user_id == user_id,
@@ -347,15 +356,26 @@ class MemoryRepository:
                     MemoryEmbedding.model_version == model_version,
                     MemoryEmbedding.dimensions == dimensions,
                 )
-                .order_by(distance)
+                .subquery()
+            )
+            best_distance = func.min(scored.c.distance)
+            stmt = (
+                select(
+                    scored.c.memory_id,
+                    scored.c.user_id,
+                    scored.c.summary,
+                    best_distance.label("distance"),
+                )
+                .group_by(scored.c.memory_id, scored.c.user_id, scored.c.summary)
+                .order_by(best_distance, scored.c.memory_id)
                 .limit(limit)
             )
             rows = session.execute(stmt).all()
         return [
             MemoryCandidate(
-                memory_id=row.Memory.id,
-                user_id=row.Memory.user_id,
-                content=row.Memory.summary,
+                memory_id=row.memory_id,
+                user_id=row.user_id,
+                content=row.summary,
                 score=1.0 - float(row.distance),
             )
             for row in rows

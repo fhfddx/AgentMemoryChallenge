@@ -92,11 +92,20 @@ class AddService:
     def add(self, request: AddRequest) -> AddResponse:
         """处理一次 Add；相同 user_id + request_id 只产生一次逻辑写入。"""
         now = self._clock()
-        # 媒体解码、总量校验与向量生成先于幂等 claim，避免失败请求遗留 PROCESSING。
-        prepared = self._prepare(request)
+        # 媒体解码与总量校验先于一切幂等与向量工作，保持既有的 400/413/422 语义。
+        images = self._decode_images(request)
+
+        # 已提交请求直接回放：绝不调用 Embedding Provider，也不重复写入。
+        ledger = self._repo.get_ledger(request.user_id, request.request_id)
+        if ledger is not None and ledger.status == "COMMITTED":
+            return self._replay(request)
+
+        # 摘要与向量仍在 claim 之前生成，Provider 故障不会遗留 PROCESSING。
+        prepared = self._prepare(request, images)
 
         owner_token = self._acquire(request, now)
         if owner_token is None:
+            # 初次检查之后、prepare 期间其他处理者完成了提交：回放原结果。
             return self._replay(request)
 
         asset_refs: list[AssetRef] = []
@@ -202,8 +211,8 @@ class AddService:
             session_id=commit.session_id,
         )
 
-    def _prepare(self, request: AddRequest) -> _Prepared:
-        """解码图片、生成基础摘要与文本/图片向量（均在 claim 之前完成）。"""
+    def _decode_images(self, request: AddRequest) -> list[DecodedImage]:
+        """解码并校验全部图片，同时累加单次 Add 图片总量。"""
         images: list[DecodedImage] = []
         total = 0
         for message in request.messages:
@@ -219,7 +228,10 @@ class AddService:
                     if total > self._settings.max_add_image_bytes:
                         raise ImageTooLargeError("单次 Add 图片总量超过上限")
                     images.append(image)
+        return images
 
+    def _prepare(self, request: AddRequest, images: Sequence[DecodedImage]) -> _Prepared:
+        """生成基础摘要与文本/图片向量（均在 claim 之前完成）。"""
         text_parts: list[str] = []
         for message in request.messages:
             content = message.content
