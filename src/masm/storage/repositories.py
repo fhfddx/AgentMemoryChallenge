@@ -1,10 +1,11 @@
 """带强制用户作用域的 MemoryRepository。
 
 所有读取接口都必须显式接收 user_id，并在 SQL 查询阶段按 user_id 过滤，
-绝不依赖查询后的 Python 过滤。
+绝不依赖查询后的 Python 过滤。关系写入前必须校验两端节点存在且属于同一用户。
 """
 
 from collections.abc import Sequence
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
@@ -14,6 +15,8 @@ from masm.storage.db import Database
 from masm.storage.models import (
     Memory,
     MemoryEmbedding,
+    MemoryEntity,
+    MemoryEvent,
     MemoryRelation,
     RequestLedger,
     SessionRecord,
@@ -21,6 +24,20 @@ from masm.storage.models import (
     User,
 )
 from masm.storage.types import AddCommit, MemoryBundle, MemoryCandidate
+
+# 关系边允许的节点类型。
+_ALLOWED_NODE_TYPES = {"memory", "entity", "event"}
+
+# 节点类型到 ORM 模型的映射。
+_NODE_TABLES: dict[str, type[Memory] | type[MemoryEntity] | type[MemoryEvent]] = {
+    "memory": Memory,
+    "entity": MemoryEntity,
+    "event": MemoryEvent,
+}
+
+
+class RelationValidationError(ValueError):
+    """关系边校验失败。"""
 
 
 class MemoryRepository:
@@ -142,16 +159,31 @@ class MemoryRepository:
         ]
 
     def vector_candidates(
-        self, user_id: str, vector: Sequence[float], limit: int
+        self,
+        user_id: str,
+        vector: Sequence[float],
+        *,
+        modality: str,
+        model_name: str,
+        model_version: str,
+        limit: int,
     ) -> list[MemoryCandidate]:
-        """向量检索，SQL 查询阶段即按 user_id 过滤。"""
+        """向量检索：调用方必须明确目标向量空间（模态 + 模型 + 维度）。"""
         query_vector = list(vector)
+        dimensions = len(query_vector)
         with self._database.session() as session:
             distance = MemoryEmbedding.vector.cosine_distance(query_vector)
             stmt = (
                 select(Memory, distance.label("distance"))
                 .join(MemoryEmbedding, MemoryEmbedding.memory_id == Memory.id)
-                .where(Memory.user_id == user_id)
+                .where(
+                    Memory.user_id == user_id,
+                    MemoryEmbedding.user_id == user_id,
+                    MemoryEmbedding.modality == modality,
+                    MemoryEmbedding.model_name == model_name,
+                    MemoryEmbedding.model_version == model_version,
+                    MemoryEmbedding.dimensions == dimensions,
+                )
                 .order_by(distance)
                 .limit(limit)
             )
@@ -169,7 +201,7 @@ class MemoryRepository:
     def related(
         self, user_id: str, memory_ids: Sequence[UUID], limit: int
     ) -> list[MemoryCandidate]:
-        """一跳关系扩展，SQL 查询阶段即按 user_id 过滤。"""
+        """一跳关系扩展（仅记忆到记忆），SQL 查询阶段即按 user_id 过滤。"""
         ids = list(memory_ids)
         if not ids:
             return []
@@ -178,6 +210,8 @@ class MemoryRepository:
                 session.execute(
                     select(MemoryRelation).where(
                         MemoryRelation.user_id == user_id,
+                        MemoryRelation.source_type == "memory",
+                        MemoryRelation.target_type == "memory",
                         or_(
                             MemoryRelation.source_id.in_(ids),
                             MemoryRelation.target_id.in_(ids),
@@ -213,6 +247,54 @@ class MemoryRepository:
             )
             for memory in memories
         ]
+
+    def add_relation(
+        self,
+        user_id: str,
+        *,
+        source_type: str,
+        source_id: UUID,
+        target_type: str,
+        target_id: UUID,
+        relation_type: str,
+        confidence: float | None = None,
+        evidence_ref: dict | None = None,
+    ) -> UUID:
+        """写入一条关系边；写入前校验两端节点存在且属于同一用户。"""
+        if source_type not in _ALLOWED_NODE_TYPES:
+            raise RelationValidationError(f"不允许的 source_type: {source_type}")
+        if target_type not in _ALLOWED_NODE_TYPES:
+            raise RelationValidationError(f"不允许的 target_type: {target_type}")
+
+        with self._database.session() as session:
+            self._validate_node(session, source_type, source_id, user_id)
+            self._validate_node(session, target_type, target_id, user_id)
+            relation = MemoryRelation(
+                user_id=user_id,
+                source_type=source_type,
+                source_id=source_id,
+                target_type=target_type,
+                target_id=target_id,
+                relation_type=relation_type,
+                confidence=confidence,
+                evidence_ref=evidence_ref,
+            )
+            session.add(relation)
+            session.flush()
+            relation_id = relation.id
+            session.commit()
+        return relation_id
+
+    def _validate_node(self, session: Session, node_type: str, node_id: UUID, user_id: str) -> None:
+        """校验节点存在且属于指定用户。"""
+        model: Any = _NODE_TABLES[node_type]
+        owner: str | None = session.execute(
+            select(model.user_id).where(model.id == node_id)
+        ).scalar_one_or_none()
+        if owner is None:
+            raise RelationValidationError(f"{node_type} 节点不存在: {node_id}")
+        if owner != user_id:
+            raise RelationValidationError(f"{node_type} 节点属于其他用户: {node_id}")
 
     def _ensure_user(self, session: Session, user_id: str) -> None:
         """按需创建用户（幂等）。"""

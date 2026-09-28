@@ -1,12 +1,17 @@
 """数据库迁移集成测试。"""
 
+from pathlib import Path
+
 import pytest
-from sqlalchemy import inspect
+import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.engine import make_url
 
 from masm.storage.db import Database
 
-# 测试数据库连接串，可用 MASM_TEST_DATABASE_URL 覆盖。
-TEST_DATABASE_URL = "postgresql+psycopg://postgres@localhost:5433/masm_test"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # 设计规范 7.1 要求的全部必需数据表。
 REQUIRED_TABLES = {
@@ -25,10 +30,48 @@ REQUIRED_TABLES = {
 }
 
 
+def _require_masm_test(url: str) -> str:
+    """破坏性迁移操作前必须确认目标数据库是 masm_test。"""
+    name = make_url(url).database
+    if name != "masm_test":
+        raise RuntimeError(f"拒绝在非 masm_test 数据库上重建迁移: {name}")
+    return name
+
+
+def _alembic_config(url: str) -> Config:
+    """构造指向仓库 alembic 目录与目标数据库的配置。"""
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    return cfg
+
+
 @pytest.fixture(scope="module")
-def database() -> Database:
+def database(database_url: str) -> Database:
     """连接已迁移的测试数据库。"""
-    return Database.create(TEST_DATABASE_URL)
+    return Database.create(database_url)
+
+
+def test_migration_upgrade_downgrade_cycle(database_url: str) -> None:
+    """从空库 downgrade、upgrade、再 upgrade 的完整循环。"""
+    _require_masm_test(database_url)
+    cfg = _alembic_config(database_url)
+    engine = create_engine(database_url)
+
+    command.downgrade(cfg, "base")
+    remaining = set(inspect(engine).get_table_names())
+    assert not (REQUIRED_TABLES & remaining), (
+        f"downgrade 后业务表仍存在: {REQUIRED_TABLES & remaining}"
+    )
+
+    command.upgrade(cfg, "head")
+    tables = set(inspect(engine).get_table_names())
+    missing = REQUIRED_TABLES - tables
+    assert not missing, f"upgrade head 后缺少表: {sorted(missing)}"
+
+    with engine.connect() as conn:
+        version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
+    assert version == "0001"
 
 
 def test_all_required_tables_exist(database: Database) -> None:
@@ -36,6 +79,18 @@ def test_all_required_tables_exist(database: Database) -> None:
     existing = set(inspect(database.engine).get_table_names())
     missing = REQUIRED_TABLES - existing
     assert not missing, f"缺少数据表: {sorted(missing)}"
+
+
+def test_pgvector_extension_and_vector_column(database: Database) -> None:
+    """pgvector 扩展和 vector 列存在。"""
+    with database.engine.connect() as conn:
+        ext = conn.execute(
+            sa.text("SELECT extname FROM pg_extension WHERE extname='vector'")
+        ).scalar()
+    assert ext == "vector"
+
+    columns = {col["name"] for col in inspect(database.engine).get_columns("memory_embeddings")}
+    assert "vector" in columns
 
 
 def test_embeddings_table_records_model_metadata(database: Database) -> None:
