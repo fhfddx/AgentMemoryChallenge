@@ -119,7 +119,13 @@ class MemoryCandidate:
 
 @dataclass(frozen=True)
 class DeletedRun:
-    """一次运行删除后统计到的数据库记录与对象地址。"""
+    """一次运行删除后统计到的数据库记录与对象地址。
+
+    ``object_uris`` 是本次确认可删（无任何用户/运行再引用）的对象地址；
+    ``shared_object_uris`` 是仍被引用的对象地址；``objects_deleted`` /
+    ``objects_missing`` 是已在对象锁临界区内执行物理删除的结果；``object_failures``
+    是删除抛异常的对象及其错误类型，需保留为 PENDING 以便重试。
+    """
 
     request_id: str
     memories: int = 0
@@ -129,6 +135,9 @@ class DeletedRun:
     conflicts: int = 0
     object_uris: Sequence[str] = ()
     shared_object_uris: Sequence[str] = ()
+    objects_deleted: int = 0
+    objects_missing: int = 0
+    object_failures: Sequence[tuple[str, str]] = ()
 
 
 @dataclass(frozen=True)

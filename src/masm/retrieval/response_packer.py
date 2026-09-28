@@ -13,12 +13,25 @@ from masm.schemas.api import MemoryEvidence, SearchResponse
 MAX_RESPONSE_BYTES = 30 * 1024 * 1024
 
 
+def minimum_response_bytes() -> int:
+    """空 SearchResponse 的实际 JSON 序列化字节数。
+
+    任何比它还小的上限都会让响应永远无法表达「零命中」，因此必须被拒绝，而不是静默
+    退化成恒定空结果。
+    """
+    return len(SearchResponse(data=[]).model_dump_json().encode("utf-8"))
+
+
 def resolve_max_response_bytes(value: int | None = None) -> int:
-    """把响应上限约束到 ``0..MAX_RESPONSE_BYTES``：负数拒绝，越界安全截断。"""
+    """把响应上限约束到 ``minimum_response_bytes()..MAX_RESPONSE_BYTES``。
+
+    非正数或小于最小可序列化响应的值直接拒绝（配置错误应尽早暴露），越界高值安全截断。
+    """
     if value is None:
         return MAX_RESPONSE_BYTES
-    if value < 0:
-        raise ValueError("max_response_bytes 必须为非负整数")
+    minimum = minimum_response_bytes()
+    if value < minimum:
+        raise ValueError(f"max_response_bytes 必须至少为 {minimum} 字节（空响应的序列化大小）")
     return min(value, MAX_RESPONSE_BYTES)
 
 

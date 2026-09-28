@@ -4,12 +4,12 @@
 绝不依赖查询后的 Python 过滤。关系写入前必须校验两端节点存在且属于同一用户。
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import CursorResult, delete, func, or_, select, update
+from sqlalchemy import CursorResult, Engine, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -57,6 +57,64 @@ def _image_object_uris(content: Any) -> list[str]:
                 if isinstance(url, str):
                     found.append(url)
     return found
+
+
+# 对象级 advisory 锁：写入方（Add）与删除方共用同一把锁，串行化「引用检查 -> 物理删除」。
+_OBJECT_LOCK_STATEMENT = "SELECT pg_advisory_xact_lock(hashtext(:object_uri)::bigint)"
+
+# 对象物理删除可等待锁的最长时间（秒）：并发写者持锁过久时放弃本次删除并保留为 PENDING。
+_LOCK_TIMEOUT_SECONDS = 30
+
+
+def _referencing_asset_uris(
+    session: Session, user_id: str, request_id: str, object_uris: Sequence[str]
+) -> set[str]:
+    """返回仍被其他用户或其他运行引用的对象地址。
+
+    NULL 的 ``request_id`` 是迁移前遗留的资产行，必须显式算作「仍被引用」：
+    ``Asset.request_id != request_id`` 对 NULL 求值为 NULL（不为真），若只依赖它，
+    这些遗留对象会被误判为独占并删除。
+    """
+    if not object_uris:
+        return set()
+    return set(
+        session.execute(
+            select(Asset.object_uri)
+            .where(
+                Asset.object_uri.in_(list(object_uris)),
+                or_(
+                    Asset.user_id != user_id,
+                    Asset.request_id.is_(None),
+                    Asset.request_id != request_id,
+                ),
+            )
+            .distinct()
+        ).scalars()
+    )
+
+
+def lock_object_uris(session: Session, object_uris: Sequence[str]) -> None:
+    """在当前事务内按字典序锁定全部对象地址（事务结束自动释放）。
+
+    ``pg_advisory_xact_lock`` 是事务级锁：顺序固定可避免死锁；未提交前其他事务既不能
+    取得同一把锁，也不能完成对同一对象的写入，因此「引用检查」的结论在事务内不会过期。
+    """
+    for object_uri in sorted(set(object_uris)):
+        session.execute(text(_OBJECT_LOCK_STATEMENT), {"object_uri": object_uri})
+
+
+def try_lock_object_uris(engine: Engine, object_uris: Sequence[str]) -> bool:
+    """用独立连接尝试锁定对象地址；被其他连接持有时返回 False（供测试与诊断使用）。"""
+    with engine.connect() as connection:
+        try:
+            for object_uri in sorted(set(object_uris)):
+                connection.execute(text(_OBJECT_LOCK_STATEMENT), {"object_uri": object_uri})
+        except Exception:
+            connection.rollback()
+            return False
+        connection.rollback()
+    return True
+
 
 # 关系边允许的节点类型。
 _ALLOWED_NODE_TYPES = {"memory", "entity", "event"}
@@ -149,6 +207,10 @@ class MemoryRepository:
         """在当前会话（事务）内写入 Session/Asset/SourceMessage/Memory。"""
         self._ensure_user(session, user_id)
         session_model_id = self._ensure_session_id(session, user_id, bundle.session_id)
+        if bundle.assets:
+            # 与运行级删除共用同一把对象锁：本事务提交前，删除方无法确认「无人引用」
+            # 并物理删除这些对象，因此不会出现「刚写入的对象被并发删除」。
+            lock_object_uris(session, [asset.object_uri for asset in bundle.assets])
         for asset in bundle.assets:
             session.add(
                 Asset(
@@ -657,11 +719,21 @@ class MemoryRepository:
             for memory in memories
         ]
 
-    def delete_run(self, user_id: str, request_id: str) -> DeletedRun:
+    def delete_run(
+        self,
+        user_id: str,
+        request_id: str,
+        *,
+        delete_object: Callable[[str], bool] | None = None,
+    ) -> DeletedRun:
         """删除该用户该运行（request_id）的数据库记录，返回待清理的对象地址。
 
         所有删除都在 SQL 阶段按 user_id + request_id 过滤，因此不会影响其他用户或
         同一用户的其他运行。对象地址取自该运行的原始消息内容。
+
+        ``delete_object`` 用于物理删除对象：它只在持有该对象 advisory 锁的事务内被调用，
+        且调用前已在同一事务中确认「没有任何用户/运行再引用该对象」。因此物理删除与并发
+        Add 的写入互斥，不会删掉刚被其他运行引用的对象。为 None 时只登记删除意图。
         """
         with self._database.session() as session:
             memory_ids = list(
@@ -682,30 +754,36 @@ class MemoryRepository:
                 .all()
             )
             object_uris = sorted(
-                {
-                    uri
-                    for content in messages
-                    for uri in _image_object_uris(content)
-                }
+                {uri for content in messages for uri in _image_object_uris(content)}
             )
+            # 先取得全部对象锁（固定字典序、事务级）：并发写入方要么在本事务之前提交，
+            # 要么等本事务提交后重试，因此后面「引用检查」的结论在事务内不会过期。
+            lock_object_uris(session, object_uris)
             # 运行级资产行：只删除属于本次运行的逻辑资产记录。
             assets = _deleted_rows(
                 session,
-                delete(Asset).where(
-                    Asset.user_id == user_id, Asset.request_id == request_id
-                ),
+                delete(Asset).where(Asset.user_id == user_id, Asset.request_id == request_id),
             )
             relations = 0
             conflicts = 0
             if memory_ids:
-                # 处理指向已删除记忆的悬空治理引用。
+                # 处理指向已删除记忆的悬空治理引用；必须按 user_id 限定，
+                # 否则会清空其他用户记忆上的 duplicate_of / supersedes。
                 session.execute(
                     update(Memory)
-                    .where(Memory.duplicate_of.in_(memory_ids))
+                    .where(
+                        Memory.user_id == user_id,
+                        Memory.duplicate_of.in_(memory_ids),
+                    )
                     .values(duplicate_of=None)
                 )
                 session.execute(
-                    update(Memory).where(Memory.supersedes.in_(memory_ids)).values(supersedes=None)
+                    update(Memory)
+                    .where(
+                        Memory.user_id == user_id,
+                        Memory.supersedes.in_(memory_ids),
+                    )
+                    .values(supersedes=None)
                 )
                 for model in (MemoryEmbedding, MemoryEntity, MemoryEvent):
                     _deleted_rows(
@@ -733,9 +811,7 @@ class MemoryRepository:
                 )
             memories = _deleted_rows(
                 session,
-                delete(Memory).where(
-                    Memory.user_id == user_id, Memory.request_id == request_id
-                ),
+                delete(Memory).where(Memory.user_id == user_id, Memory.request_id == request_id),
             )
             sources = _deleted_rows(
                 session,
@@ -766,30 +842,49 @@ class MemoryRepository:
             ):
                 remaining = int(
                     session.execute(
-                        select(func.count()).select_from(Memory).where(
-                            Memory.session_id == session_id
-                        )
+                        select(func.count())
+                        .select_from(Memory)
+                        .where(Memory.session_id == session_id)
                     ).scalar_one()
                 ) + int(
                     session.execute(
-                        select(func.count()).select_from(SourceMessage).where(
-                            SourceMessage.session_id == session_id
-                        )
+                        select(func.count())
+                        .select_from(SourceMessage)
+                        .where(SourceMessage.session_id == session_id)
                     ).scalar_one()
                 )
                 if remaining == 0:
                     session.execute(delete(SessionRecord).where(SessionRecord.id == session_id))
+
+            # 行删除之后、同一事务内确认：只有任何用户/运行都不再引用的对象才允许删除。
+            shared = _referencing_asset_uris(session, user_id, request_id, object_uris)
+            obsolete = [uri for uri in object_uris if uri not in shared]
+
+            deleted_objects = 0
+            missing_objects = 0
+            object_failures: list[tuple[str, str]] = []
+            if delete_object is not None:
+                # 关键顺序：物理删除发生在**尚未提交**的事务内。锁覆盖「引用检查 -> 删除
+                # 文件」全程，并发 Add 只能在本事务提交后写入，因此其对象不会被误删。
+                session.execute(text(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT_SECONDS}s'"))
+                for object_uri in obsolete:
+                    outcome, reason = self._delete_object_locked(object_uri, delete_object)
+                    if outcome == "failed":
+                        object_failures.append((object_uri, reason))
+                    elif outcome == "deleted":
+                        deleted_objects += 1
+                    else:
+                        missing_objects += 1
+                    # 与物理删除同事务更新删除意图，保证「文件状态」与「意图状态」一致。
+                    self._settle_deletion_intent(
+                        session,
+                        user_id,
+                        request_id,
+                        object_uri,
+                        done=outcome != "failed",
+                        error=reason,
+                    )
             session.commit()
-            # 只有确认任何用户/运行都不再引用时，物理文件才允许删除。
-            still_referenced = (
-                set(
-                    session.execute(
-                        select(Asset.object_uri).where(Asset.object_uri.in_(object_uris))
-                    ).scalars()
-                )
-                if object_uris
-                else set()
-            )
             del ledger, runs
         return DeletedRun(
             request_id=request_id,
@@ -799,9 +894,57 @@ class MemoryRepository:
             relations=relations,
             conflicts=conflicts,
             # 仍被任何用户/运行引用的对象不删除，避免影响其他运行。
-            object_uris=tuple(uri for uri in object_uris if uri not in still_referenced),
-            shared_object_uris=tuple(sorted(still_referenced)),
+            object_uris=tuple(obsolete),
+            shared_object_uris=tuple(sorted(shared)),
+            objects_deleted=deleted_objects,
+            objects_missing=missing_objects,
+            object_failures=tuple(object_failures),
         )
+
+    def _delete_object_locked(
+        self, object_uri: str, delete_object: Callable[[str], bool]
+    ) -> tuple[str, str]:
+        """在已持有对象锁的临界区内执行一次物理删除。
+
+        返回 ``(结果, 说明)``：结果取 ``deleted`` / ``missing`` / ``failed``。
+        越界、文件被占用、锁等待超时等异常都归一为 ``failed`` 而不抛出，让整个运行删除
+        事务照常提交，失败对象保留为 PENDING 由删除意图重试。
+        """
+        try:
+            removed = delete_object(object_uri)
+        except Exception as exc:
+            return ("failed", type(exc).__name__)
+        return ("deleted", "") if removed else ("missing", "")
+
+    def _settle_deletion_intent(
+        self,
+        session: Session,
+        user_id: str,
+        request_id: str,
+        object_uri: str,
+        *,
+        done: bool,
+        error: str,
+    ) -> None:
+        """在删除事务内把删除意图推进到终态（DONE）或保留 PENDING 并累加失败次数。
+
+        与物理删除同一事务提交，避免「文件已删但意图仍 PENDING」或反之的不一致状态。
+        """
+        intent = session.execute(
+            select(DeletionIntent).where(
+                DeletionIntent.user_id == user_id,
+                DeletionIntent.request_id == request_id,
+                DeletionIntent.object_uri == object_uri,
+            )
+        ).scalar_one_or_none()
+        if intent is None:
+            return
+        if done:
+            intent.status = "DONE"
+            intent.last_error = None
+        else:
+            intent.attempts = intent.attempts + 1
+            intent.last_error = (error or "unknown")[:255]
 
     def deletable_object_uris(self, user_id: str, request_id: str) -> list[str]:
         """返回该运行独占（无任何其他引用）的对象地址，供删除意图使用。"""
@@ -817,48 +960,54 @@ class MemoryRepository:
             owned = sorted({uri for content in messages for uri in _image_object_uris(content)})
             if not owned:
                 return []
-            referenced = set(
-                session.execute(
-                    select(Asset.object_uri)
-                    .where(
-                        Asset.object_uri.in_(owned),
-                        or_(
-                            Asset.user_id != user_id,
-                            Asset.request_id.is_(None),
-                            Asset.request_id != request_id,
-                        ),
-                    )
-                    .distinct()
-                ).scalars()
-            )
+            referenced = _referencing_asset_uris(session, user_id, request_id, owned)
         return [uri for uri in owned if uri not in referenced]
 
     def register_deletion_intents(
         self, user_id: str, request_id: str, object_uris: Sequence[str]
     ) -> None:
-        """持久化对象删除意图（幂等）：已存在的 URI 保持原状态。"""
+        """登记某个运行的持久化对象删除意图。
+
+        同一 ``(user_id, request_id, object_uri)`` 只能有一行，但 ``request_id`` 允许被
+        重新拥有（例如评测重跑）：此时该运行重新引用的对象必须回到 PENDING，
+        否则一次旧的 DONE 记录会让物理文件永久泄漏。
+        """
         if not object_uris:
             return
         with self._database.session() as session:
-            existing = set(
-                session.execute(
-                    select(DeletionIntent.object_uri).where(
+            # 删除意图引用 users 外键；先确保用户存在（幂等且并发安全）。
+            self._ensure_user(session, user_id)
+            session.flush()
+            known = {
+                row[0]: row[1]
+                for row in session.execute(
+                    select(DeletionIntent.object_uri, DeletionIntent.status).where(
                         DeletionIntent.user_id == user_id,
                         DeletionIntent.request_id == request_id,
                     )
-                ).scalars()
-            )
-            for uri in object_uris:
-                if uri in existing:
-                    continue
-                session.add(
-                    DeletionIntent(
-                        user_id=user_id,
-                        request_id=request_id,
-                        object_uri=uri,
-                        status="PENDING",
+                ).all()
+            }
+            for uri in sorted(set(object_uris)):
+                if uri not in known:
+                    session.add(
+                        DeletionIntent(
+                            user_id=user_id,
+                            request_id=request_id,
+                            object_uri=uri,
+                            status="PENDING",
+                        )
                     )
-                )
+                elif known[uri] != "PENDING":
+                    # 该运行重新拥有此对象：重置为待删除。
+                    session.execute(
+                        update(DeletionIntent)
+                        .where(
+                            DeletionIntent.user_id == user_id,
+                            DeletionIntent.request_id == request_id,
+                            DeletionIntent.object_uri == uri,
+                        )
+                        .values(status="PENDING", last_error=None, updated_at=func.now())
+                    )
             session.commit()
 
     def pending_deletion_uris(self, user_id: str, request_id: str) -> list[str]:
@@ -965,9 +1114,7 @@ class MemoryRepository:
             if modality is not None:
                 statement = statement.where(Memory.modality == modality)
             if keywords:
-                statement = statement.where(
-                    Memory.keywords.op("?|")(pg_array(list(keywords)))
-                )
+                statement = statement.where(Memory.keywords.op("?|")(pg_array(list(keywords))))
             statement = statement.order_by(Memory.observed_at.desc(), Memory.id).limit(limit)
             rows = session.execute(statement).scalars().all()
         return [
@@ -1035,9 +1182,9 @@ class MemoryRepository:
     def _ensure_user(self, session: Session, user_id: str) -> None:
         """按需创建用户（幂等且并发安全）。"""
         session.execute(
-            pg_insert(User).values(user_id=user_id).on_conflict_do_nothing(
-                index_elements=["user_id"]
-            )
+            pg_insert(User)
+            .values(user_id=user_id)
+            .on_conflict_do_nothing(index_elements=["user_id"])
         )
 
     def _ensure_session_id(self, session: Session, user_id: str, session_id: str) -> UUID:

@@ -127,9 +127,11 @@ def test_delete_run_is_scoped_to_user_and_run(
     assert _count(database, Memory, user_a) == 1
     assert _count(database, Memory, user_b) == 1
     with database.session() as session:
-        remaining = session.execute(
-            select(Memory.request_id).where(Memory.user_id == user_a)
-        ).scalars().all()
+        remaining = (
+            session.execute(select(Memory.request_id).where(Memory.user_id == user_a))
+            .scalars()
+            .all()
+        )
     assert remaining == [run_a2]
 
 
@@ -155,6 +157,52 @@ def test_delete_run_reports_partial_object_failure(
 
     assert report.complete is False
     assert report.failed_object_uris
+
+
+def test_delete_run_clears_intent_and_marks_done(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """成功删除对象后删除意图必须落为 DONE，重复调用不再报告待清理。"""
+    user_id = _uid("u")
+    run_id = _uid("r")
+    _add(
+        AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings),
+        run_id,
+        user_id,
+    )
+    repo = MemoryRepository(database)
+    deleter = _service(database, asset_store, settings, embeddings)
+
+    first = deleter.delete_run(run_id, user_id=user_id)
+
+    assert first.complete is True
+    assert first.objects_deleted >= 1
+    assert repo.pending_deletion_uris(user_id, run_id) == []
+
+
+def test_reused_request_id_reactivates_deletion_intent(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """同一 request_id 被重新拥有后，新的对象必须重新进入 PENDING 并真正被删除。"""
+    user_id = _uid("u")
+    run_id = _uid("r")
+    add = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    repo = MemoryRepository(database)
+    deleter = _service(database, asset_store, settings, embeddings)
+
+    _add(add, run_id, user_id)
+    assert deleter.delete_run(run_id, user_id=user_id).complete is True
+    assert repo.pending_deletion_uris(user_id, run_id) == []
+
+    # 重跑同一 request_id（评测重试），再次登记同一对象地址。
+    _add(add, run_id, user_id)
+    assert _objects(asset_store)
+
+    report = deleter.delete_run(run_id, user_id=user_id)
+
+    assert report.complete is True
+    assert report.objects_deleted >= 1
+    assert _objects(asset_store) == []
 
 
 def test_delete_run_rejects_path_traversal(
@@ -195,9 +243,7 @@ def test_delete_run_rejects_path_traversal(
                 request_id=poisoned_run,
                 position=0,
                 role="user",
-                content=[
-                    {"type": "image_url", "image_url": {"url": "../../outside.txt"}}
-                ],
+                content=[{"type": "image_url", "image_url": {"url": "../../outside.txt"}}],
             )
         )
         session.commit()

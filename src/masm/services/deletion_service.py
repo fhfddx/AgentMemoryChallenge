@@ -50,27 +50,15 @@ class DeletionService:
         self._assets = asset_store
 
     def delete_run(self, run_id: str, *, user_id: str) -> DeletionReport:
-        """删除指定用户该运行的数据库记录，并幂等地重试待清理对象。"""
-        registered = self._register(run_id, user_id)
-        deleted = self._repo.delete_run(user_id, run_id)
+        """删除指定用户该运行的数据库记录，并幂等地重试待清理对象。
 
-        objects_deleted = 0
-        objects_missing = 0
-        failed: list[str] = []
-        for object_uri in self._repo.pending_deletion_uris(user_id, run_id):
-            try:
-                removed = self._assets.delete_object(object_uri)
-            except (OSError, ValueError) as exc:
-                self._repo.mark_deletion_intent(
-                    user_id, run_id, object_uri, done=False, error=type(exc).__name__
-                )
-                failed.append(object_uri)
-                continue
-            self._repo.mark_deletion_intent(user_id, run_id, object_uri, done=True)
-            if removed:
-                objects_deleted += 1
-            else:
-                objects_missing += 1
+        物理删除在仓库的「对象 advisory 锁」临界区内执行：先在同一事务中确认无人引用，
+        再删除文件，因此并发 Add 不可能丢对象。
+        """
+        registered = self._register(run_id, user_id)
+        # 仓库在同一事务内完成「确认无人引用 -> 删除物理对象 -> 推进删除意图」，
+        # 失败对象保持 PENDING 并由下面重新读取的意图状态决定 complete。
+        deleted = self._repo.delete_run(user_id, run_id, delete_object=self._assets.delete_object)
 
         remaining = self._repo.pending_deletion_uris(user_id, run_id)
         return DeletionReport(
@@ -81,8 +69,8 @@ class DeletionService:
             sources_deleted=deleted.sources,
             relations_deleted=deleted.relations,
             conflicts_deleted=deleted.conflicts,
-            objects_deleted=objects_deleted,
-            objects_missing=objects_missing,
+            objects_deleted=deleted.objects_deleted,
+            objects_missing=deleted.objects_missing,
             shared_objects_kept=len(deleted.shared_object_uris),
             retried_uris=tuple(registered),
             failed_object_uris=tuple(remaining),

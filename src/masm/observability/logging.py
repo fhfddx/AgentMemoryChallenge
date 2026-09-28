@@ -1,14 +1,16 @@
 """结构化日志脱敏。
 
-采用**字段白名单**：只有 :data:`ALLOWED_LOG_FIELDS` 中列出的键允许进入日志，其余键
-（含嵌套结构里的键）一律丢弃。自由文本（格式化后的消息、异常文本）没有字段名，
-因此在白名单之外再做值级脱敏，覆盖 Bearer Token、API Key、数据 URL、连接串等。
+采用**字段白名单 + 逐字段形状约束**：只有 :data:`ALLOWED_LOG_FIELDS` 中列出的键允许
+进入日志，其余键（含容器里的键）在任意嵌套层级都被整体丢弃；白名单字段本身也不再允许
+任意容器透传，而是按字段名施加受控形状（例如 ``token_usage`` 只保留数值统计，
+``failure`` 只接受异常类型名或内部错误码）。自由文本（格式化后的消息、异常文本）没有
+字段名，因此在白名单之外再做值级脱敏，覆盖 Bearer Token、API Key、数据 URL、连接串等。
 """
 
 import json
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 # 只允许这些字段进入日志（数量、延迟、状态、模型版本、token、成本、降级等聚合元数据）。
@@ -90,31 +92,79 @@ def redact_text(value: Any) -> str:
     return text
 
 
-def _is_container(value: Any) -> bool:
-    if isinstance(value, str | bytes | bytearray):
+# token_usage 只允许这些键，且取值必须是数值：这是唯一进入日志的聚合容器。
+_ALLOWED_TOKEN_USAGE_KEYS = frozenset(
+    {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+        "input_tokens",
+        "output_tokens",
+    }
+)
+
+# failure 只允许异常类型名（如 TimeoutError）或内部错误码（如 E_UPSTREAM_TIMEOUT）。
+_FAILURE_PATTERN = re.compile(r"\A(?:[A-Za-z_][A-Za-z0-9_]{0,63}|[A-Z][A-Z0-9_]{1,63})\Z")
+
+_REJECTED_PLACEHOLDER = "[REJECTED]"
+
+
+def _is_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, str | bytes | bytearray | bool | int | float)
+
+
+def _is_token_statistics(value: Any) -> bool:
+    """token_usage 必须是「受控键 -> 数值」的扁平映射。"""
+    if not isinstance(value, Mapping):
         return False
-    return isinstance(value, Mapping | Sequence)
+    for key, item in value.items():
+        if str(key) not in _ALLOWED_TOKEN_USAGE_KEYS:
+            return False
+        if not isinstance(item, int | float) or isinstance(item, bool):
+            return False
+    return True
+
+
+def _redact_failure(value: Any) -> Any:
+    """failure 只接受异常类型名或内部错误码；其余（可能含用户内容）一律替换。"""
+    if isinstance(value, str) and _FAILURE_PATTERN.match(value):
+        return value
+    return _REJECTED_PLACEHOLDER
 
 
 def redact_fields(payload: Any) -> Any:
-    """按字段白名单递归投影结构化数据；非白名单字段一律丢弃。"""
+    """按字段白名单递归投影结构化数据；非白名单字段一律丢弃。
+
+    两条规则同时生效：
+    1. 键不在白名单内 -> 整个键值（含其内部结构）被丢弃，绝不因为「值是容器」就保留；
+    2. 键在白名单内 -> 按字段形状收敛：标量字段拒绝容器，``token_usage`` 只留受控数值
+       统计，``failure`` 只留异常类型名/错误码，字符串统一走值级脱敏。
+    """
     if isinstance(payload, Mapping):
         projected: dict[str, Any] = {}
         for key, value in payload.items():
             name = str(key)
-            if _is_container(value):
-                # 容器结构允许保留，但内部叶子字段仍逐层走白名单。
-                projected[name] = redact_fields(value)
-            elif name in ALLOWED_LOG_FIELDS:
-                projected[name] = redact_fields(value)
+            if name not in ALLOWED_LOG_FIELDS:
+                continue
+            if name == "token_usage":
+                if _is_token_statistics(value):
+                    projected[name] = dict(value)
+                continue
+            if name == "failure":
+                projected[name] = _redact_failure(value)
+                continue
+            if isinstance(value, str):
+                # 自由文本字段仍做值级脱敏（长度/延迟等数值保持原类型）。
+                projected[name] = redact_text(value)
+            elif value is None or isinstance(value, bool | int | float):
+                projected[name] = value
+            # 其余（任意容器）不进入日志：白名单标量字段不接受容器形状。
         return projected
-    if isinstance(payload, str):
+    if _is_scalar(payload):
         return redact_text(payload)
-    if isinstance(payload, Sequence) and not isinstance(payload, bytes | bytearray):
-        return [redact_fields(item) for item in payload]
-    if isinstance(payload, bool | int | float) or payload is None:
-        return payload
-    return redact_text(payload)
+    return _REJECTED_PLACEHOLDER
 
 
 class RedactingFormatter(logging.Formatter):

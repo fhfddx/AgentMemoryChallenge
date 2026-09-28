@@ -5,7 +5,12 @@ from uuid import uuid4
 import pytest  # noqa: I001
 
 from masm.retrieval.reranker import RankedEvidence
-from masm.retrieval.response_packer import ResponsePacker, resolve_max_response_bytes
+from masm.retrieval.response_packer import (
+    ResponsePacker,
+    minimum_response_bytes,
+    resolve_max_response_bytes,
+)
+from masm.schemas.api import SearchResponse
 
 _MAX_BYTES = 30 * 1024 * 1024
 
@@ -98,6 +103,34 @@ def test_configured_limit_cannot_exceed_hard_cap(configured: int) -> None:
 def test_negative_limit_is_rejected() -> None:
     with pytest.raises(ValueError):
         resolve_max_response_bytes(-1)
+
+
+def test_limit_below_serializable_minimum_is_rejected() -> None:
+    """小于空 SearchResponse 实际序列化字节数的上限必须被拒绝。
+
+    否则任何 Search 都会退化为恒定空结果，且无法与「确实没有命中」区分。
+    """
+    minimum = minimum_response_bytes()
+    assert minimum > 0
+    for configured in (0, 1, minimum - 1):
+        with pytest.raises(ValueError):
+            resolve_max_response_bytes(configured)
+
+
+def test_limit_at_serializable_minimum_is_accepted() -> None:
+    """恰好等于空响应字节数的上限必须合法：它仍然允许正确表达空结果。"""
+    minimum = minimum_response_bytes()
+
+    assert resolve_max_response_bytes(minimum) == minimum
+    assert ResponsePacker(max_bytes=minimum).max_bytes == minimum
+    assert ResponsePacker(max_bytes=minimum).pack([_evidence("x", 1)], top_k=100) == []
+
+
+def test_minimum_is_derived_from_the_actual_response_schema() -> None:
+    """下限必须取自真实序列化结果，而不是写死的字节数。"""
+    expected = len(SearchResponse(data=[]).model_dump_json().encode("utf-8"))
+
+    assert minimum_response_bytes() == expected
 
 
 def test_empty_input_returns_empty() -> None:
