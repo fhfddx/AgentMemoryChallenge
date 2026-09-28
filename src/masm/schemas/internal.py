@@ -17,7 +17,10 @@ class DecodedImage:
 
 @dataclass(frozen=True)
 class AssetRef:
-    """已存储的图片对象引用。"""
+    """已存储的图片对象引用。
+
+    created 表示本对象是否由本次 put 新建；AddService 只清理 created=True 的对象。
+    """
 
     object_uri: str
     media_type: str
@@ -25,3 +28,4 @@ class AssetRef:
     decoded_size: int
     width: int | None = None
     height: int | None = None
+    created: bool = False

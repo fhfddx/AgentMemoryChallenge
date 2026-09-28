@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from masm.api.auth import require_auth
+from masm.api.auth import credential_fingerprint, require_auth
 from masm.schemas.api import AddRequest, AddResponse
 from masm.services.add_service import AddRequestError
 from masm.storage.assets import MediaValidationError
@@ -25,7 +25,8 @@ async def add(
     """写入记忆；经过认证与并发限制，异常映射为确定的状态码。"""
     service = req.app.state.add_service
     limiter = req.app.state.limiter
-    async with limiter.acquire(credential):
+    # 只把凭证哈希标识交给限流器，内存状态中不保存原始密钥。
+    async with limiter.acquire(credential_fingerprint(credential)):
         try:
             return service.add(request)
         except MediaValidationError as exc:

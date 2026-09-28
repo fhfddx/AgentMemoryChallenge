@@ -5,6 +5,7 @@
 """
 
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -25,7 +26,7 @@ from masm.storage.models import (
     SourceMessage,
     User,
 )
-from masm.storage.types import AddCommit, MemoryBundle, MemoryCandidate
+from masm.storage.types import AddCommit, LedgerState, MemoryBundle, MemoryCandidate
 
 # 关系边允许的节点类型。
 _ALLOWED_NODE_TYPES = {"memory", "entity", "event"}
@@ -42,6 +43,10 @@ class RelationValidationError(ValueError):
     """关系边校验失败。"""
 
 
+class LedgerStateError(RuntimeError):
+    """幂等账本状态不符合预期（例如所有权已被接管）。"""
+
+
 class MemoryRepository:
     """记忆存储仓库。"""
 
@@ -49,64 +54,9 @@ class MemoryRepository:
         self._database = database
 
     def add_bundle(self, user_id: str, bundle: MemoryBundle) -> AddCommit:
-        """在同一事务单元中持久化一个记忆束（不含幂等账本）。"""
+        """在同一事务单元中持久化一个记忆束（不含幂等账本，供测试夹具与低层调用）。"""
         with self._database.session() as session:
-            self._ensure_user(session, user_id)
-            session_model = self._ensure_session(session, user_id, bundle.session_id)
-            for asset in bundle.assets:
-                session.add(
-                    Asset(
-                        user_id=user_id,
-                        object_uri=asset.object_uri,
-                        media_type=asset.media_type,
-                        content_hash=asset.content_hash,
-                        decoded_size=asset.decoded_size,
-                        width=asset.width,
-                        height=asset.height,
-                    )
-                )
-            for message in bundle.messages:
-                session.add(
-                    SourceMessage(
-                        user_id=user_id,
-                        session_id=session_model.id,
-                        request_id=bundle.request_id,
-                        position=message.position,
-                        role=message.role,
-                        content=message.content,
-                        timestamp=message.timestamp,
-                    )
-                )
-            memory_ids: list[UUID] = []
-            for draft in bundle.memories:
-                memory = Memory(
-                    user_id=user_id,
-                    session_id=session_model.id,
-                    request_id=bundle.request_id,
-                    summary=draft.summary,
-                    original_text=draft.original_text,
-                    keywords=list(draft.keywords),
-                    modality=draft.modality,
-                    event_time=draft.event_time,
-                    time_precision=draft.time_precision,
-                    confidence=draft.confidence,
-                    status="active",
-                )
-                session.add(memory)
-                session.flush()
-                memory_ids.append(memory.id)
-                if draft.embedding is not None:
-                    session.add(
-                        MemoryEmbedding(
-                            user_id=user_id,
-                            memory_id=memory.id,
-                            modality=draft.embedding.modality,
-                            model_name=draft.embedding.model_name,
-                            model_version=draft.embedding.model_version,
-                            dimensions=draft.embedding.dimensions,
-                            vector=list(draft.embedding.vector),
-                        )
-                    )
+            memory_ids = self._write_bundle(session, user_id, bundle)
             session.commit()
         return AddCommit(
             request_id=bundle.request_id,
@@ -114,6 +64,97 @@ class MemoryRepository:
             session_id=bundle.session_id,
             memory_ids=memory_ids,
         )
+
+    def finalize_request(
+        self, user_id: str, request_id: str, bundle: MemoryBundle
+    ) -> AddCommit:
+        """在单个数据库事务中完成最终提交。
+
+        事务边界：锁定 RequestLedger -> 校验 PROCESSING -> 写入
+        Session/Asset/SourceMessage/Memory -> 账本置 COMMITTED -> 一次性 commit。
+        """
+        with self._database.session() as session:
+            ledger = session.execute(
+                select(RequestLedger)
+                .where(
+                    RequestLedger.user_id == user_id,
+                    RequestLedger.request_id == request_id,
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+            if ledger is None:
+                raise LedgerStateError("幂等账本不存在，无法完成提交")
+            if ledger.status != "PROCESSING":
+                raise LedgerStateError(f"幂等账本状态不是 PROCESSING: {ledger.status}")
+            memory_ids = self._write_bundle(session, user_id, bundle)
+            ledger.status = "COMMITTED"
+            session.commit()
+        return AddCommit(
+            request_id=bundle.request_id,
+            user_id=user_id,
+            session_id=bundle.session_id,
+            memory_ids=memory_ids,
+        )
+
+    def _write_bundle(self, session: Session, user_id: str, bundle: MemoryBundle) -> list[UUID]:
+        """在当前会话（事务）内写入 Session/Asset/SourceMessage/Memory。"""
+        self._ensure_user(session, user_id)
+        session_model = self._ensure_session(session, user_id, bundle.session_id)
+        for asset in bundle.assets:
+            session.add(
+                Asset(
+                    user_id=user_id,
+                    object_uri=asset.object_uri,
+                    media_type=asset.media_type,
+                    content_hash=asset.content_hash,
+                    decoded_size=asset.decoded_size,
+                    width=asset.width,
+                    height=asset.height,
+                )
+            )
+        for message in bundle.messages:
+            session.add(
+                SourceMessage(
+                    user_id=user_id,
+                    session_id=session_model.id,
+                    request_id=bundle.request_id,
+                    position=message.position,
+                    role=message.role,
+                    content=message.content,
+                    timestamp=message.timestamp,
+                )
+            )
+        memory_ids: list[UUID] = []
+        for draft in bundle.memories:
+            memory = Memory(
+                user_id=user_id,
+                session_id=session_model.id,
+                request_id=bundle.request_id,
+                summary=draft.summary,
+                original_text=draft.original_text,
+                keywords=list(draft.keywords),
+                modality=draft.modality,
+                event_time=draft.event_time,
+                time_precision=draft.time_precision,
+                confidence=draft.confidence,
+                status="active",
+            )
+            session.add(memory)
+            session.flush()
+            memory_ids.append(memory.id)
+            if draft.embedding is not None:
+                session.add(
+                    MemoryEmbedding(
+                        user_id=user_id,
+                        memory_id=memory.id,
+                        modality=draft.embedding.modality,
+                        model_name=draft.embedding.model_name,
+                        model_version=draft.embedding.model_version,
+                        dimensions=draft.embedding.dimensions,
+                        vector=list(draft.embedding.vector),
+                    )
+                )
+        return memory_ids
 
     def get_by_request(self, user_id: str, request_id: str) -> AddCommit | None:
         """按 user_id + request_id 返回已提交结果；不存在时返回 None。"""
@@ -143,6 +184,11 @@ class MemoryRepository:
 
     def get_ledger_status(self, user_id: str, request_id: str) -> str | None:
         """返回幂等账本状态（PROCESSING/COMMITTED/FAILED），不存在时返回 None。"""
+        state = self.get_ledger(user_id, request_id)
+        return state.status if state is not None else None
+
+    def get_ledger(self, user_id: str, request_id: str) -> LedgerState | None:
+        """返回幂等账本状态与租约时间戳。"""
         with self._database.session() as session:
             ledger = session.execute(
                 select(RequestLedger).where(
@@ -150,9 +196,13 @@ class MemoryRepository:
                     RequestLedger.request_id == request_id,
                 )
             ).scalar_one_or_none()
-        return ledger.status if ledger is not None else None
+        if ledger is None:
+            return None
+        return LedgerState(status=ledger.status, updated_at=ledger.updated_at)
 
-    def claim_request(self, user_id: str, request_id: str, session_id: str) -> bool:
+    def claim_request(
+        self, user_id: str, request_id: str, session_id: str, *, now: datetime
+    ) -> bool:
         """原子地写入 PROCESSING 账本；返回 True 表示成功取得所有权。"""
         with self._database.session() as session:
             self._ensure_user(session, user_id)
@@ -164,6 +214,7 @@ class MemoryRepository:
                     request_id=request_id,
                     session_id=session_id,
                     status="PROCESSING",
+                    updated_at=now,
                 )
             )
             try:
@@ -173,18 +224,79 @@ class MemoryRepository:
                 return False
         return True
 
-    def mark_request(self, user_id: str, request_id: str, status: str) -> None:
-        """更新幂等账本状态。"""
+    def takeover_request(
+        self,
+        user_id: str,
+        request_id: str,
+        *,
+        now: datetime,
+        stale_before: datetime,
+    ) -> bool:
+        """原子接管已过期的 PROCESSING 租约；成功返回 True。"""
         with self._database.session() as session:
             ledger = session.execute(
-                select(RequestLedger).where(
+                select(RequestLedger)
+                .where(
                     RequestLedger.user_id == user_id,
                     RequestLedger.request_id == request_id,
                 )
+                .with_for_update()
             ).scalar_one_or_none()
-            if ledger is not None:
-                ledger.status = status
-                session.commit()
+            if ledger is None or ledger.status != "PROCESSING":
+                return False
+            if ledger.updated_at >= stale_before:
+                return False
+            ledger.updated_at = now
+            session.commit()
+            return True
+
+    def mark_request(
+        self,
+        user_id: str,
+        request_id: str,
+        status: str,
+        *,
+        now: datetime,
+        expect: str | None = None,
+    ) -> bool:
+        """更新幂等账本状态；expect 指定时仅当当前状态匹配才更新。"""
+        with self._database.session() as session:
+            ledger = session.execute(
+                select(RequestLedger)
+                .where(
+                    RequestLedger.user_id == user_id,
+                    RequestLedger.request_id == request_id,
+                )
+                .with_for_update()
+            ).scalar_one_or_none()
+            if ledger is None:
+                return False
+            if expect is not None and ledger.status != expect:
+                return False
+            ledger.status = status
+            ledger.updated_at = now
+            session.commit()
+            return True
+
+    def has_committed_data(self, user_id: str, request_id: str) -> bool:
+        """该 request_id 是否已经有已提交的记忆数据。"""
+        with self._database.session() as session:
+            count = session.execute(
+                select(func.count())
+                .select_from(Memory)
+                .where(Memory.user_id == user_id, Memory.request_id == request_id)
+            ).scalar_one()
+        return bool(count)
+
+    def count_asset_references(self, user_id: str, object_uri: str) -> int:
+        """统计引用某对象键的已提交 Asset 记录数。"""
+        with self._database.session() as session:
+            count = session.execute(
+                select(func.count())
+                .select_from(Asset)
+                .where(Asset.user_id == user_id, Asset.object_uri == object_uri)
+            ).scalar_one()
+        return int(count)
 
     def lexical_candidates(self, user_id: str, query: str, limit: int) -> list[MemoryCandidate]:
         """全文检索，SQL 查询阶段即按 user_id 过滤。"""

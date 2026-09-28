@@ -56,6 +56,14 @@ class MemoryBundle:
 
 
 @dataclass(frozen=True)
+class LedgerState:
+    """幂等账本状态快照（含租约时间戳）。"""
+
+    status: str
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
 class MemoryCandidate:
     """检索返回的记忆候选。"""
 

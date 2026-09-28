@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 
 from masm.api.app import create_app
 from masm.config import Settings
@@ -39,8 +41,16 @@ def database_url() -> str:
 
 @pytest.fixture(scope="session")
 def database(database_url: str) -> Database:
-    """连接已迁移的测试数据库。"""
-    return Database.create(database_url)
+    """连接已迁移的测试数据库；不可用时给出明确失败。"""
+    db = Database.create(database_url)
+    try:
+        with db.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except OperationalError as exc:
+        raise RuntimeError(
+            "测试数据库不可用，请先启动 masm_test 数据库（postgresql://.../masm_test）"
+        ) from exc
+    return db
 
 
 @pytest.fixture(scope="session")

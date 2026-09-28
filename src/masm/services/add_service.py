@@ -1,5 +1,8 @@
 """Add 应用服务与幂等事务编排。"""
 
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+
 from masm.config import Settings
 from masm.schemas.api import AddRequest, AddResponse
 from masm.schemas.internal import AssetRef, DecodedImage
@@ -8,8 +11,16 @@ from masm.storage.assets import (
     ImageTooLargeError,
     decode_image_data_url,
 )
-from masm.storage.repositories import MemoryRepository
+from masm.storage.repositories import LedgerStateError, MemoryRepository
 from masm.storage.types import MemoryBundle, MemoryDraft, SourceMessageDraft
+
+# PROCESSING 租约默认时长（秒）；超时后允许安全重新处理或恢复。
+DEFAULT_PROCESSING_LEASE_SECONDS = 60.0
+
+
+def utc_now() -> datetime:
+    """默认时钟：返回带时区的 UTC 当前时间。"""
+    return datetime.now(UTC)
 
 
 class AddRequestError(ValueError):
@@ -19,7 +30,7 @@ class AddRequestError(ValueError):
 
 
 class AddConflictError(AddRequestError):
-    """请求正在处理中（并发冲突）。"""
+    """请求正在处理中（真实并发）。"""
 
     status_code = 409
 
@@ -34,51 +45,129 @@ class AddService:
     """Add 基线服务：保存原始文本、顺序内容分片、图片引用与基础记忆，不调用智能体。"""
 
     def __init__(
-        self, repository: MemoryRepository, asset_store: AssetStore, settings: Settings
+        self,
+        repository: MemoryRepository,
+        asset_store: AssetStore,
+        settings: Settings,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        processing_lease_seconds: float = DEFAULT_PROCESSING_LEASE_SECONDS,
     ) -> None:
         self._repo = repository
         self._assets = asset_store
         self._settings = settings
+        self._clock = clock or utc_now
+        self._lease = timedelta(seconds=processing_lease_seconds)
 
     def add(self, request: AddRequest) -> AddResponse:
         """处理一次 Add；相同 user_id + request_id 只产生一次逻辑写入。"""
-        status = self._repo.get_ledger_status(request.user_id, request.request_id)
-        if status == "COMMITTED":
+        now = self._clock()
+        if not self._acquire(request, now):
             return self._replay(request)
-        if status == "FAILED":
-            raise AddPreviouslyFailedError("该 request_id 此前处理失败，请更换 request_id")
-        if status == "PROCESSING":
-            raise AddConflictError("该请求正在处理中")
 
         images = self._decode_images(request)
-
-        if not self._repo.claim_request(request.user_id, request.request_id, request.session_id):
-            status = self._repo.get_ledger_status(request.user_id, request.request_id)
-            if status == "COMMITTED":
-                return self._replay(request)
-            raise AddConflictError("该请求正在处理中")
-
-        asset_refs: list[AssetRef] = []
-        try:
-            for image in images:
-                asset_refs.append(self._assets.put(request.user_id, request.request_id, image))
-        except Exception:
-            self._repo.mark_request(request.user_id, request.request_id, "FAILED")
-            raise
+        asset_refs, created_refs = self._store_assets(request, images)
 
         try:
-            self._repo.add_bundle(request.user_id, self._build_bundle(request, asset_refs))
+            self._repo.finalize_request(
+                request.user_id, request.request_id, self._build_bundle(request, asset_refs)
+            )
+        except LedgerStateError as exc:
+            self._cleanup(request.user_id, created_refs)
+            raise AddConflictError("请求所有权已失效") from exc
         except Exception:
-            self._repo.mark_request(request.user_id, request.request_id, "FAILED")
+            self._cleanup(request.user_id, created_refs)
+            self._mark_failed(request)
             raise
 
-        self._repo.mark_request(request.user_id, request.request_id, "COMMITTED")
         return AddResponse(
             success=True,
             request_id=request.request_id,
             user_id=request.user_id,
             session_id=request.session_id,
         )
+
+    def _acquire(self, request: AddRequest, now: datetime) -> bool:
+        """取得请求所有权。
+
+        返回 True 表示可继续处理；返回 False 表示已有 COMMITTED 结果应回放。
+        真实并发的 PROCESSING 抛出 409；租约过期且无已提交数据时允许安全重新处理。
+        """
+        for _ in range(3):
+            ledger = self._repo.get_ledger(request.user_id, request.request_id)
+            if ledger is None:
+                if self._repo.claim_request(
+                    request.user_id, request.request_id, request.session_id, now=now
+                ):
+                    return True
+                continue
+            if ledger.status == "COMMITTED":
+                return False
+            if ledger.status == "FAILED":
+                raise AddPreviouslyFailedError("该 request_id 此前处理失败，请更换 request_id")
+
+            # 状态为 PROCESSING：区分真实并发与遗留租约。
+            if (now - ledger.updated_at) < self._lease:
+                raise AddConflictError("该请求正在处理中")
+            if self._repo.has_committed_data(request.user_id, request.request_id):
+                self._repo.mark_request(
+                    request.user_id,
+                    request.request_id,
+                    "COMMITTED",
+                    now=now,
+                    expect="PROCESSING",
+                )
+                return False
+            if self._repo.takeover_request(
+                request.user_id,
+                request.request_id,
+                now=now,
+                stale_before=now - self._lease,
+            ):
+                return True
+            raise AddConflictError("该请求正在处理中")
+        raise AddConflictError("该请求正在处理中")
+
+    def _store_assets(
+        self, request: AddRequest, images: list[DecodedImage]
+    ) -> tuple[list[AssetRef], list[AssetRef]]:
+        """写入对象文件，返回（全部引用，本次新建的引用）。"""
+        asset_refs: list[AssetRef] = []
+        created_refs: list[AssetRef] = []
+        try:
+            for image in images:
+                ref = self._assets.put(request.user_id, request.request_id, image)
+                asset_refs.append(ref)
+                if ref.created:
+                    created_refs.append(ref)
+        except Exception:
+            self._cleanup(request.user_id, created_refs)
+            self._mark_failed(request)
+            raise
+        return asset_refs, created_refs
+
+    def _cleanup(self, user_id: str, created_refs: list[AssetRef]) -> None:
+        """只清理由本次请求新建、且没有任何已提交记录引用的对象文件。"""
+        for ref in created_refs:
+            try:
+                if self._repo.count_asset_references(user_id, ref.object_uri) == 0:
+                    self._assets.remove(ref.object_uri)
+            except Exception:
+                # 清理失败不得覆盖原始异常。
+                continue
+
+    def _mark_failed(self, request: AddRequest) -> None:
+        """仅当账本仍为 PROCESSING 时才标记 FAILED，避免覆盖已提交状态。"""
+        try:
+            self._repo.mark_request(
+                request.user_id,
+                request.request_id,
+                "FAILED",
+                now=self._clock(),
+                expect="PROCESSING",
+            )
+        except Exception:
+            return
 
     def _replay(self, request: AddRequest) -> AddResponse:
         """COMMITTED 请求返回先前的逻辑结果。"""

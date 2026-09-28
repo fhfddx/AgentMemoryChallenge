@@ -1,10 +1,16 @@
 """API 认证（Bearer / Token / X-Api-Key）。"""
 
+import hashlib
 import hmac
 
 from fastapi import HTTPException, Request
 
 from masm.config import Settings
+
+
+def credential_fingerprint(credential: str) -> str:
+    """把凭证转为稳定哈希标识，供限流状态使用（内存中不保存原始密钥）。"""
+    return hashlib.sha256(credential.encode("utf-8")).hexdigest()
 
 
 def extract_credential(request: Request) -> str | None:
