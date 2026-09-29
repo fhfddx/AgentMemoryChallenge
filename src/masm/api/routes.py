@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from masm.api.auth import credential_fingerprint, require_auth
+from masm.providers.errors import ProviderError
 from masm.schemas.api import AddRequest, AddResponse, SearchRequest, SearchResponse
 from masm.services.add_service import AddRequestError
 from masm.storage.assets import MediaValidationError
@@ -32,6 +33,8 @@ async def add(
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         except AddRequestError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except ProviderError as exc:
+            raise HTTPException(status_code=503, detail="模型依赖不可用") from exc
 
 
 @router.post("/search")
@@ -48,3 +51,5 @@ async def search(
             return service.search(request)
         except MediaValidationError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except ProviderError as exc:
+            raise HTTPException(status_code=503, detail="模型依赖不可用") from exc

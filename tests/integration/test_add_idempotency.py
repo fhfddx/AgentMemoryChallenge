@@ -1,9 +1,13 @@
 """Add 幂等性集成测试。"""
 
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Sequence
 from uuid import uuid4
 
 from masm.schemas.api import AddRequest
+from masm.providers.embeddings import EmbeddingProvider
+from masm.providers.errors import ProviderUnavailableError
+from masm.providers.fakes import DeterministicFakeEmbeddingProvider
 from masm.services.add_service import AddConflictError, AddService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
@@ -80,3 +84,46 @@ def test_concurrent_same_request_writes_once(
 
     matches = repo.lexical_candidates(user_id, "memory", limit=100)
     assert len(matches) == 1
+
+
+class _SwitchableEmbeddings(EmbeddingProvider):
+    """真实确定性向量委托，允许测试在首次提交后关闭 Provider。"""
+
+    model_name = "text-embedding-v4"
+    model_version = "cycle2-fixed"
+
+    def __init__(self) -> None:
+        self._delegate = DeterministicFakeEmbeddingProvider()
+        self.dimensions = self._delegate.dimensions
+        self.calls = 0
+        self.available = True
+
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        self.calls += 1
+        if not self.available:
+            raise ProviderUnavailableError("provider is down")
+        return self._delegate.embed_texts(texts)
+
+    def embed_images(self, images: Sequence[bytes]) -> list[list[float]]:
+        self.calls += 1
+        if not self.available:
+            raise ProviderUnavailableError("provider is down")
+        return self._delegate.embed_images(images)
+
+
+def test_committed_replay_skips_llm_and_embedding_when_providers_are_down(
+    database: Database, asset_store: AssetStore, settings
+) -> None:
+    provider = _SwitchableEmbeddings()
+    service = AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=provider
+    )
+    request = _request(f"r-{_uid()}", f"u-{_uid()}")
+    first = service.add(request)
+    calls_after_commit = provider.calls
+    provider.available = False
+
+    replay = service.add(request)
+
+    assert replay == first
+    assert provider.calls == calls_after_commit
