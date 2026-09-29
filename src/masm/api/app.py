@@ -9,9 +9,9 @@ from masm.api.limits import RequestLimiter
 from masm.api.routes import router
 from masm.config import Settings
 from masm.providers.embeddings import EmbeddingProvider
-from masm.providers.fakes import DeterministicFakeEmbeddingProvider
-from masm.retrieval.baseline import BaselineRetriever, load_channel_weights
+from masm.providers.llm import StructuredLLM
 from masm.retrieval.response_packer import ResponsePacker
+from masm.runtime import build_runtime
 from masm.services.add_service import AddService
 from masm.services.search_service import SearchService
 from masm.storage.assets import AssetStore
@@ -26,6 +26,7 @@ def create_app(
     asset_store: AssetStore | None = None,
     limiter: RequestLimiter | None = None,
     embeddings: EmbeddingProvider | None = None,
+    llm: StructuredLLM | None = None,
     channel_weights: Mapping[str, float] | None = None,
     packer: ResponsePacker | None = None,
 ) -> FastAPI:
@@ -35,28 +36,36 @@ def create_app(
     application.state.database = database or Database.create(settings.database_url)
     application.state.asset_store = asset_store or AssetStore(settings.asset_dir)
     application.state.limiter = limiter or RequestLimiter()
-    application.state.embeddings = embeddings or DeterministicFakeEmbeddingProvider()
+    repository = MemoryRepository(application.state.database)
+    runtime = build_runtime(
+        settings,
+        repository,
+        embeddings=embeddings,
+        llm=llm,
+        channel_weights=channel_weights,
+    )
+    application.state.runtime = runtime
+    application.state.runtime_metadata = runtime.audit_metadata()
+    application.state.embeddings = runtime.embeddings
     # 仅供容器编排/运维代码直接调用，不注册新的公共 HTTP 路由。
     application.state.dependency_probe = lambda: probe_dependencies(
         application.state.database, application.state.asset_store
     )
 
-    repository = MemoryRepository(application.state.database)
     application.state.add_service = AddService(
         repository,
         application.state.asset_store,
         settings,
         embeddings=application.state.embeddings,
-    )
-    retriever = BaselineRetriever(
-        repository,
-        application.state.embeddings,
-        channel_weights if channel_weights is not None else load_channel_weights(),
+        pipeline=runtime.add_pipeline,
     )
     # 官方 /search 路径始终受响应字节上限保护，不依赖调用方手工注入。
     application.state.search_service = SearchService(
-        retriever,
+        runtime.retriever,
         max_image_bytes=settings.max_image_bytes,
+        analyzer=runtime.query_analyzer,
+        expander=runtime.relation_expander,
+        reranker=runtime.reranker,
         packer=packer
         if packer is not None
         else ResponsePacker(max_bytes=settings.max_search_response_bytes),
