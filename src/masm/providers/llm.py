@@ -14,6 +14,7 @@ from typing import Any, TypeVar
 import httpx
 from pydantic import BaseModel
 
+from masm.providers.errors import ProviderResponseError, ProviderUnavailableError
 from masm.schemas.content import ContentPart, TextPart
 
 T = TypeVar("T", bound=BaseModel)
@@ -25,11 +26,11 @@ MAX_ATTEMPTS = 2
 DEFAULT_MAX_ATTEMPTS = MAX_ATTEMPTS
 
 
-class ModelUnavailableError(RuntimeError):
+class ModelUnavailableError(ProviderUnavailableError):
     """模型依赖不可用（传输失败或错误状态码）。"""
 
 
-class StructuredOutputError(RuntimeError):
+class StructuredOutputError(ProviderResponseError):
     """模型输出无法解析或无法通过 Schema 校验。"""
 
 

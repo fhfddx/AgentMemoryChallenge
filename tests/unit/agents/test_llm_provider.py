@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from masm.agents.perception import PerceptionAgent
+from masm.providers.errors import ProviderError
 from masm.providers.llm import (
     MAX_ATTEMPTS,
     ModelRequest,
@@ -219,6 +220,16 @@ def test_http_error_status_is_retried_once() -> None:
         _llm(handler).complete_json(_request(payload={}), PerceptionResult)
 
     assert len(calls) == 2
+
+
+def test_llm_provider_errors_share_sanitized_boundary() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "private-provider-body"})
+
+    with pytest.raises(ProviderError) as captured:
+        _llm(handler, max_attempts=1).complete_json(_request(payload={}), PerceptionResult)
+
+    assert "private-provider-body" not in str(captured.value)
 
 
 def test_request_timeout_is_applied() -> None:
