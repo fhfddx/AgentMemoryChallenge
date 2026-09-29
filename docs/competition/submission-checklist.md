@@ -21,10 +21,12 @@
 配置与验收顺序见 [正式模型 Provider 配置指南](provider-setup.md)。
 
 - [ ] 已向组委会确认开源方法榜的 LLM、Embedding 与多模态图片处理规则。
-- [ ] 正式部署显式使用 `official-baseline` 或 `official-masm`，没有使用 `local-fake`。
+- [x] 本地正式档位 Smoke 显式使用 `official-baseline`，没有使用 `local-fake`。
+- [ ] 公网正式部署显式使用 `official-baseline` 或 `official-masm`。
 - [ ] LLM 为 `gpt-4o-mini`，Embedding 为 `text-embedding-v4`，版本与供应商快照已记录。
-- [ ] 图片经视觉结构化进入文本向量空间的方案已获确认，并完成真实图片查询 Smoke。
-- [ ] Provider 故障返回脱敏 503；日志无原文、Base64、Prompt 载荷、响应正文或密钥。
+- [ ] 图片经视觉结构化进入文本向量空间的方案已获组委会确认。
+- [x] 真实图片 Add 与文本跨模态 Search Smoke 已通过。
+- [x] Provider 故障返回脱敏 503；真实档位日志抽检无原文、Base64、Prompt 载荷、响应正文或密钥。
 
 ## 容量、超时和持久性
 
@@ -36,10 +38,11 @@
 
 ## 验证证据
 
-- [x] `pytest -q` 全部通过（461 项）。
+- [x] `pytest -q` 全部通过（463 项）。
 - [x] `ruff check .` 与 `mypy src` 全部通过。
 - [x] 空数据库执行 `alembic upgrade head` 成功。
 - [x] `docker compose up -d --build` 后 Health/Add/Search/重复 Add Smoke 通过（`local-fake`）。
 - [x] `docker compose restart api` 后持久性 Smoke 通过（`local-fake`）。
 - [x] 全路径用户隔离测试通过；本地容器日志抽检不含原文、Base64、API Key 或 Prompt。
+- [x] `official-baseline` 真实 Provider 文本与图片 Smoke 通过，见 [真实模型验证记录](real-provider-validation-2026-09-29.md)。
 - [ ] B0、B1、MASM 和消融实验清单包含 commit、模型、Prompt、数据集、seed 与成本。

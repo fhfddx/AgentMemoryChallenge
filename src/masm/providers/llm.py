@@ -91,6 +91,25 @@ def _user_content(request: ModelRequest) -> str | list[dict[str, Any]]:
     return json.dumps(request.payload, ensure_ascii=False, default=str)
 
 
+def _strict_json_schema(value: Any) -> Any:
+    """把 Pydantic Schema 归一化为 OpenAI 严格输出支持的子集。"""
+    if isinstance(value, list):
+        return [_strict_json_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    normalized = {
+        key: _strict_json_schema(item)
+        for key, item in value.items()
+        if key != "default"
+    }
+    properties = normalized.get("properties")
+    if isinstance(properties, dict):
+        normalized["additionalProperties"] = False
+        normalized["required"] = list(properties)
+    return normalized
+
+
 class StructuredLLM(ABC):
     """结构化模型 Provider：只返回通过 Schema 校验的 Pydantic 对象。"""
 
@@ -203,7 +222,8 @@ class OpenAICompatibleLLM(StructuredLLM):
                 "type": "json_schema",
                 "json_schema": {
                     "name": output_type.__name__,
-                    "schema": output_type.model_json_schema(),
+                    "strict": True,
+                    "schema": _strict_json_schema(output_type.model_json_schema()),
                 },
             },
         }

@@ -68,6 +68,16 @@ def _user_content(seen: dict):
     return seen["body"]["messages"][1]["content"]
 
 
+def _schema_nodes(value: object):
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _schema_nodes(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _schema_nodes(item)
+
+
 # ---------------------------------------------------------------- 结构化输出
 
 
@@ -92,6 +102,31 @@ def test_json_schema_and_version_are_sent_to_provider() -> None:
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["name"] == "PerceptionResult"
     assert "properties" in response_format["json_schema"]["schema"]
+
+
+def test_json_schema_requests_strict_provider_enforcement() -> None:
+    """防止模型返回 Schema 之外的字段并触发本地校验失败。"""
+    seen: dict = {}
+
+    _llm(_recording_handler(seen)).complete_json(_request(payload={}), PerceptionResult)
+
+    assert seen["body"]["response_format"]["json_schema"]["strict"] is True
+
+
+def test_strict_json_schema_requires_every_object_field_and_omits_defaults() -> None:
+    """OpenAI 严格输出要求根对象与嵌套对象的全部字段均为 required。"""
+    seen: dict = {}
+
+    _llm(_recording_handler(seen)).complete_json(_request(payload={}), PerceptionResult)
+
+    schema = seen["body"]["response_format"]["json_schema"]["schema"]
+    nodes = list(_schema_nodes(schema))
+    object_nodes = [node for node in nodes if isinstance(node.get("properties"), dict)]
+    assert object_nodes
+    for node in object_nodes:
+        assert node["additionalProperties"] is False
+        assert node["required"] == list(node["properties"])
+    assert all("default" not in node for node in nodes)
 
 
 def test_structured_payload_is_sent_as_json_text() -> None:
