@@ -10,6 +10,9 @@ dist/
 .venv/
 venv/
 
+# 本地隔离工作区
+.worktrees/
+
 # 测试与静态检查缓存
 .pytest_cache/
 .ruff_cache/
