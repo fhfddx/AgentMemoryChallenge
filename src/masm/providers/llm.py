@@ -162,16 +162,15 @@ class OpenAICompatibleLLM(StructuredLLM):
         attempts = _effective_attempts(request.max_attempts, self._max_attempts)
         timeout = request.timeout_seconds or self._timeout_seconds
         started = time.perf_counter()
-        last_error: Exception | None = None
         transport_failure = False
 
         for attempt in range(1, attempts + 1):
             try:
                 result = self._post(body, output_type, timeout)
-            except httpx.HTTPError as exc:
-                last_error, transport_failure = exc, True
-            except (ValueError, KeyError, IndexError, TypeError) as exc:
-                last_error, transport_failure = exc, False
+            except httpx.HTTPError:
+                transport_failure = True
+            except (ValueError, KeyError, IndexError, TypeError):
+                transport_failure = False
             else:
                 self._record(
                     request,
@@ -190,8 +189,8 @@ class OpenAICompatibleLLM(StructuredLLM):
             succeeded=False,
         )
         if transport_failure:
-            raise ModelUnavailableError("模型依赖不可用") from last_error
-        raise StructuredOutputError("模型输出无法通过 Schema 校验") from last_error
+            raise ModelUnavailableError("模型依赖不可用") from None
+        raise StructuredOutputError("模型输出无法通过 Schema 校验") from None
 
     def _build_body(self, request: ModelRequest, output_type: type[BaseModel]) -> dict[str, Any]:
         return {

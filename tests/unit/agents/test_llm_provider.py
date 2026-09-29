@@ -4,6 +4,7 @@
 """
 
 import json
+import traceback
 
 import httpx
 import pytest
@@ -230,6 +231,24 @@ def test_llm_provider_errors_share_sanitized_boundary() -> None:
         _llm(handler, max_attempts=1).complete_json(_request(payload={}), PerceptionResult)
 
     assert "private-provider-body" not in str(captured.value)
+
+
+def test_llm_invalid_payload_is_absent_from_full_traceback() -> None:
+    """完整异常链不得保留供应商返回的无效结构化内容。"""
+    secret_value = "private-llm-response-field"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": secret_value}}]},
+        )
+
+    llm = _llm(handler, max_attempts=1)
+    with pytest.raises(StructuredOutputError) as captured:
+        llm.complete_json(_request(payload={}), PerceptionResult)
+
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert secret_value not in rendered
 
 
 def test_request_timeout_is_applied() -> None:

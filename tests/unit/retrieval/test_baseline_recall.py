@@ -197,3 +197,59 @@ def test_fused_result_is_deterministic_across_runs() -> None:
     assert expected
     for run in runs[1:]:
         assert [(candidate.content, candidate.score) for candidate in run] == expected
+
+
+class _RecordingRepository:
+    """记录向量召回模态，验证正式共享空间的跨模态查询。"""
+
+    def __init__(self) -> None:
+        self.modalities: list[str] = []
+
+    def lexical_candidates(self, user_id: str, query: str, limit: int) -> list[MemoryCandidate]:
+        return []
+
+    def vector_candidates(
+        self,
+        user_id: str,
+        vector,
+        *,
+        modality: str,
+        model_name: str,
+        model_version: str,
+        limit: int,
+    ) -> list[MemoryCandidate]:
+        self.modalities.append(modality)
+        return [_candidate("image memory")] if modality == "image" else []
+
+    def metadata_candidates(
+        self, user_id: str, *, modality=None, keywords=(), limit: int
+    ) -> list[MemoryCandidate]:
+        return []
+
+
+def test_shared_embedding_space_uses_text_query_for_text_and_image_memories() -> None:
+    """正式共享向量空间中，文本查询必须同时召回图片描述向量。"""
+    repository = _RecordingRepository()
+    retriever = BaselineRetriever(
+        repository,
+        DeterministicFakeEmbeddingProvider(),
+        _WEIGHTS,
+        text_queries_search_images=True,
+    )
+
+    results = retriever.retrieve("user-1", ParsedQuery(text_queries=("purple square",)), 5)
+
+    assert sorted(repository.modalities) == ["image", "text"]
+    assert [candidate.content for candidate in results] == ["image memory"]
+
+
+def test_default_embedding_space_keeps_text_and_image_modalities_isolated() -> None:
+    """默认 Fake 档位保持旧的模态隔离行为。"""
+    repository = _RecordingRepository()
+    retriever = BaselineRetriever(
+        repository, DeterministicFakeEmbeddingProvider(), _WEIGHTS
+    )
+
+    retriever.retrieve("user-1", ParsedQuery(text_queries=("purple square",)), 5)
+
+    assert repository.modalities == ["text"]

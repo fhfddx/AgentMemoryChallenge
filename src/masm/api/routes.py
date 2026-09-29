@@ -1,6 +1,7 @@
 """公共 API 路由。"""
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from masm.api.auth import credential_fingerprint, require_auth
 from masm.providers.errors import ProviderError
@@ -28,7 +29,7 @@ async def add(
     limiter = req.app.state.limiter
     async with limiter.acquire(credential_fingerprint(credential)):
         try:
-            return service.add(request)
+            return await run_in_threadpool(service.add, request)
         except MediaValidationError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         except AddRequestError as exc:
@@ -48,7 +49,7 @@ async def search(
     limiter = req.app.state.limiter
     async with limiter.acquire(credential_fingerprint(credential)):
         try:
-            return service.search(request)
+            return await run_in_threadpool(service.search, request)
         except MediaValidationError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         except ProviderError as exc:

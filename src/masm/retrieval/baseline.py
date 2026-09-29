@@ -71,6 +71,7 @@ class BaselineRetriever:
         *,
         channel_limit: int | None = None,
         max_channel_workers: int = DEFAULT_CHANNEL_WORKERS,
+        text_queries_search_images: bool = False,
     ) -> None:
         if max_channel_workers < 1:
             raise ValueError("max_channel_workers 必须为正整数")
@@ -79,6 +80,7 @@ class BaselineRetriever:
         self._weights = dict(weights)
         self._channel_limit = channel_limit
         self._max_channel_workers = max_channel_workers
+        self._text_queries_search_images = text_queries_search_images
 
     def retrieve(self, user_id: str, query: ParsedQuery, limit: int) -> list[MemoryCandidate]:
         """按查询召回并融合，返回不超过 ``limit`` 条候选。"""
@@ -136,6 +138,21 @@ class BaselineRetriever:
                     ),
                 )
             )
+            if self._text_queries_search_images:
+                tasks.append(
+                    (
+                        IMAGE_VECTOR_CHANNEL,
+                        partial(
+                            self._repo.vector_candidates,
+                            user_id,
+                            text_vector,
+                            modality="image",
+                            model_name=self._embeddings.model_name,
+                            model_version=self._embeddings.model_version,
+                            limit=recall_limit,
+                        ),
+                    )
+                )
 
         visual_queries = list(query.visual_queries)
         if visual_queries:

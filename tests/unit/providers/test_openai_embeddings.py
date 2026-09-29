@@ -2,6 +2,7 @@
 
 import json
 import math
+import traceback
 
 import httpx
 import pytest
@@ -134,6 +135,23 @@ def test_embedding_error_never_contains_secret_or_response_body() -> None:
     assert "embedding-secret" not in rendered
     assert "private-provider-body" not in rendered
     assert "sensitive input" not in rendered
+
+
+def test_embedding_invalid_payload_is_absent_from_full_traceback() -> None:
+    """脱敏错误的完整异常链也不得保留供应商响应字段。"""
+    secret_value = "private-vector-field"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": [{"index": 0, "embedding": [0.1, secret_value]}]},
+        )
+
+    with pytest.raises(ProviderResponseError) as captured:
+        _provider(handler, max_attempts=1).embed_texts(["safe input"])
+
+    rendered = "".join(traceback.format_exception(captured.value))
+    assert secret_value not in rendered
 
 
 def test_direct_image_embedding_is_rejected() -> None:

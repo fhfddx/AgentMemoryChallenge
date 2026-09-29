@@ -47,6 +47,7 @@ def test_local_fake_builds_no_llm_or_advanced_pipeline() -> None:
     assert runtime.query_analyzer is None
     assert runtime.relation_expander is None
     assert runtime.reranker is None
+    assert runtime.retriever._text_queries_search_images is False  # noqa: SLF001
 
 
 def test_local_fake_ignores_unrelated_model_environment(
@@ -75,6 +76,7 @@ def test_official_baseline_builds_real_embeddings_without_add_pipeline() -> None
     assert runtime.query_analyzer is None
     assert runtime.relation_expander is None
     assert runtime.reranker is None
+    assert runtime.retriever._text_queries_search_images is True  # noqa: SLF001
 
 
 def test_official_masm_builds_three_agents_and_all_search_components() -> None:
@@ -95,3 +97,4 @@ def test_official_masm_builds_three_agents_and_all_search_components() -> None:
     assert isinstance(runtime.query_analyzer, QueryAnalyzer)
     assert isinstance(runtime.relation_expander, RelationExpander)
     assert isinstance(runtime.reranker, EvidenceReranker)
+    assert runtime.retriever._text_queries_search_images is True  # noqa: SLF001

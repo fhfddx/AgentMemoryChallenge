@@ -77,22 +77,21 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
         }
         started = time.perf_counter()
         unavailable = False
-        last_error: Exception | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:
                 result = self._post(body, len(inputs))
-            except httpx.HTTPError as exc:
-                unavailable, last_error = True, exc
-            except (KeyError, TypeError, ValueError) as exc:
-                unavailable, last_error = False, exc
+            except httpx.HTTPError:
+                unavailable = True
+            except (KeyError, TypeError, ValueError):
+                unavailable = False
             else:
                 self._record(inputs, attempt, started, succeeded=True)
                 return result
 
         self._record(inputs, self._max_attempts, started, succeeded=False)
         if unavailable:
-            raise ProviderUnavailableError("Embedding Provider 不可用") from last_error
-        raise ProviderResponseError("Embedding Provider 响应无效") from last_error
+            raise ProviderUnavailableError("Embedding Provider 不可用") from None
+        raise ProviderResponseError("Embedding Provider 响应无效") from None
 
     def embed_images(self, images: Sequence[bytes]) -> list[list[float]]:
         """文本 Provider 不支持直接图片；由多模态组合 Provider 负责。"""

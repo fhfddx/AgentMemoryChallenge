@@ -96,6 +96,7 @@ def build_runtime(
         repository,
         selected_embeddings,
         channel_weights if channel_weights is not None else load_channel_weights(),
+        text_queries_search_images=profile is not RuntimeProfile.LOCAL_FAKE,
     )
     add_pipeline: AddPipeline | None = None
     query_analyzer: QueryAnalyzer | None = None
