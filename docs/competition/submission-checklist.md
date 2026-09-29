@@ -26,18 +26,18 @@
 
 ## 容量、超时和持久性
 
-- [ ] 单图 10 MiB、单 Add 图片 30 MiB、Search 响应 30 MiB 的边界已验证。
+- [x] 单图 10 MiB、单 Add 图片 30 MiB、Search 响应 30 MiB 的边界已通过自动化测试验证。
 - [ ] API、数据库、模型调用和反向代理超时已记录，并与比赛平台限制兼容。
 - [ ] PostgreSQL 和图片对象使用持久卷；备份/恢复演练覆盖两者的一致快照。
-- [ ] API 容器重启后，重启前 Add 的文本和图片仍可 Search。
+- [x] 本地 `local-fake` API 容器重启后，重启前 Add 的文本仍可 Search；正式档位上线后需复验。
 - [ ] 当前单机文件对象存储限制已获接受；若改为外部 S3，重新验证 staging、发布和删除语义。
 
 ## 验证证据
 
-- [ ] `pytest -v` 全部通过。
-- [ ] `ruff check .` 与 `mypy src` 全部通过。
-- [ ] 空数据库执行 `alembic upgrade head` 成功。
-- [ ] `docker compose up -d --build` 后 Health/Add/Search/重复 Add Smoke 通过。
-- [ ] `docker compose restart api` 后持久性 Smoke 通过。
-- [ ] 全路径用户隔离测试通过；日志抽检不含原文、Base64、API Key 或 Prompt。
+- [x] `pytest -q` 全部通过（461 项）。
+- [x] `ruff check .` 与 `mypy src` 全部通过。
+- [x] 空数据库执行 `alembic upgrade head` 成功。
+- [x] `docker compose up -d --build` 后 Health/Add/Search/重复 Add Smoke 通过（`local-fake`）。
+- [x] `docker compose restart api` 后持久性 Smoke 通过（`local-fake`）。
+- [x] 全路径用户隔离测试通过；本地容器日志抽检不含原文、Base64、API Key 或 Prompt。
 - [ ] B0、B1、MASM 和消融实验清单包含 commit、模型、Prompt、数据集、seed 与成本。
