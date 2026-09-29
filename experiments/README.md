@@ -6,19 +6,20 @@ Repository、ORM 模型或内部答案。配置文件使用 JSON 语法保存为
 
 ## 配置矩阵
 
-- `configs/b0.yaml`：确定性基础检索 Smoke。
+- `configs/b0.yaml`：`official-baseline` 正式模型基础检索。
 - `configs/b1.yaml`：多通道混合检索基线。
-- `configs/masm.yaml`：完整 MASM。
+- `configs/masm.yaml`：`official-masm` 完整 MASM。
 - `configs/ablations/`：分别关闭 Temporal、Curator、关系扩展、图片通道、冲突重排，
   以及退化为单通道。
 
 每个配置固定 seed、数据集版本、模型版本、Prompt 版本、部署 profile 和成本记账参数。
-`git_commit: auto` 在运行时解析为当前 HEAD。带 `record-before-run` 的字段是显式阻断标记：
-正式实验前必须替换为真实模型版本；B0 的确定性 Fake 可直接用于无成本 Smoke。
+`git_commit: auto` 在运行时解析为当前 HEAD。B0 映射到 `official-baseline`，MASM 映射到
+`official-masm`。`provider_revision: record-before-run` 是显式阻断标记：真实调用完成前必须
+记录供应商版本或快照标识，不能把 Mock 或 `local-fake` 的结果写成正式实验。
 
 ## 运行
 
-先启动与配置 `deployment_profile` 一致的服务，再设置 API Key：
+先启动与配置 `deployment_profile` 一致的服务、完成一次真实模型 Smoke，再设置 API Key：
 
 ```bash
 set MASM_API_KEY=test-key

@@ -1,13 +1,13 @@
 """Add 幂等性集成测试。"""
 
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
-from masm.schemas.api import AddRequest
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.errors import ProviderUnavailableError
 from masm.providers.fakes import DeterministicFakeEmbeddingProvider
+from masm.schemas.api import AddRequest
 from masm.services.add_service import AddConflictError, AddService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database

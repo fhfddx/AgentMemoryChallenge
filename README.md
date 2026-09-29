@@ -13,9 +13,23 @@ MASM（Multi-Agent Structured Memory）是一个面向 [Agent Memory Challenge](
 
 详细契约见 `docs/superpowers/specs/2026-09-28-agent-memory-challenge-design.md`。
 
+## 运行档位
+
+| 档位 | 模型与组件 | 用途 |
+| --- | --- | --- |
+| `local-fake` | 确定性 Fake Embedding，不调用外部模型 | 开发、自动化测试、Docker Smoke |
+| `official-baseline` | `gpt-4o-mini` 图片感知 + `text-embedding-v4` | B0、保底候选 |
+| `official-masm` | 正式模型 + 三智能体 + 一跳关系扩展 + 重排 | 完整 MASM 候选 |
+
+默认档位是 `local-fake`，只能用于开发，禁止作为正式比赛提交。正式档位缺少模型密钥、使用
+错误模型或非 HTTPS Provider 地址时会在启动阶段失败，不会静默回退到 Fake。
+
+图片在正式档位中先由 `gpt-4o-mini` 提取可观察描述、OCR、实体和关键词，再与文本一起进入
+`text-embedding-v4` 向量空间。Embedding 依赖不可用时 Add/Search 返回脱敏的 HTTP 503。
+
 ## 技术栈
 
-Python 3.11+、FastAPI、Pydantic v2、PostgreSQL + pgvector、兼容 S3 的对象存储。
+Python 3.11+、FastAPI、Pydantic v2、PostgreSQL + pgvector、本地持久卷对象存储、HTTPX。
 
 ## 开发环境
 
@@ -42,7 +56,7 @@ copy .env.example .env
 ## 容器部署与 Smoke
 
 ```bash
-# .env 中至少修改 MASM_API_KEYS 和 POSTGRES_PASSWORD
+# .env 中至少修改 MASM_API_KEYS 和 POSTGRES_PASSWORD；真实模型测试还要配置 Provider
 docker compose up -d --build
 python scripts/smoke_test.py --base-url http://localhost:8000 --api-key test-key
 ```
@@ -71,5 +85,7 @@ experiments/   可复现实验配置、公开 API 运行器与汇总工具
 
 ## 当前状态
 
-已完成结构化记忆写入、混合检索、多智能体治理、隐私删除、容器候选部署与可复现实验框架。
+已完成结构化记忆写入、混合检索、多智能体治理、隐私删除、容器候选部署、正式模型 Provider
+和可复现实验框架。`official-masm` 会把三智能体与增强检索接入实际 API；默认
+`local-fake` 则保留无密钥基线。真实模型效果、费用和官方 Smoke 必须在注入合法密钥后验证。
 公共线上接口仍严格限制为 `GET /health`、`POST /add`、`POST /search`。

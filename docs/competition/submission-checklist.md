@@ -16,6 +16,14 @@
 - [ ] Add/Search Schema、错误码和 `top_k=100` 上限与冻结候选版本一致。
 - [ ] 内部依赖探针不作为公共路由暴露，输出中没有连接串、路径、异常或密钥。
 
+## 模型与运行档位
+
+- [ ] 已向组委会确认开源方法榜的 LLM、Embedding 与多模态图片处理规则。
+- [ ] 正式部署显式使用 `official-baseline` 或 `official-masm`，没有使用 `local-fake`。
+- [ ] LLM 为 `gpt-4o-mini`，Embedding 为 `text-embedding-v4`，版本与供应商快照已记录。
+- [ ] 图片经视觉结构化进入文本向量空间的方案已获确认，并完成真实图片查询 Smoke。
+- [ ] Provider 故障返回脱敏 503；日志无原文、Base64、Prompt 载荷、响应正文或密钥。
+
 ## 容量、超时和持久性
 
 - [ ] 单图 10 MiB、单 Add 图片 30 MiB、Search 响应 30 MiB 的边界已验证。
