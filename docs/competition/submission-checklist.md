@@ -18,6 +18,8 @@
 
 ## 模型与运行档位
 
+配置与验收顺序见 [正式模型 Provider 配置指南](provider-setup.md)。
+
 - [ ] 已向组委会确认开源方法榜的 LLM、Embedding 与多模态图片处理规则。
 - [ ] 正式部署显式使用 `official-baseline` 或 `official-masm`，没有使用 `local-fake`。
 - [ ] LLM 为 `gpt-4o-mini`，Embedding 为 `text-embedding-v4`，版本与供应商快照已记录。
