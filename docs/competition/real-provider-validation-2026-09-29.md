@@ -54,8 +54,9 @@ Pytest 输出包含上游 `pytest-asyncio`、Starlette 的弃用警告，以及 
 
 ## 尚未验证
 
-- `official-masm` 全智能体档位的真实 Provider Smoke；
+- `official-masm` 全智能体档位的真实 Provider Smoke（已于 2026-09-30 完成，见
+  [公网正式部署验证记录](public-deployment-validation-2026-09-30.md)）；
 - 供应商未公开的精确后端模型快照；
-- 公网 HTTPS 域名、证书和比赛平台回调；
+- 公网 HTTPS 域名和证书（已于 2026-09-30 完成，见上述记录）；比赛平台正式评测回调仍待提交；
 - 组委会对视觉文本化方案的书面确认；
 - B0、B1、MASM 与消融实验的正式跑数、成本和指标。

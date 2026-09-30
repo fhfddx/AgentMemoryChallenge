@@ -12,6 +12,8 @@ MASM（Multi-Agent Structured Memory）是一个面向 [Agent Memory Challenge](
 | `POST /search` | 在指定 `user_id` 作用域内返回相关记忆证据，只返回证据，不生成最终答案。 |
 
 详细契约见 `docs/superpowers/specs/2026-09-28-agent-memory-challenge-design.md`。
+当前比赛候选部署在 `https://agentmemorydev.icu`，公网正式档位的 Smoke、容量、备份恢复和
+端口加固证据见[公网部署验证记录](docs/competition/public-deployment-validation-2026-09-30.md)。
 
 ## 运行档位
 
@@ -87,5 +89,6 @@ experiments/   可复现实验配置、公开 API 运行器与汇总工具
 
 已完成结构化记忆写入、混合检索、多智能体治理、隐私删除、容器候选部署、正式模型 Provider
 和可复现实验框架。`official-masm` 会把三智能体与增强检索接入实际 API；默认
-`local-fake` 则保留无密钥基线。真实模型效果、费用和官方 Smoke 必须在注入合法密钥后验证。
-公共线上接口仍严格限制为 `GET /health`、`POST /add`、`POST /search`。
+`local-fake` 则保留无密钥基线。公网 `official-masm` 已完成真实文本/图片 Add/Search、用户隔离、
+重启持久性、小规模容量以及备份恢复验证。正式基准实验与论文消融结果尚未跑数，不能把 Smoke
+结果表述为最终榜单效果。公共线上接口仍严格限制为 `GET /health`、`POST /add`、`POST /search`。
