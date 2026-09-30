@@ -51,6 +51,8 @@ docker compose --profile https up -d --build
 ```
 
 Caddy 自动申请和续期证书。内网或 localhost 部署使用 Caddy 本地证书时，客户端需要信任其根证书。
+API 的宿主机端口只绑定到 `127.0.0.1`；Caddy 通过 Compose 内部网络访问 `api:8000`，
+因此公网只需开放 80/443，不要在云安全组中开放 `MASM_HTTP_PORT`。
 
 ## 健康检查
 
@@ -70,4 +72,6 @@ Caddy 自动申请和续期证书。内网或 localhost 部署使用 Caddy 本�
 - 备份时同时备份 `postgres_data` 和 `asset_data`，二者必须属于同一发布快照。
 - 日志只允许请求标识、匿名用户标识、延迟、数量、模型版本、token 与成本元数据。
 - 日志和错误响应不得包含比赛原文、Base64、Prompt 载荷、模型响应正文或 Provider 密钥。
+- API、PostgreSQL 和 Caddy 使用 Docker `json-file` 日志轮转：单文件最多 10 MiB，最多保留
+  5 个文件，避免长期评测日志占满系统盘。
 - 正式部署先运行小型真实模型 Smoke，再运行公开基准；不得用 Mock 测试冒充真实模型证据。

@@ -1,3 +1,9 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -12,6 +18,7 @@ services:
       retries: 20
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    logging: *default-logging
     restart: unless-stopped
 
   api:
@@ -44,9 +51,10 @@ services:
       timeout: 3s
       retries: 10
     ports:
-      - "${MASM_HTTP_PORT:-8000}:8000"
+      - "127.0.0.1:${MASM_HTTP_PORT:-8000}:8000"
     volumes:
       - asset_data:/data/assets
+    logging: *default-logging
     restart: unless-stopped
 
   caddy:
@@ -64,6 +72,7 @@ services:
       - ./deployments/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    logging: *default-logging
     restart: unless-stopped
 
 volumes:
