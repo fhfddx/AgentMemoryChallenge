@@ -100,7 +100,11 @@ def _count(database: Database, model: type, user_id: str) -> int:
 def _memory_row(database: Database, user_id: str, request_id: str) -> Memory:
     with database.session() as session:
         return session.execute(
-            select(Memory).where(Memory.user_id == user_id, Memory.request_id == request_id)
+            select(Memory).where(
+                Memory.user_id == user_id,
+                Memory.request_id == request_id,
+                Memory.granularity == "context",
+            )
         ).scalar_one()
 
 
@@ -190,6 +194,54 @@ def test_link_action_persists_relation(
     assert len(relations) == 1
     assert relations[0].target_id == target.id
     assert relations[0].relation_type == "link"
+
+
+def test_governance_actions_apply_only_to_context(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """消息记忆不成为治理关系的源节点。"""
+    user_id = _uid("u")
+    baseline = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    baseline.add(_request(_uid("r"), user_id, "Kyoto is in Japan"))
+    with database.session() as session:
+        target_id = session.execute(
+            select(Memory.id).where(Memory.user_id == user_id, Memory.granularity == "context")
+        ).scalar_one()
+
+    pipeline, _llms = _build_pipeline(
+        database, embeddings, decision=_decision(ActionKind.LINK, target_id)
+    )
+    request_id = _uid("r")
+    service = AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings, pipeline=pipeline
+    )
+    service.add(
+        AddRequest(
+            request_id=request_id,
+            user_id=user_id,
+            session_id="session-2",
+            messages=[
+                {"role": "user", "content": "Alice visited Kyoto"},
+                {"role": "assistant", "content": "She admired the gardens"},
+            ],
+        )
+    )
+
+    with database.session() as session:
+        rows = session.execute(
+            select(Memory).where(
+                Memory.user_id == user_id,
+                Memory.request_id == request_id,
+            )
+        ).scalars().all()
+        relations = session.execute(
+            select(MemoryRelation).where(MemoryRelation.user_id == user_id)
+        ).scalars().all()
+    assert len(rows) == 3
+    assert len(relations) == 1
+    assert relations[0].source_id == rows[0].id
+    assert rows[0].granularity == "context"
+    assert all(row.granularity == "message" and row.supersedes is None for row in rows[1:])
 
 
 def _lookup_request_id(database: Database, user_id: str) -> str:
@@ -311,7 +363,7 @@ def _memory_ids(database: Database, user_id: str) -> list[UUID]:
         return list(
             session.execute(
                 select(Memory.id)
-                .where(Memory.user_id == user_id)
+                .where(Memory.user_id == user_id, Memory.granularity == "context")
                 .order_by(Memory.created_at, Memory.id)
             ).scalars()
         )
@@ -507,4 +559,4 @@ def test_source_message_count_matches_request(
     service.add(_request(_uid("r"), user_id, "one message"))
 
     assert _count(database, SourceMessage, user_id) == 1
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2

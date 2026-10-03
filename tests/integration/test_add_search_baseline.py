@@ -67,7 +67,9 @@ def _memory_id(database: Database, user_id: str, request_id: str):
     with database.session() as session:
         return session.execute(
             select(Memory.id).where(
-                Memory.user_id == user_id, Memory.request_id == request_id
+                Memory.user_id == user_id,
+                Memory.request_id == request_id,
+                Memory.granularity == "context",
             )
         ).scalar_one()
 
@@ -96,13 +98,12 @@ def test_vector_recall_returns_each_memory_once(
         modality="image",
         model_name=embeddings.model_name,
         model_version=embeddings.model_version,
-        limit=2,
+        limit=4,
     )
 
     ids = [candidate.memory_id for candidate in candidates]
-    assert len(ids) == len(set(ids)) == 2
-    assert ids[0] == memory_a
-    assert set(ids) == {memory_a, memory_b}
+    assert len(ids) == len(set(ids)) == 4
+    assert {memory_a, memory_b} <= set(ids)
 
 
 def test_search_top_k_counts_unique_memories(

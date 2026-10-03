@@ -11,11 +11,12 @@ from PIL import Image
 from sqlalchemy import func, select
 
 from masm.providers.embeddings import EmbeddingProvider
+from masm.providers.fakes import DeterministicFakeEmbeddingProvider
 from masm.schemas.api import AddRequest
 from masm.services.add_service import AddService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
-from masm.storage.models import Memory, SourceMessage
+from masm.storage.models import Asset, Memory, SourceMessage
 from masm.storage.repositories import MemoryRepository
 
 
@@ -157,6 +158,41 @@ def test_added_memory_survives_restart(
     assert any("durable" in c.content for c in candidates)
 
 
+def test_image_mapping_failure_is_preclaim(
+    database: Database, asset_store: AssetStore, settings
+) -> None:
+    """图片向量数量不足时必须在 claim/资产写入之前失败。"""
+
+    class ShortImageProvider(DeterministicFakeEmbeddingProvider):
+        def embed_images(self, images: Sequence[bytes]) -> list[list[float]]:
+            return super().embed_images(images[:1])
+
+    user_id, request_id = f"u-{_uid()}", f"r-{_uid()}"
+    repo = MemoryRepository(database)
+    service = AddService(repo, asset_store, settings, embeddings=ShortImageProvider())
+    request = AddRequest(
+        request_id=request_id,
+        user_id=user_id,
+        session_id="session-1",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": _data_url(_png())}},
+                    {"type": "image_url", "image_url": {"url": _data_url(_png())}},
+                ],
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="数量"):
+        service.add(request)
+
+    assert repo.get_ledger(user_id, request_id) is None
+    assert _count(database, Memory, user_id) == 0
+    assert _count(database, Asset, user_id) == 0
+
+
 def test_committed_text_retry_skips_embedding_provider(
     database: Database, asset_store: AssetStore, settings, embeddings: EmbeddingProvider
 ) -> None:
@@ -246,7 +282,7 @@ def test_commit_during_prepare_is_replayed_without_duplicates(
 
     assert results["slow"] == results["winner"]
     assert getattr(results["winner"], "success", None) is True
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
     assert _count(database, SourceMessage, user_id) == 1
 
 
@@ -290,7 +326,7 @@ def test_prepare_failure_after_concurrent_commit_replays(
     assert getattr(results["slow"], "success", None) is True
     assert results["slow"] == results["winner"]
 
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
     assert _count(database, SourceMessage, user_id) == 1
     assert MemoryRepository(database).get_ledger_status(user_id, request_id) == "COMMITTED"
 

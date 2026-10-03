@@ -82,7 +82,11 @@ def _count(database: Database, model: type, user_id: str) -> int:
 def _memory_row(database: Database, user_id: str, request_id: str) -> Memory:
     with database.session() as session:
         return session.execute(
-            select(Memory).where(Memory.user_id == user_id, Memory.request_id == request_id)
+            select(Memory).where(
+                Memory.user_id == user_id,
+                Memory.request_id == request_id,
+                Memory.granularity == "context",
+            )
         ).scalar_one()
 
 
@@ -116,7 +120,7 @@ def test_governance_failure_degrades_to_committed_baseline(
     assert response.success is True
     repo = MemoryRepository(database)
     assert repo.get_ledger_status(user_id, request_id) == "COMMITTED"
-    assert _count(database, Memory, user_id) == 2
+    assert _count(database, Memory, user_id) == 4
     assert _count(database, SourceMessage, user_id) == 2
 
     # 不安全治理动作不得落库。
@@ -133,12 +137,12 @@ def test_governance_failure_degrades_to_committed_baseline(
         BaselineRetriever(MemoryRepository(database), embeddings, DEFAULT_CHANNEL_WEIGHTS),
         max_image_bytes=settings.max_image_bytes,
     ).search(SearchRequest(query="meeting", user_id=user_id, top_k=10))
-    assert len(results.data) == 2
+    assert any("Tuesday" in str(item.content) for item in results.data)
 
     # 相同 request_id 重试必须回放已提交结果。
     retry = service.add(_request(request_id, user_id, "the meeting is on Tuesday"))
     assert retry == response
-    assert _count(database, Memory, user_id) == 2
+    assert _count(database, Memory, user_id) == 4
 
 
 def test_governance_failure_with_missing_target_degrades(

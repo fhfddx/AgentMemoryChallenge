@@ -4,6 +4,8 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
+from sqlalchemy import select
+
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.errors import ProviderUnavailableError
 from masm.providers.fakes import DeterministicFakeEmbeddingProvider
@@ -11,6 +13,7 @@ from masm.schemas.api import AddRequest
 from masm.services.add_service import AddConflictError, AddService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
+from masm.storage.models import Memory
 from masm.storage.repositories import MemoryRepository
 
 
@@ -40,7 +43,43 @@ def test_same_request_id_writes_once(add_service: AddService, database: Database
     assert first == second
     commit = repo.get_by_request(user_id, request_id)
     assert commit is not None
-    assert len(commit.memory_ids) == 1
+    assert len(commit.memory_ids) == 2
+
+
+def test_dual_memory_replay_and_takeover(
+    database: Database, asset_store: AssetStore, settings
+) -> None:
+    """双消息 Add 回放不能追加消息记忆，也不能重新请求向量服务。"""
+    provider = _SwitchableEmbeddings()
+    repo = MemoryRepository(database)
+    service = AddService(repo, asset_store, settings, embeddings=provider)
+    user_id, request_id = f"u-{_uid()}", f"r-{_uid()}"
+    request = AddRequest(
+        request_id=request_id,
+        user_id=user_id,
+        session_id="session-1",
+        messages=[
+            {"role": "user", "content": "Alice likes tea"},
+            {"role": "assistant", "content": "She visited Kyoto"},
+        ],
+    )
+
+    first = service.add(request)
+    calls_after_first = provider.calls
+    provider.available = False
+    replay = service.add(request)
+
+    with database.session() as session:
+        rows = session.execute(
+            select(Memory).where(Memory.user_id == user_id, Memory.request_id == request_id)
+        ).scalars().all()
+    assert replay == first
+    assert provider.calls == calls_after_first
+    assert [(row.granularity, row.source_position) for row in rows] == [
+        ("context", None),
+        ("message", 0),
+        ("message", 1),
+    ]
 
 
 def test_restart_keeps_idempotency(
@@ -60,7 +99,7 @@ def test_restart_keeps_idempotency(
 
     commit = MemoryRepository(database).get_by_request(user_id, request_id)
     assert commit is not None
-    assert len(commit.memory_ids) == 1
+    assert len(commit.memory_ids) == 2
 
 
 def test_concurrent_same_request_writes_once(
@@ -83,7 +122,7 @@ def test_concurrent_same_request_writes_once(
         list(pool.map(lambda _: _attempt(), range(4)))
 
     matches = repo.lexical_candidates(user_id, "memory", limit=100)
-    assert len(matches) == 1
+    assert len(matches) == 2
 
 
 class _SwitchableEmbeddings(EmbeddingProvider):

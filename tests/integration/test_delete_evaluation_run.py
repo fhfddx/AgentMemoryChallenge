@@ -82,7 +82,7 @@ def test_delete_run_removes_database_rows_and_objects(
     run_id = _uid("r")
     service = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
     _add(service, run_id, user_id)
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
     assert _objects(asset_store)
 
     report = _service(database, asset_store, settings, embeddings).delete_run(
@@ -90,7 +90,7 @@ def test_delete_run_removes_database_rows_and_objects(
     )
 
     assert report.complete is True
-    assert report.memories_deleted == 1
+    assert report.memories_deleted == 2
     assert report.assets_deleted == 1
     assert report.objects_deleted >= 1
     assert _count(database, Memory, user_id) == 0
@@ -175,15 +175,15 @@ def test_delete_run_is_scoped_to_user_and_run(
 
     _service(database, asset_store, settings, embeddings).delete_run(run_a1, user_id=user_a)
 
-    assert _count(database, Memory, user_a) == 1
-    assert _count(database, Memory, user_b) == 1
+    assert _count(database, Memory, user_a) == 2
+    assert _count(database, Memory, user_b) == 2
     with database.session() as session:
         remaining = (
             session.execute(select(Memory.request_id).where(Memory.user_id == user_a))
             .scalars()
             .all()
         )
-    assert remaining == [run_a2]
+    assert remaining == [run_a2, run_a2]
 
 
 def test_delete_run_reports_partial_object_failure(
@@ -788,7 +788,7 @@ def test_delete_cleans_staging_left_by_failed_publish(
         )
 
     # 数据库已提交（账本 COMMITTED），正式对象未发布，暂存里的私有图片仍在。
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
     assert _objects(asset_store) == []
     assert _staging_files(asset_store), "publish 失败后暂存文件应当仍在"
 

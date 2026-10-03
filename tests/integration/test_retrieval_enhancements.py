@@ -43,7 +43,11 @@ def _seed(
 def _memory_row(database: Database, user_id: str, request_id: str) -> Memory:
     with database.session() as session:
         return session.execute(
-            select(Memory).where(Memory.user_id == user_id, Memory.request_id == request_id)
+            select(Memory).where(
+                Memory.user_id == user_id,
+                Memory.request_id == request_id,
+                Memory.granularity == "context",
+            )
         ).scalar_one()
 
 

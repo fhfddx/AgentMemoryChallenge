@@ -34,7 +34,11 @@ def _request(request_id: str, user_id: str, text: str) -> AddRequest:
 def _memory_id(database: Database, user_id: str, request_id: str) -> UUID:
     with database.session() as session:
         return session.execute(
-            select(Memory.id).where(Memory.user_id == user_id, Memory.request_id == request_id)
+            select(Memory.id).where(
+                Memory.user_id == user_id,
+                Memory.request_id == request_id,
+                Memory.granularity == "context",
+            )
         ).scalar_one()
 
 

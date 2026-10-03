@@ -17,8 +17,13 @@ from masm.config import Settings
 from masm.orchestration.add_pipeline import AddPipeline
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.fakes import DeterministicFakeEmbeddingProvider
+from masm.providers.multimodal_embeddings import (
+    GroundedImageEmbedding,
+    GroundedMultimodalEmbeddingProvider,
+)
 from masm.schemas.api import AddRequest, AddResponse
 from masm.schemas.internal import AssetRef, DecodedImage
+from masm.services.message_memory import build_message_memories, describe_message
 from masm.storage.assets import (
     AssetStore,
     ImageTooLargeError,
@@ -74,6 +79,8 @@ class _Prepared:
     modality: str
     text_vector: Sequence[float]
     image_vectors: Sequence[Sequence[float]]
+    images_by_message: Sequence[Sequence[GroundedImageEmbedding]]
+    message_vectors: Sequence[Sequence[float] | None]
 
 
 class AddService:
@@ -335,15 +342,68 @@ class AddService:
         summary = summary_override or baseline_summary
         modality = "mixed" if (text and images) else ("image" if images else "text")
 
-        text_vector: list[float] = []
-        if summary:
-            text_vector = list(self._embeddings.embed_texts([summary])[0])
-        image_vectors: list[list[float]] = []
+        image_evidence: list[GroundedImageEmbedding] = []
         if images:
-            image_vectors = [
-                list(vector)
-                for vector in self._embeddings.embed_images([image.data for image in images])
-            ]
+            image_bytes = [image.data for image in images]
+            if isinstance(self._embeddings, GroundedMultimodalEmbeddingProvider):
+                image_evidence = self._embeddings.ground_images(image_bytes)
+            else:
+                image_vectors = self._embeddings.embed_images(image_bytes)
+                if len(image_vectors) != len(images):
+                    raise ValueError("图片向量数量与来源图片数量不一致")
+                image_evidence = [
+                    GroundedImageEmbedding(
+                        canonical_text=(
+                            f"description: image {image.media_type} {image.width}x{image.height}"
+                        ),
+                        vector=list(vector),
+                    )
+                    for image, vector in zip(images, image_vectors, strict=True)
+                ]
+            if len(image_evidence) != len(images):
+                raise ValueError("图片证据数量与来源图片数量不一致")
+
+        images_by_message: list[list[GroundedImageEmbedding]] = []
+        source_messages: list[SourceMessageDraft] = []
+        image_offset = 0
+        for position, message in enumerate(request.messages):
+            content = message.content
+            image_count = 0 if isinstance(content, str) else sum(
+                part.type == "image_url" for part in content
+            )
+            images_by_message.append(image_evidence[image_offset : image_offset + image_count])
+            image_offset += image_count
+            source_messages.append(
+                SourceMessageDraft(
+                    role=message.role,
+                    content=(
+                        content
+                        if isinstance(content, str)
+                        else [part.model_dump() for part in content]
+                    ),
+                    position=position,
+                    timestamp=message.timestamp,
+                )
+            )
+        if image_offset != len(image_evidence):
+            raise ValueError("图片证据数量与消息图片数量不一致")
+
+        message_summaries = [
+            describe_message(message, evidence)[0]
+            for message, evidence in zip(source_messages, images_by_message, strict=True)
+        ]
+        vector_inputs = ([summary] if summary else []) + [
+            message_summary for message_summary in message_summaries if message_summary
+        ]
+        vectors = self._embeddings.embed_texts(vector_inputs) if vector_inputs else []
+        if len(vectors) != len(vector_inputs):
+            raise ValueError("文本向量数量与记忆摘要数量不一致")
+        vector_iter = iter(vectors)
+        text_vector = list(next(vector_iter)) if summary else []
+        message_vectors = [
+            list(next(vector_iter)) if message_summary else None
+            for message_summary in message_summaries
+        ]
 
         return _Prepared(
             images=images,
@@ -351,7 +411,9 @@ class AddService:
             summary=summary,
             modality=modality,
             text_vector=text_vector,
-            image_vectors=image_vectors,
+            image_vectors=[item.vector for item in image_evidence],
+            images_by_message=images_by_message,
+            message_vectors=message_vectors,
         )
 
     def _embedding_draft(self, modality: str, vector: Sequence[float]) -> EmbeddingDraft:
@@ -431,7 +493,16 @@ class AddService:
             session_id=request.session_id,
             request_id=request.request_id,
             messages=messages,
-            memories=[memory],
+            memories=[
+                memory,
+                *build_message_memories(
+                    messages,
+                    prepared.images_by_message,
+                    prepared.message_vectors,
+                    model_name=self._embeddings.model_name,
+                    model_version=self._embeddings.model_version,
+                ),
+            ],
             assets=asset_refs,
             actions=plan.actions if plan is not None else None,
             degraded=plan.degraded if plan is not None else False,

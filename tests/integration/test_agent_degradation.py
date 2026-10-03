@@ -122,7 +122,7 @@ def test_provider_transport_failure_degrades_to_searchable_baseline(
     assert response.success is True
     assert len(calls) == MAX_ATTEMPTS
     assert MemoryRepository(database).get_ledger_status(user_id, response.request_id) == "COMMITTED"
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
     assert _search(database, settings, embeddings, user_id).data
 
 
@@ -141,7 +141,7 @@ def test_non_json_output_degrades_to_searchable_baseline(
 
     assert response.success is True
     assert len(calls) == MAX_ATTEMPTS
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
     assert _search(database, settings, embeddings, user_id).data
 
 
@@ -160,7 +160,7 @@ def test_schema_violation_degrades_to_searchable_baseline(
 
     assert response.success is True
     assert len(calls) == MAX_ATTEMPTS
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
     assert _search(database, settings, embeddings, user_id).data
 
 
@@ -209,7 +209,7 @@ def test_invalid_action_degrades_and_writes_nothing_unsafe(
     )
 
     assert response.success is True
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
     assert _search(database, settings, embeddings, user_id).data
 
 
@@ -244,7 +244,7 @@ def test_baseline_mode_without_pipeline_still_works(
     response = service.add(_request(_uid("r"), user_id, "baseline only memory"))
 
     assert response.success is True
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
     results = SearchService(
         BaselineRetriever(MemoryRepository(database), embeddings, DEFAULT_CHANNEL_WEIGHTS),
         max_image_bytes=settings.max_image_bytes,
@@ -276,7 +276,7 @@ def test_valid_response_is_not_degraded(
     assert len(calls) == 1
     with database.session() as session:
         memory = session.execute(
-            select(Memory).where(Memory.user_id == user_id)
+            select(Memory).where(Memory.user_id == user_id, Memory.granularity == "context")
         ).scalar_one()
     assert memory.keywords == ["cat"]
     assert json.dumps(memory.keywords)

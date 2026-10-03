@@ -433,7 +433,7 @@ def test_active_owner_lock_prevents_takeover_and_retry_replays(
 
     repo = MemoryRepository(database)
     assert repo.get_ledger_status(user_id, request_id) == "COMMITTED"
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
     assert _count(database, SourceMessage, user_id) == 1
 
     uris = _asset_uris(database, user_id)
@@ -537,7 +537,7 @@ def test_committed_then_crash_retry_replays(
     first = AddService(MemoryRepository(database), asset_store, settings).add(request)
     retry = AddService(MemoryRepository(database), asset_store, settings).add(request)
     assert first == retry
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
 
 
 def test_committed_retry_publishes_owner_staging(
@@ -622,7 +622,7 @@ def test_stale_processing_without_data_reprocesses(
     response = service.add(_request(request_id, user_id))
     assert response.success is True
     assert repo.get_ledger_status(user_id, request_id) == "COMMITTED"
-    assert _count(database, Memory, user_id) == 1
+    assert _count(database, Memory, user_id) == 2
 
 
 def test_stale_processing_with_data_recovers_committed(
