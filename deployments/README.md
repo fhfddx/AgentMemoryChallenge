@@ -47,12 +47,30 @@ Add 在向量生成失败时发生在 claim 前，不留下 PROCESSING 账本或
 设置 `MASM_DOMAIN` 指向已解析的域名，然后执行：
 
 ```bash
+docker network create masm-edge  # 若网络尚不存在，仅执行一次
 docker compose --profile https up -d --build
 ```
 
 Caddy 自动申请和续期证书。内网或 localhost 部署使用 Caddy 本地证书时，客户端需要信任其根证书。
 API 的宿主机端口只绑定到 `127.0.0.1`；Caddy 通过 Compose 内部网络访问 `api:8000`，
 因此公网只需开放 80/443，不要在云安全组中开放 `MASM_HTTP_PORT`。
+
+## v1.1 并行部署包（尚未上线）
+
+`deployments/docker-compose.v11.yml` 使用独立的 `masm-v11-postgres-data` 与
+`masm-v11-asset-data` 卷、默认正式模型档位以及仅绑定回环地址的 8002 调试端口；
+不包含第二个 Caddy，也不与 v1.0 共用数据库或资产。旧 Compose 的 Caddy 加入
+外部 `masm-edge` 网络，原站点仍指向旧 `api:8000`，第二站点才指向别名
+`masm-v11-api:8000`。`masm-edge` 必须在启用 HTTPS 或启动 v1.1 前创建。
+
+本机假模型验证可临时设置 `MASM_V11_RUNTIME_PROFILE=local-fake`；正式发布必须设置
+`official-masm`，并提供必填的独立 `MASM_V11_POSTGRES_PASSWORD` /
+`MASM_V11_API_KEYS` 与合规模型配置。数据库口令会被嵌入 SQLAlchemy URL，
+应使用 URL 安全的随机字符（如字母、数字、`-`、`_`），不要直接放入 `@`、`:`、`/`
+等 URL 分隔符。公开域名、备份、
+上线顺序、容量门槛及回滚步骤详见
+`docs/competition/masm-v11-release-checklist.md`。本分支不会自动更改线上容器，
+也不会自动在官网新增版本。
 
 ## 健康检查
 

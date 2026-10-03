@@ -87,6 +87,8 @@ class Settings:
             raise ValueError("正式档位 LLM 必须为 gpt-4o-mini")
         if self.embedding_model != "text-embedding-v4":
             raise ValueError("正式档位 Embedding 必须为 text-embedding-v4")
+        if self.embedding_dimensions != 1024:
+            raise ValueError("正式档位 Embedding 维度必须为 1024")
         for name, value in (
             ("LLM", self.llm_base_url),
             ("Embedding", self.embedding_base_url),

@@ -98,7 +98,7 @@ def test_from_env_reads_runtime_provider_configuration(monkeypatch: pytest.Monke
         "MASM_EMBEDDING_BASE_URL": "https://embedding.example/v1",
         "MASM_EMBEDDING_API_KEY": "embedding-secret",
         "MASM_EMBEDDING_MODEL": "text-embedding-v4",
-        "MASM_EMBEDDING_DIMENSIONS": "768",
+        "MASM_EMBEDDING_DIMENSIONS": "1024",
         "MASM_MODEL_TIMEOUT_SECONDS": "45.5",
         "MASM_MODEL_MAX_ATTEMPTS": "1",
     }
@@ -110,6 +110,6 @@ def test_from_env_reads_runtime_provider_configuration(monkeypatch: pytest.Monke
 
     assert settings.runtime_profile is RuntimeProfile.OFFICIAL_MASM
     assert settings.is_official is True
-    assert settings.embedding_dimensions == 768
+    assert settings.embedding_dimensions == 1024
     assert settings.model_timeout_seconds == 45.5
     assert settings.model_max_attempts == 1

@@ -1,8 +1,11 @@
 """正式 MASM 档位通过公共 HTTP 接口的装配集成测试。"""
 
 import json
+from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from masm.api.app import create_app
@@ -11,6 +14,8 @@ from masm.providers.fakes import DeterministicFakeEmbeddingProvider, FakeStructu
 from masm.schemas.agents import ActionKind, CuratorAction, CuratorDecision
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
+
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 class OfficialTestEmbeddings(DeterministicFakeEmbeddingProvider):
@@ -151,3 +156,32 @@ def test_app_state_exposes_only_nonsensitive_runtime_metadata(
     }
     assert "llm-secret" not in rendered
     assert "embedding-secret" not in rendered
+
+
+def test_official_profile_requires_competition_embedding_shape(database_url: str) -> None:
+    settings = _settings(database_url)
+    settings.validate_runtime()
+    with pytest.raises(ValueError, match="1024"):
+        replace(settings, embedding_dimensions=768).validate_runtime()
+    with pytest.raises(ValueError, match="text-embedding-v4"):
+        replace(settings, embedding_model="other-model").validate_runtime()
+
+
+def test_v11_package_keeps_models_and_storage_separate() -> None:
+    compose = (_ROOT / "deployments" / "docker-compose.v11.yml").read_text(encoding="utf-8")
+    caddy = (_ROOT / "deployments" / "Caddyfile").read_text(encoding="utf-8")
+    assert "MASM_RUNTIME_PROFILE: ${MASM_V11_RUNTIME_PROFILE:-official-masm}" in compose
+    assert "MASM_LLM_MODEL: gpt-4o-mini" in compose
+    assert "MASM_EMBEDDING_MODEL: text-embedding-v4" in compose
+    assert "MASM_EMBEDDING_DIMENSIONS: 1024" in compose
+    assert "masm-edge" in compose
+    assert "masm-v11-api" in compose
+    assert "v11-local-test-key" not in compose
+    assert "masm-v11-local-only" not in compose
+    assert "masm-v11-api:8000" in caddy
+    assert "reverse_proxy api:8000" in caddy
+
+
+def test_docker_context_excludes_local_evaluation_artifacts() -> None:
+    ignored = (_ROOT / ".dockerignore").read_text(encoding="utf-8")
+    assert ".superpowers" in ignored
