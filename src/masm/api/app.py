@@ -1,8 +1,11 @@
 """FastAPI 应用工厂。"""
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from time import perf_counter
+from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from starlette.responses import Response
 
 from masm.api.health import probe_dependencies
 from masm.api.limits import RequestLimiter
@@ -10,6 +13,7 @@ from masm.api.routes import router
 from masm.config import Settings
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.llm import StructuredLLM
+from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
 from masm.retrieval.response_packer import ResponsePacker
 from masm.runtime import build_runtime
 from masm.services.add_service import AddService
@@ -69,7 +73,37 @@ def create_app(
         packer=packer
         if packer is not None
         else ResponsePacker(max_bytes=settings.max_search_response_bytes),
+        runtime_profile=settings.runtime_profile.value,
     )
+
+    @application.middleware("http")
+    async def log_search_failures(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        """只为 Search 失败记录状态/耗时；成功由服务层记录聚合计数。"""
+        if request.url.path != "/search":
+            return await call_next(request)
+        started = perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            if status_code >= 400:
+                emit_search_diagnostics(
+                    SearchDiagnostics(
+                        request_tag=uuid4().hex,
+                        runtime_profile=settings.runtime_profile.value,
+                        candidate_count=0,
+                        dedup_count=0,
+                        returned_count=0,
+                        response_bytes=0,
+                        latency_ms=(perf_counter() - started) * 1000.0,
+                        status_code=status_code,
+                        channel_counts={},
+                    )
+                )
 
     application.include_router(router)
     return application

@@ -11,7 +11,8 @@ from masm.storage.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # 迁移在 API 启动前执行：保留应用已创建的聚合诊断日志器。
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

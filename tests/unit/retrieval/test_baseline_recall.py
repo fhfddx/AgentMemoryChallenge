@@ -289,3 +289,19 @@ def test_channels_preserve_provenance() -> None:
         "image": expected[IMAGE_VECTOR_CHANNEL],
         "metadata": expected[METADATA_CHANNEL],
     }
+
+
+def test_retrieve_with_stats_counts_each_channel() -> None:
+    retriever = BaselineRetriever(
+        _FixedRepository(), DeterministicFakeEmbeddingProvider(), _WEIGHTS
+    )
+
+    candidates, counts = retriever.retrieve_with_stats("user-1", _mixed_query(), 10)
+
+    assert len(candidates) == 4
+    assert counts == {
+        LEXICAL_CHANNEL: 1,
+        TEXT_VECTOR_CHANNEL: 1,
+        IMAGE_VECTOR_CHANNEL: 1,
+        METADATA_CHANNEL: 1,
+    }

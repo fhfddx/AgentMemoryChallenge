@@ -1,5 +1,6 @@
 """数据库迁移集成测试。"""
 
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -94,6 +95,19 @@ def test_all_required_tables_exist(database: Database) -> None:
     existing = set(inspect(database.engine).get_table_names())
     missing = REQUIRED_TABLES - existing
     assert not missing, f"缺少数据表: {sorted(missing)}"
+
+
+def test_migration_preserves_search_diagnostic_logger(database_url: str) -> None:
+    """启动期 Alembic 日志配置不得禁用已创建的 Search 聚合日志器。"""
+    logger = logging.getLogger("masm.search")
+    previous = logger.disabled
+    logger.disabled = False
+    try:
+        with patch.dict(os.environ, {"DATABASE_URL": require_masm_test_database(database_url)}):
+            command.upgrade(_alembic_config(database_url), "head")
+        assert logger.disabled is False
+    finally:
+        logger.disabled = previous
 
 
 def test_0004_backfills_legacy_context(database_url: str) -> None:

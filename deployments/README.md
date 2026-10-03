@@ -75,3 +75,23 @@ API 的宿主机端口只绑定到 `127.0.0.1`；Caddy 通过 Compose 内部网�
 - API、PostgreSQL 和 Caddy 使用 Docker `json-file` 日志轮转：单文件最多 10 MiB，最多保留
   5 个文件，避免长期评测日志占满系统盘。
 - 正式部署先运行小型真实模型 Smoke，再运行公开基准；不得用 Mock 测试冒充真实模型证据。
+
+## v1.1 本机合成对照
+
+`scripts/evaluate_synthetic_recall.py` 只在两个已启动的 Add/Search 服务上工作，默认限制
+URL 为本机地址；要访问远程服务必须显式传入 `--allow-remote`。先设置
+`MASM_V10_API_KEY` 和 `MASM_V11_API_KEY` 环境变量，再传入各自 URL、聚合报告路径与
+删除清单路径。例如：
+
+```powershell
+python scripts/evaluate_synthetic_recall.py `
+  --v10-url http://127.0.0.1:18010 --v11-url http://127.0.0.1:18011 `
+  --output comparison.json --cleanup-output cleanup.tsv
+```
+
+脚本覆盖直接召回、多事实、跨 session、图文、纯图片、无证据和 Top 100；报告只有计数、
+Recall@10/100、原子证据覆盖率、响应大小及 Add/Search 平均与 P95 时延。请求正文、
+图片和密钥不写入报告或控制台。`cleanup.tsv` 含合成用户/运行 ID，须当作私有文件保存，
+并使用 `scripts/delete_evaluation_run.py` 按行清理相应环境的数据库和资产卷。
+本次本机假模型结果及局限见 `docs/competition/masm-v11-local-synthetic-report.md`；
+它不是正式模型评测，更不是上线依据。

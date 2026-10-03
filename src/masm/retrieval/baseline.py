@@ -89,9 +89,19 @@ class BaselineRetriever:
 
     def retrieve(self, user_id: str, query: ParsedQuery, limit: int) -> list[MemoryCandidate]:
         """按查询召回并融合，返回不超过 ``limit`` 条候选。"""
+        candidates, _counts = self.retrieve_with_stats(user_id, query, limit)
+        return candidates
+
+    def retrieve_with_stats(
+        self, user_id: str, query: ParsedQuery, limit: int
+    ) -> tuple[list[MemoryCandidate], Mapping[str, int]]:
+        """返回融合候选及固定通道的召回数量，供脱敏诊断使用。"""
         if limit < 1:
-            return []
+            return [], {}
         channels, catalogue = self._recall(user_id, query, limit)
+        counts: dict[str, int] = {}
+        for channel in channels:
+            counts[channel.name] = counts.get(channel.name, 0) + len(channel.candidates)
         results: list[MemoryCandidate] = []
         for item in reciprocal_rank_fusion(channels, self._weights):
             if len(results) >= limit:
@@ -114,7 +124,7 @@ class BaselineRetriever:
                     source_position=source.source_position,
                 )
             )
-        return results
+        return results, counts
 
     def _recall(
         self, user_id: str, query: ParsedQuery, limit: int

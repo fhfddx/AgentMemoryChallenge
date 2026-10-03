@@ -5,8 +5,11 @@ Schema 始终不变，且绝不生成最终答案。
 """
 
 from collections.abc import Sequence
+from time import perf_counter
+from uuid import uuid4
 
 from masm.retrieval.baseline import BaselineRetriever, ParsedQuery
+from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.reranker import EvidenceReranker, RankedEvidence
@@ -28,6 +31,7 @@ class SearchService:
         expander: RelationExpander | None = None,
         reranker: EvidenceReranker | None = None,
         packer: ResponsePacker | None = None,
+        runtime_profile: str = "unknown",
     ) -> None:
         self._retriever = retriever
         self._max_image_bytes = max_image_bytes
@@ -35,9 +39,11 @@ class SearchService:
         self._expander = expander
         self._reranker = reranker
         self._packer = packer
+        self._runtime_profile = runtime_profile
 
     def search(self, request: SearchRequest) -> SearchResponse:
         """执行查询分析、混合召回、关系扩展与证据重排。"""
+        started = perf_counter()
         parsed = self._analyze(request)
         top_k = request.top_k
         pool_limit = (
@@ -45,20 +51,25 @@ class SearchService:
             if self._expander is not None or self._reranker is not None
             else top_k
         )
-        candidates = [
-            item for item in self._retriever.retrieve(request.user_id, parsed, pool_limit)
-            if item.user_id == request.user_id
-        ]
+        retrieve_with_stats = getattr(self._retriever, "retrieve_with_stats", None)
+        if callable(retrieve_with_stats):
+            recalled, channel_counts = retrieve_with_stats(request.user_id, parsed, pool_limit)
+        else:
+            recalled = self._retriever.retrieve(request.user_id, parsed, pool_limit)
+            channel_counts = {}
+        candidates = [item for item in recalled if item.user_id == request.user_id]
         if self._expander is not None:
             candidates = self._with_expansion(request.user_id, candidates, top_k)
+        candidate_count = len(candidates)
         if self._expander is not None or self._reranker is not None:
             candidates = self._deduplicate(candidates)
+        dedup_count = len(candidates)
         ranked = self._rank(parsed, candidates)
         # 重排顺序不因打包改变；打包只做严格前缀裁剪。
         packed = (
             self._packer.pack(ranked, top_k) if self._packer is not None else ranked[:top_k]
         )
-        return SearchResponse(
+        response = SearchResponse(
             data=[
                 MemoryEvidence(
                     id=str(evidence.memory_id),
@@ -68,6 +79,20 @@ class SearchService:
                 for evidence in packed
             ]
         )
+        emit_search_diagnostics(
+            SearchDiagnostics(
+                request_tag=uuid4().hex,
+                runtime_profile=self._runtime_profile,
+                candidate_count=candidate_count,
+                dedup_count=dedup_count,
+                returned_count=len(response.data),
+                response_bytes=len(response.model_dump_json().encode("utf-8")),
+                latency_ms=(perf_counter() - started) * 1000.0,
+                status_code=200,
+                channel_counts=channel_counts,
+            )
+        )
+        return response
 
     def analyze(self, request: SearchRequest) -> ParsedQuery:
         """规则化查询分析：纯文本查询或保持顺序的多模态查询。"""
