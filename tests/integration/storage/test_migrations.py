@@ -77,7 +77,7 @@ def test_migration_upgrade_downgrade_cycle(
 
     with engine.connect() as conn:
         version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0004"
+    assert version == "0005"
 
     # 0002 引入的冲突组唯一约束必须存在。
     constraint_names = {
@@ -168,6 +168,40 @@ def test_0004_backfills_legacy_context(database_url: str) -> None:
             {"r": request_id},
         ).scalar_one()
         assert count == 2
+
+
+def test_message_memory_requires_non_null_source_position(
+    database: Database, database_url: str
+) -> None:
+    """数据库本身必须拒绝没有来源位置的消息记忆。"""
+    validated = require_masm_test_database(database_url)
+    with patch.dict(os.environ, {"DATABASE_URL": validated}):
+        command.upgrade(_alembic_config(validated), "head")
+    user_id = f"position-{uuid4().hex}"
+    with database.engine.begin() as conn:
+        conn.execute(sa.text("INSERT INTO users (user_id) VALUES (:u)"), {"u": user_id})
+        conn.execute(
+            sa.text("INSERT INTO sessions (user_id, session_id) VALUES (:u, 's')"),
+            {"u": user_id},
+        )
+
+    try:
+        with pytest.raises(sa.exc.IntegrityError):
+            with database.engine.begin() as conn:
+                conn.execute(
+                    sa.text(
+                        "INSERT INTO memories "
+                        "(id, user_id, session_id, request_id, granularity, source_position, "
+                        "summary, original_text, keywords, modality, status) "
+                        "SELECT CAST(:id AS uuid), CAST(:u AS varchar), id, 'run', 'message', "
+                        "NULL, 'evidence', 'evidence', '[]'::jsonb, 'text', 'active' "
+                        "FROM sessions WHERE user_id = CAST(:u AS varchar)"
+                    ),
+                    {"id": str(uuid4()), "u": user_id},
+                )
+    finally:
+        with database.engine.begin() as conn:
+            conn.execute(sa.text("DELETE FROM users WHERE user_id = :u"), {"u": user_id})
 
 
 def test_pgvector_extension_and_vector_column(database: Database) -> None:

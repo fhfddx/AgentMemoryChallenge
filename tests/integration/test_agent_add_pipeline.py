@@ -244,6 +244,39 @@ def test_governance_actions_apply_only_to_context(
     assert all(row.granularity == "message" and row.supersedes is None for row in rows[1:])
 
 
+def test_governance_history_uses_only_context_anchors(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("u")
+    baseline = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    baseline.add(_request(_uid("r"), user_id, "Kyoto garden memory"))
+    pipeline, _llms = _build_pipeline(database, embeddings)
+
+    history = pipeline._recall(_request(_uid("r"), user_id, "Kyoto garden memory"))
+
+    assert history
+    assert all(candidate.granularity == "context" for candidate in history)
+
+
+def test_governance_history_fills_distinct_contexts_after_message_collapse(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("u")
+    first_run, second_run = _uid("r"), _uid("r")
+    baseline = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    baseline.add(AddRequest(
+        request_id=first_run, user_id=user_id, session_id="session-1",
+        messages=[{"role": "user", "content": f"needle {index}"} for index in range(8)],
+    ))
+    baseline.add(_request(second_run, user_id, "needle other session"))
+    pipeline, _llms = _build_pipeline(database, embeddings)
+
+    history = pipeline._recall(_request(_uid("r"), user_id, "needle"))
+
+    assert {item.request_id for item in history} == {first_run, second_run}
+    assert all(item.granularity == "context" for item in history)
+
+
 def _lookup_request_id(database: Database, user_id: str) -> str:
     with database.session() as session:
         return str(

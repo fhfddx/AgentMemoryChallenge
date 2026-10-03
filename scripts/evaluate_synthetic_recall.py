@@ -14,6 +14,7 @@ import math
 import os
 import statistics
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ def build_cases(run_tag: str) -> list[EvaluationCase]:
     image_part = {"type": "image_url", "image_url": {"url": _image_url()}}
     direct = f"{prefix}-direct"
     fact_a, fact_b = f"{prefix}-fact-a", f"{prefix}-fact-b"
+    single_a, single_b = f"{prefix}-single-a", f"{prefix}-single-b"
     session_a, session_b = f"{prefix}-session-a", f"{prefix}-session-b"
     text_image = f"{prefix}-text-image"
     top_markers = tuple(f"{prefix}-item-{index:03}" for index in range(100))
@@ -61,6 +63,11 @@ def build_cases(run_tag: str) -> list[EvaluationCase]:
                 {"role": "user", "content": f"First fact: {fact_a}."},
                 {"role": "assistant", "content": f"Second fact: {fact_b}."},
             ),), f"{fact_a} {fact_b}", (fact_a, fact_b),
+        ),
+        EvaluationCase(
+            "single_message_multi_fact",
+            (({"role": "user", "content": f"First fact: {single_a}. Second fact: {single_b}."},),),
+            f"{single_a} {single_b}", (single_a, single_b),
         ),
         EvaluationCase(
             "cross_session", (
@@ -215,6 +222,7 @@ def run_version(
     version: str,
     run_tag: str,
     timeout: float,
+    register_cleanup: Callable[[tuple[str, str, str]], None] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
     """只通过公开 HTTP 接口评估；异常不包含正文或密钥。"""
     scores: dict[str, list[dict[str, Any]]] = {}
@@ -231,7 +239,10 @@ def run_version(
             user_id = f"synthetic-{run_tag}-{version}-{case.category}"
             for index, messages in enumerate(case.additions):
                 request_id = f"synthetic-{run_tag}-{version}-{case.category}-{index}"
-                cleanup.append((version, user_id, request_id))
+                cleanup_row = (version, user_id, request_id)
+                if register_cleanup is not None:
+                    register_cleanup(cleanup_row)
+                cleanup.append(cleanup_row)
                 body, latency, _bytes = _post(client, "/add", {
                     "request_id": request_id,
                     "user_id": user_id,
@@ -280,14 +291,23 @@ def main() -> int:
     run_tag = uuid4().hex[:12]
     cases = build_cases(run_tag)
     reports: dict[str, dict[str, Any]] = {}
-    cleanup: list[tuple[str, str, str]] = []
-    for version, url in (("v1.0", args.v10_url), ("v1.1", args.v11_url)):
-        report, rows = run_version(
-            url, keys[version], cases, version=version, run_tag=run_tag,
-            timeout=args.timeout,
-        )
-        reports[version] = report
-        cleanup.extend(rows)
+    if args.output.resolve() == args.cleanup_output.resolve():
+        raise ValueError("结果文件与清理清单不能是同一路径")
+    args.cleanup_output.parent.mkdir(parents=True, exist_ok=True)
+    with args.cleanup_output.open("x", encoding="utf-8") as manifest:
+        args.cleanup_output.chmod(0o600)
+
+        def register_cleanup(row: tuple[str, str, str]) -> None:
+            manifest.write("\t".join(row) + "\n")
+            manifest.flush()
+            os.fsync(manifest.fileno())
+
+        for version, url in (("v1.0", args.v10_url), ("v1.1", args.v11_url)):
+            report, _rows = run_version(
+                url, keys[version], cases, version=version, run_tag=run_tag,
+                timeout=args.timeout, register_cleanup=register_cleanup,
+            )
+            reports[version] = report
     del keys
     deltas = {
         category: round(
@@ -299,11 +319,6 @@ def main() -> int:
     output = {"versions": reports, "recall_at_10_delta": deltas, "case_count": len(cases)}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-    args.cleanup_output.parent.mkdir(parents=True, exist_ok=True)
-    args.cleanup_output.write_text(
-        "".join("\t".join(row) + "\n" for row in cleanup), encoding="utf-8"
-    )
-    args.cleanup_output.chmod(0o600)
     print(json.dumps({"status": "ok", "case_count": len(cases)}, sort_keys=True))
     return 0
 

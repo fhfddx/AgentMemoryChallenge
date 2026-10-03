@@ -421,6 +421,37 @@ def test_top_100_with_parent_child_pool() -> None:
     assert len(response.model_dump_json().encode("utf-8")) <= 30 * 1024 * 1024
 
 
+def test_baseline_top_100_preserves_all_message_positions() -> None:
+    """即便没有官方重排器，同源长上下文也不应占用最后一个消息席位。"""
+    class _Retriever:
+        requested_limit = 0
+
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            self.requested_limit = limit
+            return [
+                MemoryCandidate(
+                    memory_id=UUID(int=0), user_id=user_id, content="needle parent",
+                    score=0.5, request_id="run-1",
+                ),
+                *[
+                    MemoryCandidate(
+                        memory_id=UUID(int=index + 1), user_id=user_id,
+                        content=f"needle fact {index}", score=0.5,
+                        granularity="message", request_id="run-1", source_position=index,
+                    )
+                    for index in range(100)
+                ],
+            ][:limit]
+
+    retriever = _Retriever()
+    response = SearchService(retriever, max_image_bytes=1024).search(
+        SearchRequest(query="needle", user_id="test-user", top_k=100)
+    )
+
+    assert retriever.requested_limit > 100
+    assert {row.id for row in response.data} == {str(UUID(int=index + 1)) for index in range(100)}
+
+
 def test_same_source_content_is_not_returned_twice() -> None:
     class _Retriever:
         def retrieve(self, user_id: str, query: ParsedQuery, limit: int):

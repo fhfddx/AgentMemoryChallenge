@@ -37,7 +37,9 @@ def validate_actions(
     """把智能体决策转换为可执行动作，任何违规都被拒绝。"""
     # 候选是同一用户范围内的召回结果；不在其中即跨用户或不存在。
     by_id = {
-        candidate.memory_id: candidate for candidate in candidates if candidate.user_id == user_id
+        candidate.memory_id: candidate
+        for candidate in candidates
+        if candidate.user_id == user_id and candidate.granularity == "context"
     }
     allowed_ids = set(by_id)
 

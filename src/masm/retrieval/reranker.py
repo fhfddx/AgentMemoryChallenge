@@ -152,7 +152,10 @@ class EvidenceReranker:
 
         rest = sorted(
             (item for key, item in by_id.items() if key not in selected_ids),
-            key=lambda item: (-item.score, str(item.memory_id)),
+            key=lambda item: (
+                -(item.score + (_MESSAGE_BONUS if item.granularity == "message" else 0.0)),
+                str(item.memory_id),
+            ),
         )
         for candidate in rest:
             if len(selected) >= self._max_candidates:

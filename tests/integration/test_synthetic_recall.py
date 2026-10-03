@@ -3,9 +3,11 @@
 import json
 import logging
 
+import pytest
 from scripts.evaluate_synthetic_recall import (
     aggregate_results,
     build_cases,
+    run_version,
     score_search_case,
 )
 
@@ -14,14 +16,22 @@ def test_synthetic_recall_by_category() -> None:
     cases = build_cases("fixed-run")
     categories = {case.category for case in cases}
     assert categories >= {
-        "direct_recall", "multi_fact", "cross_session", "text_image",
+        "direct_recall", "multi_fact", "single_message_multi_fact", "cross_session", "text_image",
         "image_only", "abstention", "top100",
     }
 
     by_category = {case.category: case for case in cases}
     direct = by_category["direct_recall"]
     multi = by_category["multi_fact"]
+    single_message = by_category["single_message_multi_fact"]
     empty = by_category["abstention"]
+
+    assert len(single_message.additions) == 1
+    assert len(single_message.additions[0]) == 1
+    assert all(
+        marker in single_message.additions[0][0]["content"]
+        for marker in single_message.expected_markers
+    )
 
     direct_score = score_search_case(direct, [{"content": direct.expected_markers[0]}])
     partial_score = score_search_case(multi, [{"content": multi.expected_markers[0]}])
@@ -50,6 +60,44 @@ def test_synthetic_recall_by_category() -> None:
     assert report["latency_ms"]["add"]["mean"] == 15.0
     assert report["cost"] == "unavailable"
     assert "fixed-run" not in str(report)
+
+
+def test_cleanup_id_is_recorded_before_failing_add(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Health:
+        status_code = 200
+
+        def json(self) -> dict[str, str]:
+            return {"status": "ok"}
+
+    class _FailingClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _path: str) -> _Health:
+            return _Health()
+
+        def post(self, _path: str, *, json: object) -> None:
+            raise RuntimeError("network failure")
+
+    monkeypatch.setattr(
+        "scripts.evaluate_synthetic_recall.httpx.Client", lambda **_kwargs: _FailingClient()
+    )
+    recorded: list[tuple[str, str, str]] = []
+
+    with pytest.raises(RuntimeError, match="network failure"):
+        run_version(
+            "http://127.0.0.1:8000", "test-key", build_cases("fixed-run")[:1],
+            version="v1.1", run_tag="fixed-run", timeout=5,
+            register_cleanup=recorded.append,
+        )
+
+    assert recorded == [
+        ("v1.1", "synthetic-fixed-run-v1.1-direct_recall",
+         "synthetic-fixed-run-v1.1-direct_recall-0")
+    ]
 
 
 def test_search_error_diagnostic_omits_payload(client, caplog) -> None:

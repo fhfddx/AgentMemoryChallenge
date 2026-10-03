@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
+from typing import Literal
 from uuid import UUID
 
 from masm.providers.embeddings import EmbeddingProvider
@@ -87,18 +88,24 @@ class BaselineRetriever:
         """供 Search 使用同一用户范围的来源与关系查询。"""
         return self._repo
 
-    def retrieve(self, user_id: str, query: ParsedQuery, limit: int) -> list[MemoryCandidate]:
+    def retrieve(
+        self, user_id: str, query: ParsedQuery, limit: int,
+        *, granularity: Literal["context", "message"] | None = None,
+    ) -> list[MemoryCandidate]:
         """按查询召回并融合，返回不超过 ``limit`` 条候选。"""
-        candidates, _counts = self.retrieve_with_stats(user_id, query, limit)
+        candidates, _counts = self.retrieve_with_stats(
+            user_id, query, limit, granularity=granularity
+        )
         return candidates
 
     def retrieve_with_stats(
-        self, user_id: str, query: ParsedQuery, limit: int
+        self, user_id: str, query: ParsedQuery, limit: int,
+        *, granularity: Literal["context", "message"] | None = None,
     ) -> tuple[list[MemoryCandidate], Mapping[str, int]]:
         """返回融合候选及固定通道的召回数量，供脱敏诊断使用。"""
         if limit < 1:
             return [], {}
-        channels, catalogue = self._recall(user_id, query, limit)
+        channels, catalogue = self._recall(user_id, query, limit, granularity=granularity)
         counts: dict[str, int] = {}
         for channel in channels:
             counts[channel.name] = counts.get(channel.name, 0) + len(channel.candidates)
@@ -127,9 +134,11 @@ class BaselineRetriever:
         return results, counts
 
     def _recall(
-        self, user_id: str, query: ParsedQuery, limit: int
+        self, user_id: str, query: ParsedQuery, limit: int,
+        *, granularity: Literal["context", "message"] | None = None,
     ) -> tuple[list[RankedChannel], dict[UUID, MemoryCandidate]]:
         recall_limit = self._channel_limit or limit
+        granularity_kwargs = {} if granularity is None else {"granularity": granularity}
         tasks: list[tuple[str, Callable[[], Sequence[MemoryCandidate]]]] = []
 
         # 查询向量先生成完毕，随后各通道并行执行；每个通道各自持有数据库 Session。
@@ -138,7 +147,10 @@ class BaselineRetriever:
             tasks.append(
                 (
                     LEXICAL_CHANNEL,
-                    partial(self._repo.lexical_candidates, user_id, text, recall_limit),
+                    partial(
+                        self._repo.lexical_candidates, user_id, text, recall_limit,
+                        **granularity_kwargs,
+                    ),
                 )
             )
             text_vector = list(self._embeddings.embed_texts([text])[0])
@@ -153,6 +165,7 @@ class BaselineRetriever:
                         model_name=self._embeddings.model_name,
                         model_version=self._embeddings.model_version,
                         limit=recall_limit,
+                        **granularity_kwargs,
                     ),
                 )
             )
@@ -168,6 +181,7 @@ class BaselineRetriever:
                             model_name=self._embeddings.model_name,
                             model_version=self._embeddings.model_version,
                             limit=recall_limit,
+                            **granularity_kwargs,
                         ),
                     )
                 )
@@ -186,6 +200,7 @@ class BaselineRetriever:
                             model_name=self._embeddings.model_name,
                             model_version=self._embeddings.model_version,
                             limit=recall_limit,
+                            **granularity_kwargs,
                         ),
                     )
                 )
@@ -202,6 +217,7 @@ class BaselineRetriever:
                         modality=modality,
                         keywords=keywords,
                         limit=recall_limit,
+                        **granularity_kwargs,
                     ),
                 )
             )

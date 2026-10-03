@@ -41,14 +41,12 @@ def test_top_k_limits_the_result() -> None:
     assert len(kept) == 3
 
 
-def test_result_is_a_strict_prefix_of_the_original_ranking() -> None:
-    items = [_evidence(f"memory {index}", index) for index in range(1, 21)]
+def test_kept_items_preserve_relative_rank_after_skipping_oversized_evidence() -> None:
+    items = [_evidence("first", 1), _evidence("x" * 5000, 2), _evidence("third", 3)]
 
     kept = _packer(max_bytes=400).pack(items, top_k=100)
 
-    expected = [item.memory_id for item in items][: len(kept)]
-    assert [item.memory_id for item in kept] == expected
-    assert len(kept) < len(items)
+    assert [item.memory_id for item in kept] == [items[0].memory_id, items[2].memory_id]
 
 
 def test_evidence_is_never_truncated() -> None:
@@ -63,13 +61,13 @@ def test_evidence_is_never_truncated() -> None:
         assert len(item.content) == 200
 
 
-def test_oversized_first_evidence_returns_nothing() -> None:
-    """第一条证据本身就超过限制时，不得返回半条证据。"""
+def test_oversized_first_evidence_does_not_hide_shorter_evidence() -> None:
+    """超长父级证据不能阻止后续短证据返回；内容仍不得截断。"""
     items = [_evidence("x" * 5000, 1), _evidence("small", 2)]
 
     kept = _packer(max_bytes=500).pack(items, top_k=100)
 
-    assert kept == []
+    assert [item.content for item in kept] == ["small"]
 
 
 def test_top_k_100_with_large_content_stays_within_limit() -> None:

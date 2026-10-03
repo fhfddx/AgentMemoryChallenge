@@ -162,6 +162,7 @@ class AddPipeline:
             request.user_id,
             ParsedQuery(text_queries=(text,), intent="fact"),
             self._max_history,
+            granularity="context",
         )
 
 

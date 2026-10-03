@@ -762,7 +762,10 @@ class MemoryRepository:
             ).scalar_one()
         return bool(count)
 
-    def lexical_candidates(self, user_id: str, query: str, limit: int) -> list[MemoryCandidate]:
+    def lexical_candidates(
+        self, user_id: str, query: str, limit: int,
+        *, granularity: Literal["context", "message"] | None = None,
+    ) -> list[MemoryCandidate]:
         """全文检索，SQL 查询阶段即按 user_id 过滤。"""
         with self._database.session() as session:
             ts_vector = func.to_tsvector("simple", Memory.summary)
@@ -771,9 +774,10 @@ class MemoryRepository:
             stmt = (
                 select(Memory, rank.label("rank"))
                 .where(Memory.user_id == user_id, ts_vector.op("@@")(ts_query))
-                .order_by(rank.desc())
-                .limit(limit)
             )
+            if granularity is not None:
+                stmt = stmt.where(Memory.granularity == granularity)
+            stmt = stmt.order_by(rank.desc()).limit(limit)
             rows = session.execute(stmt).all()
         return [
             MemoryCandidate(
@@ -801,6 +805,7 @@ class MemoryRepository:
         model_name: str,
         model_version: str,
         limit: int,
+        granularity: Literal["context", "message"] | None = None,
     ) -> list[MemoryCandidate]:
         """向量检索：调用方必须明确目标向量空间（模态 + 模型 + 维度）。
 
@@ -811,6 +816,16 @@ class MemoryRepository:
         dimensions = len(query_vector)
         with self._database.session() as session:
             distance = MemoryEmbedding.vector.cosine_distance(query_vector).label("distance")
+            filters = [
+                Memory.user_id == user_id,
+                MemoryEmbedding.user_id == user_id,
+                MemoryEmbedding.modality == modality,
+                MemoryEmbedding.model_name == model_name,
+                MemoryEmbedding.model_version == model_version,
+                MemoryEmbedding.dimensions == dimensions,
+            ]
+            if granularity is not None:
+                filters.append(Memory.granularity == granularity)
             scored = (
                 select(
                     Memory.id.label("memory_id"),
@@ -826,14 +841,7 @@ class MemoryRepository:
                     distance,
                 )
                 .join(MemoryEmbedding, MemoryEmbedding.memory_id == Memory.id)
-                .where(
-                    Memory.user_id == user_id,
-                    MemoryEmbedding.user_id == user_id,
-                    MemoryEmbedding.modality == modality,
-                    MemoryEmbedding.model_name == model_name,
-                    MemoryEmbedding.model_version == model_version,
-                    MemoryEmbedding.dimensions == dimensions,
-                )
+                .where(*filters)
                 .subquery()
             )
             best_distance = func.min(scored.c.distance)
@@ -1572,10 +1580,13 @@ class MemoryRepository:
         modality: str | None = None,
         keywords: Sequence[str] = (),
         limit: int,
+        granularity: Literal["context", "message"] | None = None,
     ) -> list[MemoryCandidate]:
         """元数据召回：按模态与关键词过滤，SQL 查询阶段即按 user_id 过滤。"""
         with self._database.session() as session:
             statement = select(Memory).where(Memory.user_id == user_id)
+            if granularity is not None:
+                statement = statement.where(Memory.granularity == granularity)
             if modality is not None:
                 statement = statement.where(Memory.modality == modality)
             if keywords:

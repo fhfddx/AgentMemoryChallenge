@@ -205,6 +205,25 @@ def test_message_precedes_same_run_context() -> None:
     assert [item.memory_id for item in ranked] == [message.memory_id, context.memory_id]
 
 
+def test_top_100_prefers_distinct_message_positions_over_same_run_parent() -> None:
+    context = _candidate(
+        "needle parent", score=0.5, memory_id=UUID(int=0), request_id="run-1"
+    )
+    messages = [
+        _candidate(
+            f"needle fact {index}", score=0.5, memory_id=UUID(int=index + 1),
+            granularity="message", request_id="run-1", source_position=index,
+        )
+        for index in range(100)
+    ]
+
+    ranked = EvidenceReranker().rank(
+        ParsedQuery(text_queries=("needle",)), [context, *messages]
+    )
+
+    assert {item.memory_id for item in ranked} == {item.memory_id for item in messages}
+
+
 def test_top_100_with_provider_input_capped_at_64() -> None:
     class _RecordingProvider(RerankerProvider):
         model_name = "recording"

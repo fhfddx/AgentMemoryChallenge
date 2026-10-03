@@ -46,11 +46,8 @@ class SearchService:
         started = perf_counter()
         parsed = self._analyze(request)
         top_k = request.top_k
-        pool_limit = (
-            min(256, max(top_k, top_k * 3))
-            if self._expander is not None or self._reranker is not None
-            else top_k
-        )
+        # 父子记忆会共同占据召回名额；所有档位都需要先扩大原始候选池。
+        pool_limit = min(256, max(top_k, top_k * 3))
         retrieve_with_stats = getattr(self._retriever, "retrieve_with_stats", None)
         if callable(retrieve_with_stats):
             recalled, channel_counts = retrieve_with_stats(request.user_id, parsed, pool_limit)
@@ -65,7 +62,7 @@ class SearchService:
             candidates = self._deduplicate(candidates)
         dedup_count = len(candidates)
         ranked = self._rank(parsed, candidates)
-        # 重排顺序不因打包改变；打包只做严格前缀裁剪。
+        # 打包保持保留证据的相对顺序，但跳过超大条目以免遮蔽后续短证据。
         packed = (
             self._packer.pack(ranked, top_k) if self._packer is not None else ranked[:top_k]
         )
@@ -196,8 +193,14 @@ class SearchService:
     ) -> list[RankedEvidence]:
         if self._reranker is not None:
             return self._reranker.rank(parsed, candidates)
-        # 基线模式：只按召回分数排序，不做任何生成式处理。
-        ordered = sorted(candidates, key=lambda item: (-item.score, str(item.memory_id)))
+        # 基线模式仍不调用生成式模型；同分消息证据优先于同源长上下文。
+        ordered = sorted(
+            candidates,
+            key=lambda item: (
+                -(item.score + (0.05 if item.granularity == "message" else 0.0)),
+                str(item.memory_id),
+            ),
+        )
         return [
             RankedEvidence(
                 memory_id=candidate.memory_id,

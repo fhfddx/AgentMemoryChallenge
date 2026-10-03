@@ -77,6 +77,16 @@ def test_cross_user_relation_is_rejected() -> None:
         validate_actions(_USER, decision, [other_user_candidate])
 
 
+def test_message_memory_cannot_be_governance_target() -> None:
+    message = _candidate(granularity="message", request_id="run-1", source_position=0)
+    decision = CuratorDecision(
+        actions=(_action(ActionKind.SUPERSEDE, message.memory_id),)
+    )
+
+    with pytest.raises(ActionValidationError):
+        validate_actions(_USER, decision, [message])
+
+
 def test_target_outside_candidates_is_rejected() -> None:
     decision = CuratorDecision(actions=(_action(ActionKind.LINK, uuid4()),))
 
