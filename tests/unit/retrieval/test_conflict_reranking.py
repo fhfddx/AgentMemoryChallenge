@@ -188,3 +188,40 @@ def test_isolation_of_ids_in_ranked_evidence() -> None:
 
     assert isinstance(ranked[0].memory_id, UUID)
     assert ranked[0].user_id == _USER
+
+
+def test_message_precedes_same_run_context() -> None:
+    """同一 Add 的精确消息证据优先于冗长的父上下文。"""
+    context = _candidate("needle " + "irrelevant " * 200, score=0.6, request_id="run-1")
+    message = _candidate(
+        "needle fact", score=0.6, granularity="message",
+        request_id="run-1", source_position=0,
+    )
+
+    ranked = EvidenceReranker().rank(
+        ParsedQuery(text_queries=("needle",)), [context, message]
+    )
+
+    assert [item.memory_id for item in ranked] == [message.memory_id, context.memory_id]
+
+
+def test_top_100_with_provider_input_capped_at_64() -> None:
+    class _RecordingProvider(RerankerProvider):
+        model_name = "recording"
+
+        def __init__(self) -> None:
+            self.input_count = 0
+
+        def score(self, query: str, documents) -> list[float]:
+            self.input_count = len(documents)
+            return [0.0] * len(documents)
+
+    provider = _RecordingProvider()
+    candidates = [_candidate(f"fact {index}", score=1 - index / 1000) for index in range(120)]
+
+    ranked = EvidenceReranker(provider=provider).rank(
+        ParsedQuery(text_queries=("fact",)), candidates
+    )
+
+    assert len(ranked) == 100
+    assert provider.input_count <= 64

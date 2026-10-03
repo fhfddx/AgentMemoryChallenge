@@ -253,3 +253,39 @@ def test_default_embedding_space_keeps_text_and_image_modalities_isolated() -> N
     retriever.retrieve("user-1", ParsedQuery(text_queries=("purple square",)), 5)
 
     assert repository.modalities == ["text"]
+
+
+def test_channels_preserve_provenance() -> None:
+    """四个通道经 RRF 融合后都必须保留原始来源定位。"""
+    repository = _FixedRepository()
+    expected = {
+        LEXICAL_CHANNEL: ("message", "lex-run", 0),
+        TEXT_VECTOR_CHANNEL: ("message", "text-run", 1),
+        IMAGE_VECTOR_CHANNEL: ("message", "image-run", 2),
+        METADATA_CHANNEL: ("context", "meta-run", None),
+    }
+    for channel, candidate in repository._by_channel.items():
+        granularity, request_id, source_position = expected[channel]
+        repository._by_channel[channel] = MemoryCandidate(
+            memory_id=candidate.memory_id,
+            user_id=candidate.user_id,
+            content=candidate.content,
+            score=candidate.score,
+            granularity=granularity,
+            request_id=request_id,
+            source_position=source_position,
+        )
+
+    found = BaselineRetriever(
+        repository, DeterministicFakeEmbeddingProvider(), _WEIGHTS
+    ).retrieve("user-1", _mixed_query(), 10)
+
+    assert {
+        row.content: (row.granularity, row.request_id, row.source_position)
+        for row in found
+    } == {
+        "lexical": expected[LEXICAL_CHANNEL],
+        "text": expected[TEXT_VECTOR_CHANNEL],
+        "image": expected[IMAGE_VECTOR_CHANNEL],
+        "metadata": expected[METADATA_CHANNEL],
+    }

@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import Connection, CursorResult, Engine, delete, func, or_, select, text, update
@@ -48,6 +48,13 @@ def _deleted_rows(session: Session, statement: Any) -> int:
     """执行一条 DELETE 并返回受影响行数。"""
     result = cast(CursorResult[Any], session.execute(statement))
     return int(result.rowcount or 0)
+
+
+def _memory_granularity(value: str) -> Literal["context", "message"]:
+    """把数据库约束所允许的粒度收窄成领域类型。"""
+    if value not in ("context", "message"):
+        raise ValueError("数据库记忆粒度无效")
+    return cast(Literal["context", "message"], value)
 
 
 def _image_object_uris(content: Any) -> list[str]:
@@ -778,6 +785,9 @@ class MemoryRepository:
                 status=row.Memory.status,
                 conflict_group_id=row.Memory.conflict_group_id,
                 duplicate_of=row.Memory.duplicate_of,
+                granularity=_memory_granularity(row.Memory.granularity),
+                request_id=row.Memory.request_id,
+                source_position=row.Memory.source_position,
             )
             for row in rows
         ]
@@ -810,6 +820,9 @@ class MemoryRepository:
                     Memory.status.label("status"),
                     Memory.conflict_group_id.label("conflict_group_id"),
                     Memory.duplicate_of.label("duplicate_of"),
+                    Memory.granularity.label("granularity"),
+                    Memory.request_id.label("request_id"),
+                    Memory.source_position.label("source_position"),
                     distance,
                 )
                 .join(MemoryEmbedding, MemoryEmbedding.memory_id == Memory.id)
@@ -833,6 +846,9 @@ class MemoryRepository:
                     scored.c.status,
                     scored.c.conflict_group_id,
                     scored.c.duplicate_of,
+                    scored.c.granularity,
+                    scored.c.request_id,
+                    scored.c.source_position,
                     best_distance.label("distance"),
                 )
                 .group_by(
@@ -843,6 +859,9 @@ class MemoryRepository:
                     scored.c.status,
                     scored.c.conflict_group_id,
                     scored.c.duplicate_of,
+                    scored.c.granularity,
+                    scored.c.request_id,
+                    scored.c.source_position,
                 )
                 .order_by(best_distance, scored.c.memory_id)
                 .limit(limit)
@@ -858,6 +877,9 @@ class MemoryRepository:
                 status=row.status,
                 conflict_group_id=row.conflict_group_id,
                 duplicate_of=row.duplicate_of,
+                granularity=_memory_granularity(row.granularity),
+                request_id=row.request_id,
+                source_position=row.source_position,
             )
             for row in rows
         ]
@@ -912,6 +934,9 @@ class MemoryRepository:
                 status=memory.status,
                 conflict_group_id=memory.conflict_group_id,
                 duplicate_of=memory.duplicate_of,
+                granularity=_memory_granularity(memory.granularity),
+                request_id=memory.request_id,
+                source_position=memory.source_position,
             )
             for memory in memories
         ]
@@ -1533,6 +1558,9 @@ class MemoryRepository:
                 status=row.status,
                 conflict_group_id=row.conflict_group_id,
                 duplicate_of=row.duplicate_of,
+                granularity=_memory_granularity(row.granularity),
+                request_id=row.request_id,
+                source_position=row.source_position,
             )
             for row in rows
         ]
@@ -1564,9 +1592,57 @@ class MemoryRepository:
                 status=row.status,
                 conflict_group_id=row.conflict_group_id,
                 duplicate_of=row.duplicate_of,
+                granularity=_memory_granularity(row.granularity),
+                request_id=row.request_id,
+                source_position=row.source_position,
             )
             for row in rows
         ]
+
+    def context_candidates_for_requests(
+        self, user_id: str, request_ids: Sequence[str]
+    ) -> list[MemoryCandidate]:
+        """获取同用户运行的上下文锚点，供关系扩展使用。"""
+        ids = list(dict.fromkeys(request_ids))[:256]
+        if not ids:
+            return []
+        with self._database.session() as session:
+            rows = session.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.request_id.in_(ids),
+                    Memory.granularity == "context",
+                ).order_by(Memory.request_id, Memory.id)
+            ).scalars().all()
+        return [self._memory_candidate(row) for row in rows]
+
+    def message_candidates_for_requests(
+        self, user_id: str, request_ids: Sequence[str], limit: int
+    ) -> list[MemoryCandidate]:
+        """有界补入同用户运行的消息证据，保持原始消息顺序。"""
+        ids = list(dict.fromkeys(request_ids))[:256]
+        if not ids or limit < 1:
+            return []
+        with self._database.session() as session:
+            rows = session.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.request_id.in_(ids),
+                    Memory.granularity == "message",
+                ).order_by(Memory.request_id, Memory.source_position, Memory.id)
+                .limit(min(limit, 256))
+            ).scalars().all()
+        return [self._memory_candidate(row) for row in rows]
+
+    @staticmethod
+    def _memory_candidate(row: Memory) -> MemoryCandidate:
+        return MemoryCandidate(
+            memory_id=row.id, user_id=row.user_id, content=row.summary, score=0.0,
+            supersedes=row.supersedes, status=row.status,
+            conflict_group_id=row.conflict_group_id, duplicate_of=row.duplicate_of,
+            granularity=_memory_granularity(row.granularity), request_id=row.request_id,
+            source_position=row.source_position,
+        )
 
     def add_relation(
         self,

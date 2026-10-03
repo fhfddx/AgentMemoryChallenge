@@ -40,9 +40,19 @@ class SearchService:
         """执行查询分析、混合召回、关系扩展与证据重排。"""
         parsed = self._analyze(request)
         top_k = request.top_k
-        candidates = self._retriever.retrieve(request.user_id, parsed, top_k)
+        pool_limit = (
+            min(256, max(top_k, top_k * 3))
+            if self._expander is not None or self._reranker is not None
+            else top_k
+        )
+        candidates = [
+            item for item in self._retriever.retrieve(request.user_id, parsed, pool_limit)
+            if item.user_id == request.user_id
+        ]
         if self._expander is not None:
             candidates = self._with_expansion(request.user_id, candidates, top_k)
+        if self._expander is not None or self._reranker is not None:
+            candidates = self._deduplicate(candidates)
         ranked = self._rank(parsed, candidates)
         # 重排顺序不因打包改变；打包只做严格前缀裁剪。
         packed = (
@@ -88,15 +98,73 @@ class SearchService:
         self, user_id: str, candidates: Sequence[MemoryCandidate], top_k: int
     ) -> list[MemoryCandidate]:
         assert self._expander is not None
-        expanded = self._expander.expand(user_id, list(candidates), top_k)
+        repository = getattr(self._retriever, "repository", None)
+        seeds = list(candidates)[: self._expander.max_seeds]
+        if repository is not None:
+            request_ids = [
+                item.request_id for item in seeds
+                if item.granularity == "message" and item.request_id
+            ]
+            parents = {
+                item.request_id: item
+                for item in repository.context_candidates_for_requests(user_id, request_ids)
+            }
+            # 治理关系只挂在 context 节点：消息命中时用同源父节点作一跳种子。
+            seeds = [parents.get(item.request_id, item) for item in seeds]
+            seeds = list({item.memory_id: item for item in seeds}.values())
+        expanded = self._expander.expand(user_id, seeds, top_k)
         merged: list[MemoryCandidate] = list(candidates)
         known = {candidate.memory_id for candidate in merged}
         for candidate in expanded:
-            if candidate.memory_id in known:
+            if candidate.user_id != user_id or candidate.memory_id in known:
                 continue
             known.add(candidate.memory_id)
             merged.append(candidate)
+        if repository is not None:
+            related_runs = [
+                item.request_id for item in expanded
+                if item.user_id == user_id and item.granularity == "context" and item.request_id
+            ]
+            for candidate in repository.message_candidates_for_requests(
+                user_id, related_runs, min(64, max(8, top_k))
+            ):
+                if candidate.user_id != user_id or candidate.memory_id in known:
+                    continue
+                known.add(candidate.memory_id)
+                merged.append(candidate)
         return merged
+
+    @staticmethod
+    def _deduplicate(candidates: Sequence[MemoryCandidate]) -> list[MemoryCandidate]:
+        """按来源位置去重；同源内容完全相同的父记忆让位于消息证据。"""
+        messages_by_run: dict[tuple[str, str], set[str]] = {}
+        for item in candidates:
+            if item.granularity == "message" and item.request_id:
+                messages_by_run.setdefault((item.user_id, item.request_id), set()).add(
+                    " ".join(item.content.casefold().split())
+                )
+        result: list[MemoryCandidate] = []
+        seen_ids = set()
+        seen_sources: set[tuple[str, str, str, int | None]] = set()
+        for item in candidates:
+            if item.memory_id in seen_ids:
+                continue
+            seen_ids.add(item.memory_id)
+            if item.request_id:
+                source = (item.user_id, item.request_id, item.granularity, item.source_position)
+                if source in seen_sources:
+                    continue
+                seen_sources.add(source)
+            if (
+                item.granularity == "context"
+                and item.conflict_group_id is None
+                and item.request_id
+                and " ".join(item.content.casefold().split())
+                in messages_by_run.get((item.user_id, item.request_id), set())
+            ):
+                continue
+            result.append(item)
+        return result
 
     def _rank(
         self, parsed: ParsedQuery, candidates: Sequence[MemoryCandidate]

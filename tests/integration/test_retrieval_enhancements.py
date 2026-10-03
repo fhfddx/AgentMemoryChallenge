@@ -2,19 +2,22 @@
 
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
-from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever
+from masm.providers.reranker import RerankerProvider
+from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever, ParsedQuery
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.reranker import MAX_RERANK_CANDIDATES, EvidenceReranker
+from masm.retrieval.response_packer import ResponsePacker
 from masm.schemas.api import AddRequest, SearchRequest
 from masm.services.add_service import AddService
 from masm.services.search_service import SearchService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
-from masm.storage.models import Memory, MemoryRelation
+from masm.storage.models import Memory, MemoryEmbedding, MemoryRelation
 from masm.storage.repositories import MemoryRepository
+from masm.storage.types import MemoryCandidate
 
 
 def _uid(prefix: str) -> str:
@@ -192,7 +195,16 @@ def test_one_hop_expansion_enters_the_response(
         SearchRequest(query="anchor memory", user_id=user_id, top_k=10)
     )
 
-    assert str(neighbour_id) in {evidence.id for evidence in response.data}
+    with database.session() as session:
+        neighbour_run = session.get(Memory, neighbour_id).request_id
+        neighbour_message = session.execute(
+            select(Memory.id).where(
+                Memory.user_id == user_id,
+                Memory.request_id == neighbour_run,
+                Memory.granularity == "message",
+            )
+        ).scalar_one()
+    assert str(neighbour_message) in {evidence.id for evidence in response.data}
 
 
 def test_query_analysis_reaches_recall(
@@ -208,7 +220,16 @@ def test_query_analysis_reaches_recall(
         SearchRequest(query="the cat", user_id=user_id, top_k=10)
     )
 
-    assert str(memory_id) in {evidence.id for evidence in response.data}
+    with database.session() as session:
+        request_id = session.get(Memory, memory_id).request_id
+        message_id = session.execute(
+            select(Memory.id).where(
+                Memory.user_id == user_id,
+                Memory.request_id == request_id,
+                Memory.granularity == "message",
+            )
+        ).scalar_one()
+    assert str(message_id) in {evidence.id for evidence in response.data}
 
 
 def test_response_schema_is_unchanged(
@@ -242,3 +263,182 @@ def test_baseline_mode_is_unchanged_without_enhancements(
     response = service.search(SearchRequest(query="baseline", user_id=user_id, top_k=10))
 
     assert str(memory_id) in {evidence.id for evidence in response.data}
+
+
+def test_context_and_user_isolation(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """旧 context 和新 message 均可召回；按运行补候选不能跨用户。"""
+    user_id = _uid("u")
+    other_user = _uid("u")
+    request_id = _uid("same-run")
+    service = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    service.add(_request(request_id, user_id, "needle private fact"))
+    service.add(_request(request_id, other_user, "needle other user"))
+    repo = MemoryRepository(database)
+
+    lexical = repo.lexical_candidates(user_id, "needle", 10)
+    contexts = repo.context_candidates_for_requests(user_id, [request_id])
+    messages = repo.message_candidates_for_requests(user_id, [request_id], 10)
+
+    assert {row.granularity for row in lexical} == {"context", "message"}
+    assert len(contexts) == len(messages) == 1
+    assert all(row.user_id == user_id for row in [*lexical, *contexts, *messages])
+    assert contexts[0].source_position is None
+    assert messages[0].source_position == 0
+    assert all(row.request_id == request_id for row in [*contexts, *messages])
+
+
+def test_legacy_context_without_messages_remains_searchable(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("u")
+    context_id = _seed(database, asset_store, settings, embeddings, user_id, "legacy needle")
+    with database.session() as session:
+        request_id = session.get(Memory, context_id).request_id
+        session.execute(
+            delete(Memory).where(
+                Memory.user_id == user_id,
+                Memory.request_id == request_id,
+                Memory.granularity == "message",
+            )
+        )
+        session.commit()
+
+    response = _enhanced(database, settings, embeddings).search(
+        SearchRequest(query="legacy needle", user_id=user_id, top_k=10)
+    )
+
+    assert str(context_id) in {item.id for item in response.data}
+
+
+def test_parent_child_dedup_preserves_relation_anchor(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """消息命中时仍由父 context 触发跨运行一跳关系，并补入邻居消息。"""
+    user_id = _uid("u")
+    first = _seed(database, asset_store, settings, embeddings, user_id, "anchor needle")
+    second = _seed(database, asset_store, settings, embeddings, user_id, "neighbour fact")
+    _add_relation(database, user_id, first, second)
+    with database.session() as session:
+        session.execute(update(Memory).where(Memory.id == first).values(summary="hidden parent"))
+        session.execute(delete(MemoryEmbedding).where(MemoryEmbedding.memory_id == first))
+        first_run = session.get(Memory, first).request_id
+        second_run = session.get(Memory, second).request_id
+        message_ids = {
+            row.request_id: row.id
+            for row in session.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.granularity == "message",
+                    Memory.request_id.in_([first_run, second_run]),
+                )
+            ).scalars()
+        }
+        session.commit()
+
+    initial_ids = {
+        row.memory_id
+        for row in BaselineRetriever(
+            MemoryRepository(database), embeddings, DEFAULT_CHANNEL_WEIGHTS
+        ).retrieve(user_id, _parsed("anchor needle"), 10)
+    }
+    assert first not in initial_ids
+
+    repository = MemoryRepository(database)
+
+    class _MessageOnlyRetriever:
+        def __init__(self) -> None:
+            self.repository = repository
+
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            return [
+                MemoryCandidate(
+                    memory_id=message_ids[first_run], user_id=user_id,
+                    content="anchor needle", score=0.8, granularity="message",
+                    request_id=first_run, source_position=0,
+                )
+            ]
+
+    response = SearchService(
+        _MessageOnlyRetriever(), max_image_bytes=settings.max_image_bytes,
+        expander=RelationExpander(repository), reranker=EvidenceReranker(),
+    ).search(SearchRequest(query="anchor needle", user_id=user_id, top_k=10))
+    ids = [row.id for row in response.data]
+
+    assert str(message_ids[first_run]) in ids
+    assert str(message_ids[second_run]) in ids
+    assert len(ids) == len(set(ids))
+
+
+def test_top_100_with_parent_child_pool() -> None:
+    """Search 必须扩大原始池，同时将 Provider 输入限制为 64。"""
+    class _Retriever:
+        def __init__(self) -> None:
+            self.requested_limit = 0
+            self.candidates = [
+                MemoryCandidate(
+                    memory_id=uuid4(), user_id="test-user", content="needle " + "x" * 100000,
+                    score=0.5, request_id="run-1",
+                ),
+                *[
+                    MemoryCandidate(
+                        memory_id=uuid4(), user_id="test-user", content=f"needle fact {index}",
+                        score=0.5, granularity="message", request_id=f"run-{index // 2}",
+                        source_position=index % 2,
+                    )
+                    for index in range(110)
+                ],
+            ]
+
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            self.requested_limit = limit
+            return self.candidates[:limit]
+
+    class _Provider(RerankerProvider):
+        model_name = "recording"
+
+        def __init__(self) -> None:
+            self.input_count = 0
+
+        def score(self, query: str, documents) -> list[float]:
+            self.input_count = len(documents)
+            return [0.0] * len(documents)
+
+    retriever = _Retriever()
+    provider = _Provider()
+    service = SearchService(
+        retriever, max_image_bytes=1024,
+        reranker=EvidenceReranker(provider=provider), packer=ResponsePacker(),
+    )
+
+    response = service.search(SearchRequest(query="needle", user_id="test-user", top_k=100))
+
+    assert retriever.requested_limit > 100
+    assert len(response.data) == 100
+    assert response.data[0].content.startswith("needle fact")
+    assert provider.input_count <= 64
+    assert len(response.model_dump_json().encode("utf-8")) <= 30 * 1024 * 1024
+
+
+def test_same_source_content_is_not_returned_twice() -> None:
+    class _Retriever:
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            return [
+                MemoryCandidate(
+                    memory_id=uuid4(), user_id=user_id, content="  needle   fact  ",
+                    score=0.9, request_id="run-1",
+                ),
+                MemoryCandidate(
+                    memory_id=uuid4(), user_id=user_id, content="Needle Fact",
+                    score=0.8, granularity="message", request_id="run-1",
+                    source_position=0,
+                ),
+            ]
+
+    response = SearchService(
+        _Retriever(), max_image_bytes=1024, reranker=EvidenceReranker(),
+    ).search(SearchRequest(query="needle", user_id="user-1", top_k=10))
+
+    assert len(response.data) == 1
+    assert response.data[0].content == "Needle Fact"

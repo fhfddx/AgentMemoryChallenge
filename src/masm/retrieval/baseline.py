@@ -82,6 +82,11 @@ class BaselineRetriever:
         self._max_channel_workers = max_channel_workers
         self._text_queries_search_images = text_queries_search_images
 
+    @property
+    def repository(self) -> MemoryRepository:
+        """供 Search 使用同一用户范围的来源与关系查询。"""
+        return self._repo
+
     def retrieve(self, user_id: str, query: ParsedQuery, limit: int) -> list[MemoryCandidate]:
         """按查询召回并融合，返回不超过 ``limit`` 条候选。"""
         if limit < 1:
@@ -104,6 +109,9 @@ class BaselineRetriever:
                     status=source.status,
                     conflict_group_id=source.conflict_group_id,
                     duplicate_of=source.duplicate_of,
+                    granularity=source.granularity,
+                    request_id=source.request_id,
+                    source_position=source.source_position,
                 )
             )
         return results

@@ -11,8 +11,8 @@ from masm.providers.reranker import RerankerProvider, resolve_rerank_input
 from masm.retrieval.baseline import ParsedQuery
 from masm.storage.types import MemoryCandidate
 
-# 参与重排的候选硬上限。
-MAX_RERANK_CANDIDATES = 64
+# 最终证据上限与 Provider 输入上限分离，保持公开 top_k=100 契约。
+MAX_RERANK_CANDIDATES = 100
 
 _ENTITY_BONUS = 0.10
 _LOCATION_BONUS = 0.08
@@ -21,6 +21,7 @@ _RELATION_BONUS = 0.05
 _CONFLICT_BONUS = 0.05
 _DUPLICATE_PENALTY = 0.20
 _PROVIDER_WEIGHT = 0.30
+_MESSAGE_BONUS = 0.05
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,12 @@ class EvidenceReranker:
         max_candidates: int | None = None,
     ) -> None:
         self._provider = provider
-        self._max_candidates = resolve_rerank_input(max_candidates)
+        if max_candidates is not None and max_candidates < 0:
+            raise ValueError("max_candidates 必须为非负整数")
+        self._max_candidates = min(
+            MAX_RERANK_CANDIDATES if max_candidates is None else max_candidates,
+            MAX_RERANK_CANDIDATES,
+        )
 
     @property
     def max_candidates(self) -> int:
@@ -178,6 +184,9 @@ class EvidenceReranker:
         )
 
         score = candidate.score
+        if candidate.granularity == "message":
+            # 短的、可追溯的消息证据不应被同源长上下文淹没。
+            score += _MESSAGE_BONUS
         score += _ENTITY_BONUS * min(len(entities), 3)
         score += _LOCATION_BONUS * min(len(locations), 3)
         score += _RELATION_BONUS * min(len(relations), 3)
@@ -219,15 +228,16 @@ class EvidenceReranker:
         if self._provider is None:
             return [None] * len(pool)
         text = " ".join(query.text_queries).strip()
+        provider_pool = pool[:resolve_rerank_input(self._max_candidates)]
         try:
-            raw = self._provider.score(text, [candidate.content for candidate in pool])
+            raw = self._provider.score(text, [candidate.content for candidate in provider_pool])
         except Exception:
             return [None] * len(pool)
-        if len(raw) != len(pool):
+        if len(raw) != len(provider_pool):
             return [None] * len(pool)
         scores: list[float | None] = []
         for value in raw:
             if isinstance(value, bool) or not isinstance(value, int | float):
                 return [None] * len(pool)
             scores.append(float(value))
-        return scores
+        return [*scores, *([None] * (len(pool) - len(provider_pool)))]
