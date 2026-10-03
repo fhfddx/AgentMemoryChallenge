@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
@@ -75,7 +76,7 @@ def test_migration_upgrade_downgrade_cycle(
 
     with engine.connect() as conn:
         version = conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0003"
+    assert version == "0004"
 
     # 0002 引入的冲突组唯一约束必须存在。
     constraint_names = {
@@ -93,6 +94,66 @@ def test_all_required_tables_exist(database: Database) -> None:
     existing = set(inspect(database.engine).get_table_names())
     missing = REQUIRED_TABLES - existing
     assert not missing, f"缺少数据表: {sorted(missing)}"
+
+
+def test_0004_backfills_legacy_context(database_url: str) -> None:
+    """旧记忆在 0003 → 0004 后仍可按原用户读取，唯一约束不跨用户。"""
+    validated = require_masm_test_database(database_url)
+    cfg = _alembic_config(validated)
+    engine = create_engine(validated)
+    user_a = f"legacy-a-{uuid4().hex}"
+    user_b = f"legacy-b-{uuid4().hex}"
+    request_id = f"same-run-{uuid4().hex}"
+
+    with patch.dict(os.environ, {"DATABASE_URL": validated}):
+        # 测试库可被其他用例写入消息记忆；先清空再建立真正的 0003 旧库快照。
+        command.downgrade(cfg, "base")
+        command.upgrade(cfg, "0003")
+        with engine.begin() as conn:
+            conn.execute(
+                sa.text("INSERT INTO users (user_id) VALUES (:a), (:b)"),
+                {"a": user_a, "b": user_b},
+            )
+            conn.execute(
+                sa.text("INSERT INTO sessions (user_id, session_id) VALUES (:u, 'session-1')"),
+                {"u": user_a},
+            )
+            conn.execute(
+                sa.text(
+                    "INSERT INTO memories (user_id, session_id, request_id, summary) "
+                    "SELECT CAST(:u AS varchar), id, CAST(:r AS varchar), 'old evidence' "
+                    "FROM sessions WHERE user_id = CAST(:u AS varchar)"
+                ),
+                {"u": user_a, "r": request_id},
+            )
+        command.upgrade(cfg, "head")
+
+    with engine.begin() as conn:
+        legacy = conn.execute(
+            sa.text(
+                "SELECT granularity, source_position FROM memories "
+                "WHERE user_id = CAST(:u AS varchar) AND request_id = CAST(:r AS varchar)"
+            ),
+            {"u": user_a, "r": request_id},
+        ).one()
+        assert tuple(legacy) == ("context", None)
+        conn.execute(
+            sa.text("INSERT INTO sessions (user_id, session_id) VALUES (:u, 'session-1')"),
+            {"u": user_b},
+        )
+        conn.execute(
+            sa.text(
+                "INSERT INTO memories (user_id, session_id, request_id, summary) "
+                "SELECT CAST(:u AS varchar), id, CAST(:r AS varchar), 'other evidence' "
+                "FROM sessions WHERE user_id = CAST(:u AS varchar)"
+            ),
+            {"u": user_b, "r": request_id},
+        )
+        count = conn.execute(
+            sa.text("SELECT count(*) FROM memories WHERE request_id = CAST(:r AS varchar)"),
+            {"r": request_id},
+        ).scalar_one()
+        assert count == 2
 
 
 def test_pgvector_extension_and_vector_column(database: Database) -> None:

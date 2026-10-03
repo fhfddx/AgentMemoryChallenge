@@ -11,7 +11,7 @@ from uuid import uuid4
 import pytest
 from PIL import Image
 from sqlalchemy import func, select
-from sqlalchemy.exc import StatementError
+from sqlalchemy.exc import IntegrityError, StatementError
 
 from masm.config import Settings
 from masm.schemas.api import AddRequest
@@ -146,6 +146,34 @@ def test_finalize_failure_leaves_no_partial_rows(database: Database) -> None:
     assert _count(database, Memory, user_id) == 0
     assert _count(database, SourceMessage, user_id) == 0
     assert _count(database, Asset, user_id) == 0
+
+
+def test_duplicate_message_position_rolls_back_bundle(database: Database) -> None:
+    """同一运行内的消息位置冲突不能留下半个双粒度记忆束。"""
+    repo = MemoryRepository(database)
+    user_id, request_id = _uid("u"), _uid("r")
+    bundle = MemoryBundle(
+        session_id="session-1",
+        request_id=request_id,
+        memories=[
+            MemoryDraft(summary="whole", original_text="whole", granularity="context"),
+            MemoryDraft(
+                summary="first", original_text="first", granularity="message", source_position=0
+            ),
+            MemoryDraft(
+                summary="duplicate",
+                original_text="duplicate",
+                granularity="message",
+                source_position=0,
+            ),
+        ],
+    )
+
+    with pytest.raises(IntegrityError):
+        repo.add_bundle(user_id, bundle)
+
+    assert _count(database, Memory, user_id) == 0
+    assert _count(database, SourceMessage, user_id) == 0
 
 
 def test_finalize_requires_processing_ledger(database: Database) -> None:

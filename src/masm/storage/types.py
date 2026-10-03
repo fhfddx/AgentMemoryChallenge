@@ -3,7 +3,7 @@
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from masm.schemas.internal import AssetRef
@@ -46,6 +46,8 @@ class MemoryDraft:
     confidence: float | None = None
     embedding: EmbeddingDraft | None = None
     image_embeddings: Sequence[EmbeddingDraft] = ()
+    granularity: Literal["context", "message"] = "context"
+    source_position: int | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,9 @@ class MemoryCandidate:
     status: str = "active"
     conflict_group_id: UUID | None = None
     duplicate_of: UUID | None = None
+    granularity: Literal["context", "message"] = "context"
+    request_id: str = ""
+    source_position: int | None = None
 
 
 @dataclass(frozen=True)

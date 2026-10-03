@@ -391,6 +391,15 @@ class MemoryRepository:
 
     def _write_bundle(self, session: Session, user_id: str, bundle: MemoryBundle) -> list[UUID]:
         """在当前会话（事务）内写入 Session/Asset/SourceMessage/Memory。"""
+        for index, draft in enumerate(bundle.memories):
+            if draft.granularity == "context":
+                if index != 0 or draft.source_position is not None:
+                    raise ValueError("context 记忆必须位于首项且无来源位置")
+            elif draft.granularity == "message":
+                if index == 0 or draft.source_position is None or draft.source_position < 0:
+                    raise ValueError("message 记忆必须跟在 context 后且来源位置非负")
+            else:
+                raise ValueError("未知记忆粒度")
         self._ensure_user(session, user_id)
         session_model_id = self._ensure_session_id(session, user_id, bundle.session_id)
         if bundle.assets:
@@ -428,6 +437,8 @@ class MemoryRepository:
                 user_id=user_id,
                 session_id=session_model_id,
                 request_id=bundle.request_id,
+                granularity=draft.granularity,
+                source_position=draft.source_position,
                 summary=draft.summary,
                 original_text=draft.original_text,
                 keywords=list(draft.keywords),

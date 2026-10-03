@@ -14,12 +14,14 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -112,6 +114,23 @@ class Memory(Base):
     """结构化记忆单元（派生内容）。"""
 
     __tablename__ = "memories"
+    __table_args__ = (
+        Index(
+            "ux_memories_context_per_run",
+            "user_id",
+            "request_id",
+            unique=True,
+            postgresql_where=text("granularity = 'context'"),
+        ),
+        Index(
+            "ux_memories_message_per_position",
+            "user_id",
+            "request_id",
+            "source_position",
+            unique=True,
+            postgresql_where=text("granularity = 'message'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     user_id: Mapped[str] = _user_fk()
@@ -119,6 +138,8 @@ class Memory(Base):
         Uuid, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
     request_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    granularity: Mapped[str] = mapped_column(String(16), nullable=False, server_default="context")
+    source_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     original_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     keywords: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)

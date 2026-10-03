@@ -19,6 +19,7 @@ from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 from masm.storage.models import Asset, Memory, SessionRecord, SourceMessage, User
 from masm.storage.repositories import MemoryRepository, try_lock_run_lifecycle
+from masm.storage.types import EmbeddingDraft, MemoryBundle, MemoryDraft, SourceMessageDraft
 
 
 def _uid(prefix: str) -> str:
@@ -96,6 +97,46 @@ def test_delete_run_removes_database_rows_and_objects(
     assert _count(database, Asset, user_id) == 0
     assert _count(database, SourceMessage, user_id) == 0
     assert _objects(asset_store) == []
+
+
+def test_delete_run_removes_both_granularities(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """运行级删除应覆盖 context/message 与各自向量，不能触碰其他用户。"""
+    user_a, user_b = _uid("u"), _uid("u")
+    run_id = _uid("run")
+    repo = MemoryRepository(database)
+    vector = EmbeddingDraft(
+        modality="text", model_name="fake", model_version="v1", dimensions=3, vector=[1.0, 0.0, 0.0]
+    )
+    for user_id in (user_a, user_b):
+        repo.add_bundle(
+            user_id,
+            MemoryBundle(
+                session_id="session-1",
+                request_id=run_id,
+                messages=[SourceMessageDraft(role="user", content="same evidence", position=0)],
+                memories=[
+                    MemoryDraft(summary="whole", original_text="same evidence", embedding=vector),
+                    MemoryDraft(
+                        summary="same evidence", original_text="same evidence", embedding=vector,
+                        granularity="message", source_position=0,
+                    ),
+                ],
+            ),
+        )
+    assert _count(database, Memory, user_a) == 2
+    assert _count(database, Memory, user_b) == 2
+
+    report = _service(database, asset_store, settings, embeddings).delete_run(
+        run_id, user_id=user_a
+    )
+
+    assert report.complete is True
+    assert report.memories_deleted == 2
+    assert _count(database, Memory, user_a) == 0
+    assert _count(database, SourceMessage, user_a) == 0
+    assert _count(database, Memory, user_b) == 2
 
 
 def test_delete_run_is_idempotent(
