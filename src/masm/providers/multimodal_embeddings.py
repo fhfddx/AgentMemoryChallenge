@@ -3,6 +3,7 @@
 import base64
 import io
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from PIL import Image, UnidentifiedImageError
 
@@ -40,6 +41,14 @@ def canonical_perception_text(result: PerceptionResult) -> str:
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class GroundedImageEmbedding:
+    """同一次图片感知产生的忠实文本与向量。"""
+
+    canonical_text: str
+    vector: list[float]
+
+
 class GroundedMultimodalEmbeddingProvider(EmbeddingProvider):
     """用感知模型描述图片，再用文本 Provider 生成同空间向量。"""
 
@@ -59,11 +68,23 @@ class GroundedMultimodalEmbeddingProvider(EmbeddingProvider):
         return self._text_embeddings.embed_texts(texts)
 
     def embed_images(self, images: Sequence[bytes]) -> list[list[float]]:
+        return [item.vector for item in self.ground_images(images)]
+
+    def ground_images(self, images: Sequence[bytes]) -> list[GroundedImageEmbedding]:
+        """每张图片只感知一次，再批量嵌入全部描述。"""
+        if not images:
+            return []
         descriptions: list[str] = []
         for image in images:
             part = ImageURLPart(image_url={"url": _data_uri(image)})
             descriptions.append(canonical_perception_text(self._perception.extract([part])))
-        return self._text_embeddings.embed_texts(descriptions)
+        vectors = self._text_embeddings.embed_texts(descriptions)
+        if len(vectors) != len(images):
+            raise ProviderResponseError("图片描述与向量数量不一致")
+        return [
+            GroundedImageEmbedding(canonical_text=description, vector=list(vector))
+            for description, vector in zip(descriptions, vectors, strict=True)
+        ]
 
 
 def _data_uri(data: bytes) -> str:

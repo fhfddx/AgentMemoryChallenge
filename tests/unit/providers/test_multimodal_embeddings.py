@@ -124,6 +124,47 @@ def test_images_are_sent_as_ordered_data_uris_then_embedded_as_canonical_text() 
     ]
 
 
+def test_ground_images_preserves_order_and_single_perception_call() -> None:
+    """错误地再次感知图片会增加 LLM 成本并可能让描述和向量错位。"""
+    seen: list[dict] = []
+    provider, llm = _provider([_perception("first"), _perception("second")], seen)
+
+    results = provider.ground_images([_image("PNG"), _image("JPEG")])
+
+    assert len(llm.requests) == 2
+    assert [(item.canonical_text, item.vector) for item in results] == [
+        ("description: first\nocr: HELLO\nentities: square\nkeywords: purple, shape", [1.0, 0.5]),
+        ("description: second\nocr: HELLO\nentities: square\nkeywords: purple, shape", [2.0, 0.5]),
+    ]
+    assert len(seen) == 1
+
+
+def test_ground_images_rejects_mismatched_vectors() -> None:
+    """向量数少于图片数时不能提交错位的图片证据。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [1.0, 0.5]}]})
+
+    text_provider = OpenAICompatibleEmbeddingProvider(
+        model="text-embedding-v4",
+        model_version="cycle2-fixed",
+        dimensions=2,
+        base_url="https://embeddings.invalid/v1",
+        api_key="test-key",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        max_attempts=1,
+    )
+    llm = FakeStructuredLLM([_perception("first"), _perception("second")])
+    provider = GroundedMultimodalEmbeddingProvider(
+        text_embeddings=text_provider,
+        perception=PerceptionAgent(llm),
+    )
+
+    with pytest.raises(ProviderResponseError):
+        provider.ground_images([_image("PNG"), _image("JPEG")])
+
+    assert len(llm.requests) == 2
+
+
 def test_text_and_image_vectors_share_model_version_and_dimensions() -> None:
     provider, _llm = _provider([_perception()])
 
