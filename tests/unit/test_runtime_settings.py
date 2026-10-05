@@ -113,3 +113,12 @@ def test_from_env_reads_runtime_provider_configuration(monkeypatch: pytest.Monke
     assert settings.embedding_dimensions == 1024
     assert settings.model_timeout_seconds == 45.5
     assert settings.model_max_attempts == 1
+
+
+def test_fused_text_flag_is_off_unless_explicitly_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MASM_FUSED_EMPTY_HISTORY_TEXT", raising=False)
+    assert Settings.from_env().fused_empty_history_text is False
+    monkeypatch.setenv("MASM_FUSED_EMPTY_HISTORY_TEXT", "1")
+    assert Settings.from_env().fused_empty_history_text is True
+    monkeypatch.setenv("MASM_FUSED_EMPTY_HISTORY_TEXT", "true")
+    assert Settings.from_env().fused_empty_history_text is False

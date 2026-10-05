@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from masm.agents.curator import MemoryCuratorAgent
+from masm.agents.fused_text import FusedTextAgent
 from masm.agents.perception import PerceptionAgent
 from masm.agents.temporal import TemporalRelationAgent
 from masm.config import RuntimeProfile, Settings
@@ -34,6 +35,13 @@ class RuntimeComponents:
     relation_expander: RelationExpander | None
     reranker: EvidenceReranker | None
 
+    def close(self) -> None:
+        """关闭运行时自身创建的模型与 Embedding HTTP 连接池。"""
+        if isinstance(self.llm, OpenAICompatibleLLM):
+            self.llm.close()
+        if isinstance(self.embeddings, GroundedMultimodalEmbeddingProvider):
+            self.embeddings.close()
+
     def audit_metadata(self) -> dict[str, object]:
         """返回不含密钥和内容的运行时审计元数据。"""
         prompt_versions: dict[str, str] = {}
@@ -43,12 +51,17 @@ class RuntimeComponents:
                 "temporal": self.add_pipeline._temporal.prompt_version,
                 "curator": self.add_pipeline._curator.prompt_version,
             }
+            if self.add_pipeline._fused_text is not None:
+                prompt_versions["fused_text"] = self.add_pipeline._fused_text.prompt_version
         return {
             "profile": self.profile.value,
             "embedding_model": self.embeddings.model_name,
             "embedding_version": self.embeddings.model_version,
             "llm_model": self.llm.model if self.llm is not None else None,
             "prompt_versions": prompt_versions,
+            "fused_empty_history_text": (
+                self.add_pipeline is not None and self.add_pipeline._fused_text is not None
+            ),
         }
 
 
@@ -110,6 +123,7 @@ def build_runtime(
             temporal=TemporalRelationAgent(selected_llm),
             curator=MemoryCuratorAgent(selected_llm),
             retriever=retriever,
+            fused_text=FusedTextAgent(selected_llm) if settings.fused_empty_history_text else None,
         )
         query_analyzer = QueryAnalyzer(
             llm=selected_llm,

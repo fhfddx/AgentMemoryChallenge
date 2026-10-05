@@ -1,6 +1,7 @@
 """FastAPI 应用工厂。"""
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from time import perf_counter
 from uuid import uuid4
 
@@ -23,6 +24,14 @@ from masm.storage.db import Database
 from masm.storage.repositories import MemoryRepository
 
 
+@asynccontextmanager
+async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        application.state.runtime.close()
+
+
 def create_app(
     settings: Settings,
     *,
@@ -35,7 +44,7 @@ def create_app(
     packer: ResponsePacker | None = None,
 ) -> FastAPI:
     """根据配置构建 FastAPI 应用。"""
-    application = FastAPI(title="MASM", version="0.1.0")
+    application = FastAPI(title="MASM", version="0.1.0", lifespan=_lifespan)
     application.state.settings = settings
     application.state.database = database or Database.create(settings.database_url)
     application.state.asset_store = asset_store or AssetStore(settings.asset_dir)

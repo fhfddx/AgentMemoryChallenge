@@ -12,16 +12,18 @@ MASM（Multi-Agent Structured Memory）是一个面向 [Agent Memory Challenge](
 | `POST /search` | 在指定 `user_id` 作用域内返回相关记忆证据，只返回证据，不生成最终答案。 |
 
 详细契约见 `docs/superpowers/specs/2026-09-28-agent-memory-challenge-design.md`。
-当前比赛候选部署在 `https://agentmemorydev.icu`，公网正式档位的 Smoke、容量、备份恢复和
-端口加固证据见[公网部署验证记录](docs/competition/public-deployment-validation-2026-09-30.md)。
+`https://agentmemorydev.icu` 是 2026-09-30 验证过的历史 v1.0 公网服务，不能代表
+当前 v1.1 候选。其当时的 Smoke、容量、备份恢复和端口加固证据见
+[公网部署验证记录](docs/competition/public-deployment-validation-2026-09-30.md)。v1.1 在固定
+Commit、镜像 digest 与独立部署完成前没有可申报的公网端点。
 
 ## 运行档位
 
 | 档位 | 模型与组件 | 用途 |
 | --- | --- | --- |
 | `local-fake` | 确定性 Fake Embedding，不调用外部模型 | 开发、自动化测试、Docker Smoke |
-| `official-baseline` | `gpt-4o-mini` 图片感知 + `text-embedding-v4` | B0、保底候选 |
-| `official-masm` | 正式模型 + 三智能体 + 一跳关系扩展 + 重排 | 完整 MASM 候选 |
+| `official-baseline` | `gpt-4o-mini` 图片感知 + `text-embedding-v4` | B0 消融对照；不是公网 MASM v1.0 保底档位 |
+| `official-masm` | 正式模型 + 三智能体 + 一跳关系扩展 + 重排 | 公网 MASM v1.0 的记录档位、v1.1 正式候选档位 |
 
 默认档位是 `local-fake`，只能用于开发，禁止作为正式比赛提交。正式档位缺少模型密钥、使用
 错误模型或非 HTTPS Provider 地址时会在启动阶段失败，不会静默回退到 Fake。
@@ -89,6 +91,7 @@ experiments/   可复现实验配置、公开 API 运行器与汇总工具
 
 已完成结构化记忆写入、混合检索、多智能体治理、隐私删除、容器候选部署、正式模型 Provider
 和可复现实验框架。`official-masm` 会把三智能体与增强检索接入实际 API；默认
-`local-fake` 则保留无密钥基线。公网 `official-masm` 已完成真实文本/图片 Add/Search、用户隔离、
-重启持久性、小规模容量以及备份恢复验证。正式基准实验与论文消融结果尚未跑数，不能把 Smoke
-结果表述为最终榜单效果。公共线上接口仍严格限制为 `GET /health`、`POST /add`、`POST /search`。
+`local-fake` 则保留无密钥基线。历史 v1.0 公网 `official-masm` 曾完成真实文本/图片
+Add/Search、用户隔离、重启持久性、小规模容量以及备份恢复验证；这些记录不自动转移给
+v1.1。正式基准实验与论文消融结果尚未跑数，不能把 Smoke 结果表述为最终榜单效果。
+公共线上接口仍严格限制为 `GET /health`、`POST /add`、`POST /search`。

@@ -26,6 +26,7 @@ htmlcov/
 
 # 运行产物、数据库、缓存、图片与评测数据
 artifacts/
+.superpowers/
 *.db
 *.sqlite3
 

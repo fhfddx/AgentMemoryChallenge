@@ -338,6 +338,15 @@ class MemoryRepository:
         self._database = database
         self._commit = commit or (lambda session: session.commit())
 
+    def has_context_memory(self, user_id: str) -> bool:
+        """仅核对同用户是否有可供 Add 历史召回的上下文记忆。"""
+        with self._database.session() as session:
+            return session.execute(
+                select(Memory.id)
+                .where(Memory.user_id == user_id, Memory.granularity == "context")
+                .limit(1)
+            ).scalar_one_or_none() is not None
+
     def lifecycle_connection(self) -> Connection:
         """用于持有所在运行生命周期锁的独占连接（调用方负责关闭）。"""
         return self._database.engine.connect()

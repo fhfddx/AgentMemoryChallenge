@@ -68,7 +68,7 @@ def _client(
     )
 
 
-def test_official_masm_http_add_invokes_each_agent_once(
+def test_official_masm_http_add_skips_curator_without_history(
     database: Database,
     asset_store: AssetStore,
     database_url: str,
@@ -92,7 +92,6 @@ def test_official_masm_http_add_invokes_each_agent_once(
     assert [record.output_type for record in llm.records] == [
         "PerceptionResult",
         "TemporalRelationResult",
-        "CuratorDecision",
     ]
 
 
@@ -128,7 +127,7 @@ def test_official_masm_search_returns_evidence_not_generated_answer(
     assert body["data"]
     assert body["data"][0]["content"] == "runtime marker evidence"
     assert set(body["data"][0]) <= {"id", "content", "score", "created_at"}
-    assert len(llm.records) == 3
+    assert len(llm.records) == 2
 
 
 def test_app_state_exposes_only_nonsensitive_runtime_metadata(
@@ -153,6 +152,7 @@ def test_app_state_exposes_only_nonsensitive_runtime_metadata(
         "embedding_version": "cycle2-fixed",
         "llm_model": "gpt-4o-mini",
         "prompt_versions": {"perception": "v1", "temporal": "v1", "curator": "v1"},
+        "fused_empty_history_text": False,
     }
     assert "llm-secret" not in rendered
     assert "embedding-secret" not in rendered

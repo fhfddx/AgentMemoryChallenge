@@ -9,6 +9,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any, TypeVar
 
 import httpx
@@ -167,6 +168,8 @@ class OpenAICompatibleLLM(StructuredLLM):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._client = client
+        self._owned_client: httpx.Client | None = None
+        self._client_lock = Lock()
         self._timeout_seconds = timeout_seconds
         self._max_attempts = _effective_attempts(max_attempts, DEFAULT_MAX_ATTEMPTS)
 
@@ -229,17 +232,27 @@ class OpenAICompatibleLLM(StructuredLLM):
         }
 
     def _post(self, body: dict[str, Any], output_type: type[T], timeout: float) -> T:
-        client = self._client or httpx.Client(timeout=timeout)
-        try:
-            response = client.post(
-                f"{self._base_url}/chat/completions",
-                json=body,
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                timeout=timeout,
-            )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            return output_type.model_validate_json(content)
-        finally:
-            if self._client is None:
-                client.close()
+        response = self._http_client().post(
+            f"{self._base_url}/chat/completions",
+            json=body,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+        return output_type.model_validate_json(content)
+
+    def _http_client(self) -> httpx.Client:
+        if self._client is not None:
+            return self._client
+        with self._client_lock:
+            if self._owned_client is None:
+                self._owned_client = httpx.Client(timeout=self._timeout_seconds)
+            return self._owned_client
+
+    def close(self) -> None:
+        """关闭自身创建的连接池；注入的 Client 由调用方管理。"""
+        with self._client_lock:
+            if self._owned_client is not None:
+                self._owned_client.close()
+                self._owned_client = None

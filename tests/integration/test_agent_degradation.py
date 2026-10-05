@@ -177,6 +177,9 @@ def test_curator_schema_error_degrades(
         ),
     )
     user_id = _uid("u")
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(_uid("r"), user_id, "durable memory earlier"))
 
     result = pipeline.run(_request(_uid("r"), user_id, "durable memory"))
 
@@ -199,17 +202,30 @@ def test_invalid_action_degrades_and_writes_nothing_unsafe(
             ),
         )
     )
-    user_id, response = _run_degraded_add(
-        database,
-        asset_store,
-        settings,
-        embeddings,
+    user_id = _uid("u")
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(_uid("r"), user_id, "durable degraded memory earlier"))
+    pipeline = _pipeline_with_perception_llm(
+        database, embeddings,
         FakeStructuredLLM([PerceptionResult(keywords=("cat",))]),
         decision=foreign_candidate,
     )
+    response = AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings, pipeline=pipeline
+    ).add(_request(_uid("r"), user_id, "durable degraded memory"))
 
     assert response.success is True
-    assert _count(database, Memory, user_id) == 2
+    assert _count(database, Memory, user_id) == 4
+    with database.session() as session:
+        new_context = session.execute(
+            select(Memory).where(
+                Memory.user_id == user_id,
+                Memory.request_id == response.request_id,
+                Memory.granularity == "context",
+            )
+        ).scalar_one()
+    assert new_context.keywords == []
     assert _search(database, settings, embeddings, user_id).data
 
 

@@ -4,6 +4,7 @@ import math
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 import httpx
@@ -57,6 +58,8 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._client = client
+        self._owned_client: httpx.Client | None = None
+        self._client_lock = Lock()
         self._timeout_seconds = timeout_seconds
         self._max_attempts = _bounded_attempts(max_attempts)
         self.records: list[EmbeddingCallRecord] = []
@@ -98,19 +101,29 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
         raise ProviderResponseError("文本 Embedding Provider 不支持直接图片")
 
     def _post(self, body: dict[str, Any], expected: int) -> list[list[float]]:
-        client = self._client or httpx.Client(timeout=self._timeout_seconds)
-        try:
-            response = client.post(
-                f"{self._base_url}/embeddings",
-                json=body,
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                timeout=self._timeout_seconds,
-            )
-            response.raise_for_status()
-            return self._validate_data(response.json()["data"], expected)
-        finally:
-            if self._client is None:
-                client.close()
+        response = self._http_client().post(
+            f"{self._base_url}/embeddings",
+            json=body,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            timeout=self._timeout_seconds,
+        )
+        response.raise_for_status()
+        return self._validate_data(response.json()["data"], expected)
+
+    def _http_client(self) -> httpx.Client:
+        if self._client is not None:
+            return self._client
+        with self._client_lock:
+            if self._owned_client is None:
+                self._owned_client = httpx.Client(timeout=self._timeout_seconds)
+            return self._owned_client
+
+    def close(self) -> None:
+        """关闭自身创建的连接池；注入的 Client 由调用方管理。"""
+        with self._client_lock:
+            if self._owned_client is not None:
+                self._owned_client.close()
+                self._owned_client = None
 
     def _validate_data(self, data: object, expected: int) -> list[list[float]]:
         if not isinstance(data, list) or len(data) != expected:

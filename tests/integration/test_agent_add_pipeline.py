@@ -1,5 +1,6 @@
 """Agent Add 编排流水线的端到端集成测试。"""
 
+from collections.abc import Sequence
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,7 +12,7 @@ from masm.agents.perception import PerceptionAgent
 from masm.agents.temporal import TemporalRelationAgent
 from masm.orchestration.action_validator import ActionValidationError, validate_actions
 from masm.orchestration.add_pipeline import AddPipeline, PipelineState
-from masm.providers.fakes import FakeStructuredLLM
+from masm.providers.fakes import DeterministicFakeEmbeddingProvider, FakeStructuredLLM
 from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever, ParsedQuery
 from masm.schemas.agents import (
     ActionKind,
@@ -38,6 +39,18 @@ _FULL_TRACE = (
     PipelineState.VALIDATED,
     PipelineState.COMPLETED,
 )
+
+
+class _CountingFakeEmbeddings(DeterministicFakeEmbeddingProvider):
+    """保留真实 Fake 向量行为，只记录文本 Embedding 的批次次数。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.text_calls = 0
+
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        self.text_calls += 1
+        return super().embed_texts(texts)
 
 
 def _uid(prefix: str) -> str:
@@ -111,7 +124,7 @@ def _memory_row(database: Database, user_id: str, request_id: str) -> Memory:
 def test_agent_mode_add_is_immediately_searchable(
     database: Database, asset_store: AssetStore, settings, embeddings
 ) -> None:
-    pipeline, _llms = _build_pipeline(database, embeddings)
+    pipeline, llms = _build_pipeline(database, embeddings)
     service = AddService(
         MemoryRepository(database), asset_store, settings, embeddings=embeddings, pipeline=pipeline
     )
@@ -124,6 +137,15 @@ def test_agent_mode_add_is_immediately_searchable(
 
     assert response.success is True
     assert MemoryRepository(database).get_ledger_status(user_id, response.request_id) == "COMMITTED"
+    stored = _memory_row(database, user_id, response.request_id)
+    assert stored.summary == "the cat sat on the mat"
+    assert stored.original_text == "the cat sat on the mat"
+    assert stored.keywords == ["cat"]
+    assert stored.duplicate_of is None
+    assert stored.supersedes is None
+    assert stored.conflict_group_id is None
+    assert _count(database, MemoryRelation, user_id) == 0
+    assert llms[2].requests == []
 
     results = search.search(SearchRequest(query="cat", user_id=user_id, top_k=10))
     assert results.data
@@ -141,11 +163,74 @@ def test_state_machine_visits_states_in_order(
     assert result.degraded is False
 
 
-def test_agents_are_invoked_exactly_once(database: Database, embeddings) -> None:
-    """显式状态机：不得递归调用智能体。"""
+def test_empty_history_skips_curator_without_changing_memory(
+    database: Database, embeddings
+) -> None:
+    """没有候选时不存在可执行的治理目标，仍应完成同样的记忆写入计划。"""
     pipeline, llms = _build_pipeline(database, embeddings)
 
-    pipeline.run(_request(_uid("r"), _uid("u"), "no recursion"))
+    result = pipeline.run(_request(_uid("r"), _uid("u"), "fresh memory evidence"))
+
+    perception_llm, temporal_llm, curator_llm = llms
+    assert result.degraded is False
+    assert result.states == _FULL_TRACE
+    assert result.bundle.memories[0].summary == "fresh memory evidence"
+    assert result.bundle.actions is not None
+    assert result.bundle.actions.relations == ()
+    assert len(perception_llm.requests) == 1
+    assert len(temporal_llm.requests) == 1
+    assert curator_llm.requests == []
+
+
+def test_recall_skips_embedding_when_only_other_user_has_context(
+    database: Database, asset_store: AssetStore, settings
+) -> None:
+    """别人的历史不能让新用户为一次必为空的召回付 Embedding 调用。"""
+    embeddings = _CountingFakeEmbeddings()
+    other_user = _uid("other")
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(_uid("r"), other_user, "other user's memory"))
+    before = embeddings.text_calls
+    pipeline, _llms = _build_pipeline(database, embeddings)
+
+    result = pipeline.run(_request(_uid("r"), _uid("fresh"), "fresh evidence"))
+
+    assert result.degraded is False
+    assert result.bundle.memories[0].summary == "fresh evidence"
+    assert embeddings.text_calls == before
+
+
+def test_recall_still_embeds_when_same_user_has_context(
+    database: Database, asset_store: AssetStore, settings
+) -> None:
+    """同用户有历史时保留向量召回与管理路径。"""
+    embeddings = _CountingFakeEmbeddings()
+    user_id = _uid("history")
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(_uid("r"), user_id, "earlier cat memory"))
+    before = embeddings.text_calls
+    pipeline, llms = _build_pipeline(database, embeddings)
+
+    result = pipeline.run(_request(_uid("r"), user_id, "cat memory again"))
+
+    assert result.degraded is False
+    assert embeddings.text_calls == before + 1
+    assert len(llms[2].requests) == 1
+
+
+def test_agents_are_invoked_exactly_once_with_history(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """有同用户历史时三个智能体各调用一次，不递归。"""
+    user_id = _uid("u")
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(_uid("r"), user_id, "no recursion baseline"))
+    pipeline, llms = _build_pipeline(database, embeddings)
+
+    pipeline.run(_request(_uid("r"), user_id, "no recursion baseline again"))
 
     for llm in llms:
         assert len(llm.requests) == 1
@@ -577,7 +662,7 @@ def test_zero_history_pipeline_still_adds(
     assert response.success is True
     _perception_llm, temporal_llm, curator_llm = llms
     assert temporal_llm.requests[0].payload["history"] == []
-    assert curator_llm.requests[0].payload["history"] == []
+    assert curator_llm.requests == []
 
 
 def test_source_message_count_matches_request(

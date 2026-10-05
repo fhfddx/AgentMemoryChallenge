@@ -91,6 +91,35 @@ def test_texts_delegate_to_text_embedding_provider() -> None:
     assert llm.requests == []
 
 
+def test_sequential_text_embeddings_share_owned_client_until_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """写入中的多次文本向量请求共用自有 Client，结束时释放。"""
+    clients: list[httpx.Client] = []
+    real_client = httpx.Client
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [1.0, 0.5]}]})
+
+    def make_client(*args: object, **kwargs: object) -> httpx.Client:
+        client = real_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("masm.providers.openai_embeddings.httpx.Client", make_client)
+    provider = OpenAICompatibleEmbeddingProvider(
+        model="text-embedding-v4", model_version="cycle2-fixed", dimensions=2,
+        base_url="https://embeddings.invalid/v1", api_key="test-key", max_attempts=1,
+    )
+    for _ in range(2):
+        assert provider.embed_texts(["cat"]) == [[1.0, 0.5]]
+
+    assert len(clients) == 1
+    assert clients[0].is_closed is False
+    provider.close()
+    assert clients[0].is_closed is True
+
+
 @pytest.mark.parametrize(
     ("format_name", "media_type"),
     [("PNG", "image/png"), ("JPEG", "image/jpeg"), ("WEBP", "image/webp")],

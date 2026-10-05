@@ -67,6 +67,10 @@ class GroundedMultimodalEmbeddingProvider(EmbeddingProvider):
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         return self._text_embeddings.embed_texts(texts)
 
+    def close(self) -> None:
+        """释放底层文本 Embedding Provider 自有的连接池。"""
+        self._text_embeddings.close()
+
     def embed_images(self, images: Sequence[bytes]) -> list[list[float]]:
         return [item.vector for item in self.ground_images(images)]
 

@@ -149,6 +149,15 @@ class TemporalRelationResult(_StrictModel):
     event_order: tuple[str, ...] = Field(default=(), max_length=_MAX_EVENTS)
 
 
+class FusedTextResult(_StrictModel):
+    """无历史纯文本的一次调用结果；只增加写入实际使用的时间字段。"""
+
+    perception: PerceptionResult
+    event_time: datetime | None = None
+    time_precision: TimePrecision = TimePrecision.UNKNOWN
+    time_evidence: str | None = Field(default=None, min_length=1, max_length=200)
+
+
 class ActionKind(StrEnum):
     """记忆管理智能体允许提出的动作；其它动作一律被拒绝。"""
 

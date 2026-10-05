@@ -91,6 +91,34 @@ def test_valid_json_is_validated_and_returned() -> None:
     assert result.keywords == ("cat",)
 
 
+def test_sequential_model_calls_share_owned_client_until_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """串行阶段只创建一个可复用 Client，并在关闭 Provider 时释放它。"""
+    clients: list[httpx.Client] = []
+    real_client = httpx.Client
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_VALID_BODY)
+
+    def make_client(*args: object, **kwargs: object) -> httpx.Client:
+        client = real_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr("masm.providers.llm.httpx.Client", make_client)
+    llm = OpenAICompatibleLLM(
+        model="gpt-4o-mini", base_url="https://models.invalid/v1", api_key="test-key"
+    )
+    for _ in range(2):
+        assert llm.complete_json(_request(payload={}), PerceptionResult).keywords == ("cat",)
+
+    assert len(clients) == 1
+    assert clients[0].is_closed is False
+    llm.close()
+    assert clients[0].is_closed is True
+
+
 def test_json_schema_and_version_are_sent_to_provider() -> None:
     seen: dict = {}
 

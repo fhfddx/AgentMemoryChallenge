@@ -58,6 +58,7 @@ class Settings:
     embedding_dimensions: int = 1024
     model_timeout_seconds: float = 30.0
     model_max_attempts: int = 2
+    fused_empty_history_text: bool = False
 
     @property
     def is_official(self) -> bool:
@@ -121,4 +122,5 @@ class Settings:
             embedding_dimensions=_int_env("MASM_EMBEDDING_DIMENSIONS", 1024),
             model_timeout_seconds=_float_env("MASM_MODEL_TIMEOUT_SECONDS", 30.0),
             model_max_attempts=_int_env("MASM_MODEL_MAX_ATTEMPTS", 2),
+            fused_empty_history_text=os.getenv("MASM_FUSED_EMPTY_HISTORY_TEXT") == "1",
         )

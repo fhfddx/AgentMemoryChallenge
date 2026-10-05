@@ -3,16 +3,20 @@
 from unittest.mock import Mock
 
 import pytest
+from fastapi.testclient import TestClient
 
+from masm.api.app import create_app
 from masm.config import RuntimeProfile, Settings
 from masm.orchestration.add_pipeline import AddPipeline
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.fakes import DeterministicFakeEmbeddingProvider, FakeStructuredLLM
+from masm.providers.llm import OpenAICompatibleLLM
 from masm.providers.multimodal_embeddings import GroundedMultimodalEmbeddingProvider
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.reranker import EvidenceReranker
 from masm.runtime import build_runtime
+from masm.storage.db import Database
 from masm.storage.repositories import MemoryRepository
 
 
@@ -79,6 +83,37 @@ def test_official_baseline_builds_real_embeddings_without_add_pipeline() -> None
     assert runtime.retriever._text_queries_search_images is True  # noqa: SLF001
 
 
+def test_app_shutdown_closes_runtime_owned_llm_client() -> None:
+    """应用生命周期结束时不遗留模型 HTTP 连接池。"""
+    app = create_app(
+        _settings(RuntimeProfile.OFFICIAL_MASM),
+        database=Mock(spec=Database),
+        embeddings=OfficialTestEmbeddings(),
+    )
+    llm = app.state.runtime.llm
+    assert isinstance(llm, OpenAICompatibleLLM)
+    client = llm._http_client()  # noqa: SLF001
+    assert client.is_closed is False
+
+    with TestClient(app):
+        pass
+
+    assert client.is_closed is True
+
+
+def test_app_shutdown_closes_runtime_owned_embedding_client() -> None:
+    app = create_app(_settings(RuntimeProfile.OFFICIAL_MASM), database=Mock(spec=Database))
+    embeddings = app.state.runtime.embeddings
+    assert isinstance(embeddings, GroundedMultimodalEmbeddingProvider)
+    client = embeddings._text_embeddings._http_client()  # noqa: SLF001
+    assert client.is_closed is False
+
+    with TestClient(app):
+        pass
+
+    assert client.is_closed is True
+
+
 def test_official_masm_builds_three_agents_and_all_search_components() -> None:
     llm = FakeStructuredLLM(model="gpt-4o-mini")
     runtime = build_runtime(
@@ -98,3 +133,24 @@ def test_official_masm_builds_three_agents_and_all_search_components() -> None:
     assert isinstance(runtime.relation_expander, RelationExpander)
     assert isinstance(runtime.reranker, EvidenceReranker)
     assert runtime.retriever._text_queries_search_images is True  # noqa: SLF001
+
+
+def test_official_masm_wires_fused_text_only_when_enabled() -> None:
+    from dataclasses import replace
+
+    disabled = build_runtime(
+        _settings(RuntimeProfile.OFFICIAL_MASM), _repository(),
+        embeddings=OfficialTestEmbeddings(), llm=FakeStructuredLLM(),
+    )
+    enabled = build_runtime(
+        replace(_settings(RuntimeProfile.OFFICIAL_MASM), fused_empty_history_text=True),
+        _repository(), embeddings=OfficialTestEmbeddings(), llm=FakeStructuredLLM(),
+    )
+
+    assert disabled.add_pipeline is not None
+    assert enabled.add_pipeline is not None
+    assert disabled.add_pipeline._fused_text is None
+    assert enabled.add_pipeline._fused_text is not None
+    assert disabled.audit_metadata()["fused_empty_history_text"] is False
+    assert enabled.audit_metadata()["fused_empty_history_text"] is True
+    assert enabled.audit_metadata()["prompt_versions"]["fused_text"] == "fused-text-v2"

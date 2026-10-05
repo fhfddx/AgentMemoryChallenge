@@ -9,21 +9,23 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
+from pydantic import ValidationError
+
 from masm.agents import MAX_HISTORY, resolve_max_history
 from masm.agents.curator import MemoryCuratorAgent
+from masm.agents.fused_text import FusedTextAgent, has_one_supported_date
 from masm.agents.perception import PerceptionAgent
-from masm.agents.temporal import TemporalRelationAgent
+from masm.agents.temporal import AgentOutputError, TemporalRelationAgent
 from masm.orchestration.action_validator import validate_actions
+from masm.providers.llm import StructuredOutputError
 from masm.retrieval.baseline import BaselineRetriever, ParsedQuery
-from masm.schemas.agents import PerceptionResult, TemporalRelationResult
+from masm.schemas.agents import CuratorDecision, PerceptionResult, TemporalRelationResult
 from masm.schemas.api import AddRequest
 from masm.schemas.content import ContentPart, TextPart
 from masm.storage.types import MemoryBundle, MemoryDraft, ValidatedActions
 
 # 召回并传给智能体的同用户历史候选上限；不得超过集中定义的硬上限。
 DEFAULT_MAX_HISTORY = MAX_HISTORY
-
-
 class PipelineState(StrEnum):
     """Add 流水线的显式状态。"""
 
@@ -94,12 +96,14 @@ class AddPipeline:
         temporal: TemporalRelationAgent,
         curator: MemoryCuratorAgent,
         retriever: BaselineRetriever,
+        fused_text: FusedTextAgent | None = None,
         max_history: int = DEFAULT_MAX_HISTORY,
     ) -> None:
         self._perception = perception
         self._temporal = temporal
         self._curator = curator
         self._retriever = retriever
+        self._fused_text = fused_text
         self._max_history = resolve_max_history(max_history)
 
     @property
@@ -118,17 +122,39 @@ class AddPipeline:
             content = _content_parts(request)
             machine.advance(PipelineState.PARSED)
 
-            perception = self._perception.extract(content)
+            fused_result = None
+            if self._can_fuse(request, content):
+                assert self._fused_text is not None
+                try:
+                    fused_result = self._fused_text.extract(
+                        tuple(part for part in content if isinstance(part, TextPart))
+                    )
+                except (AgentOutputError, StructuredOutputError, ValidationError):
+                    # 融合输出不合规时保留原两阶段模型路径；传输失败仍按原规则降级。
+                    pass
+            perception = (
+                fused_result.perception if fused_result is not None
+                else self._perception.extract(content)
+            )
             machine.advance(PipelineState.PERCEIVED)
 
             history = self._recall(request)
             machine.advance(PipelineState.RECALLED)
 
-            temporal = self._temporal.analyze(perception, history)
+            # 预检之后可能有并发写入；出现候选时重做有历史时序分析。
+            temporal = (
+                TemporalRelationResult(
+                    event_time=fused_result.event_time,
+                    time_precision=fused_result.time_precision,
+                ) if fused_result is not None and not history
+                else self._temporal.analyze(perception, history)
+            )
             machine.advance(PipelineState.TEMPORALISED)
 
-            decision = self._curator.propose(
-                _draft_from(request, content, perception, temporal), history
+            # 没有候选时治理动作没有可引用的目标；新记忆仍由 _bundle_from 创建。
+            decision = (
+                self._curator.propose(_draft_from(request, content, perception, temporal), history)
+                if history else CuratorDecision()
             )
             machine.advance(PipelineState.CURATED)
 
@@ -151,12 +177,29 @@ class AddPipeline:
             bundle=bundle, states=tuple(machine.trace), degraded=False, failure=None
         )
 
+    def _can_fuse(self, request: AddRequest, content: tuple[ContentPart, ...]) -> bool:
+        """仅无历史纯文本、恰有一个可核验日期且无紧凑日期歧义时启用。"""
+        return (
+            self._fused_text is not None
+            and bool(content)
+            and all(isinstance(part, TextPart) for part in content)
+            and has_one_supported_date(
+                tuple(part for part in content if isinstance(part, TextPart))
+            )
+            and (
+                self._max_history == 0
+                or not self._retriever.repository.has_context_memory(request.user_id)
+            )
+        )
+
     def _recall(self, request: AddRequest) -> list:
         """在同一用户范围内召回受限的历史候选。"""
         if self._max_history == 0:
             return []
         text = " ".join(_text_parts(request)).strip()
         if not text:
+            return []
+        if not self._retriever.repository.has_context_memory(request.user_id):
             return []
         return self._retriever.retrieve(
             request.user_id,
