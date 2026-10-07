@@ -174,12 +174,20 @@ def test_v11_package_keeps_models_and_storage_separate() -> None:
     assert "MASM_LLM_MODEL: gpt-4o-mini" in compose
     assert "MASM_EMBEDDING_MODEL: text-embedding-v4" in compose
     assert "MASM_EMBEDDING_DIMENSIONS: 1024" in compose
+    assert "MASM_MAX_CONCURRENT_REQUESTS: ${MASM_MAX_CONCURRENT_REQUESTS:-16}" in compose
+    assert "MASM_MAX_REQUESTS_PER_MINUTE: ${MASM_MAX_REQUESTS_PER_MINUTE:-1000}" in compose
     assert "masm-edge" in compose
     assert "masm-v11-api" in compose
     assert "v11-local-test-key" not in compose
     assert "masm-v11-local-only" not in compose
     assert "masm-v11-api:8000" in caddy
     assert "reverse_proxy api:8000" in caddy
+
+
+def test_default_package_forwards_request_limit_settings() -> None:
+    compose = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "MASM_MAX_CONCURRENT_REQUESTS: ${MASM_MAX_CONCURRENT_REQUESTS:-16}" in compose
+    assert "MASM_MAX_REQUESTS_PER_MINUTE: ${MASM_MAX_REQUESTS_PER_MINUTE:-1000}" in compose
 
 
 def test_docker_context_excludes_local_evaluation_artifacts() -> None:

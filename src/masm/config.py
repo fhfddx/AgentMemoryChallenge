@@ -48,6 +48,8 @@ class Settings:
     max_add_image_bytes: int = 31457280  # 单次 Add 图片总量上限 30 MiB
     max_search_response_bytes: int = 31457280  # Search 响应总量上限 30 MiB
     max_top_k: int = 100
+    max_concurrent_requests: int = 16
+    max_requests_per_minute: int = 1000
     runtime_profile: RuntimeProfile = RuntimeProfile.LOCAL_FAKE
     llm_base_url: str = ""
     llm_api_key: str = field(default="", repr=False)
@@ -73,6 +75,10 @@ class Settings:
             raise ValueError("模型超时必须为正数")
         if self.model_max_attempts not in {1, 2}:
             raise ValueError("模型尝试次数只能为 1 或 2")
+        if self.max_concurrent_requests < 1:
+            raise ValueError("请求并发上限必须为正整数")
+        if self.max_requests_per_minute < 1:
+            raise ValueError("每分钟请求上限必须为正整数")
         if not self.is_official:
             return
 
@@ -110,6 +116,8 @@ class Settings:
             max_add_image_bytes=_int_env("MASM_MAX_ADD_IMAGE_BYTES", 31457280),
             max_search_response_bytes=_int_env("MASM_MAX_SEARCH_RESPONSE_BYTES", 31457280),
             max_top_k=_int_env("MASM_MAX_TOP_K", 100),
+            max_concurrent_requests=_int_env("MASM_MAX_CONCURRENT_REQUESTS", 16),
+            max_requests_per_minute=_int_env("MASM_MAX_REQUESTS_PER_MINUTE", 1000),
             runtime_profile=RuntimeProfile(
                 os.getenv("MASM_RUNTIME_PROFILE", RuntimeProfile.LOCAL_FAKE.value)
             ),

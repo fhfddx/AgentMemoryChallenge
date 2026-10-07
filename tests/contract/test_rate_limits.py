@@ -1,5 +1,6 @@
 """速率与并发限制契约测试。"""
 
+from contextlib import AsyncExitStack
 from uuid import uuid4
 
 import httpx
@@ -7,9 +8,10 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from masm.api.app import create_app
+from masm.api.app import build_request_limiter, create_app
 from masm.api.auth import credential_fingerprint
 from masm.api.limits import RequestLimiter
+from masm.config import Settings
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 
@@ -34,6 +36,34 @@ def _payload(user_id: str) -> dict:
         "session_id": "session-1",
         "messages": [{"role": "user", "content": "hello"}],
     }
+
+
+@pytest.mark.asyncio
+async def test_default_app_limiter_accepts_declared_sixteen_concurrent_requests() -> None:
+    """官网按声明发起 16 个并发请求时，应用不得在第 11 个提前返回 429。"""
+    configured = Settings(database_url="postgresql+psycopg://unused/masm")
+    limiter = build_request_limiter(configured)
+
+    async with AsyncExitStack() as stack:
+        for _ in range(16):
+            await stack.enter_async_context(limiter.acquire("official-smoke-key"))
+
+        with pytest.raises(HTTPException) as failure:
+            async with limiter.acquire("official-smoke-key"):
+                pass
+
+    assert failure.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_default_app_limiter_does_not_throttle_one_hundred_request_smoke_window() -> None:
+    """官网同一阶段的 100 条 Smoke 请求不能被旧的 60/分钟上限截断。"""
+    configured = Settings(database_url="postgresql+psycopg://unused/masm")
+    limiter = build_request_limiter(configured)
+
+    for _ in range(100):
+        async with limiter.acquire("official-smoke-key"):
+            pass
 
 
 @pytest.mark.asyncio

@@ -70,6 +70,8 @@ def test_official_profiles_reject_wrong_models_and_non_https_urls(
         ("model_timeout_seconds", 0.0),
         ("model_max_attempts", 0),
         ("model_max_attempts", 3),
+        ("max_concurrent_requests", 0),
+        ("max_requests_per_minute", 0),
     ],
 )
 def test_model_limits_require_positive_dimensions_timeout_and_one_or_two_attempts(
@@ -101,6 +103,8 @@ def test_from_env_reads_runtime_provider_configuration(monkeypatch: pytest.Monke
         "MASM_EMBEDDING_DIMENSIONS": "1024",
         "MASM_MODEL_TIMEOUT_SECONDS": "45.5",
         "MASM_MODEL_MAX_ATTEMPTS": "1",
+        "MASM_MAX_CONCURRENT_REQUESTS": "16",
+        "MASM_MAX_REQUESTS_PER_MINUTE": "1000",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -113,6 +117,8 @@ def test_from_env_reads_runtime_provider_configuration(monkeypatch: pytest.Monke
     assert settings.embedding_dimensions == 1024
     assert settings.model_timeout_seconds == 45.5
     assert settings.model_max_attempts == 1
+    assert settings.max_concurrent_requests == 16
+    assert settings.max_requests_per_minute == 1000
 
 
 def test_fused_text_flag_is_off_unless_explicitly_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

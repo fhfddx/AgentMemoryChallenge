@@ -24,6 +24,15 @@ from masm.storage.db import Database
 from masm.storage.repositories import MemoryRepository
 
 
+def build_request_limiter(settings: Settings) -> RequestLimiter:
+    """按部署声明构造限流器，避免官方并发被应用默认值提前拒绝。"""
+    return RequestLimiter(
+        max_concurrent=settings.max_concurrent_requests,
+        max_requests_per_window=settings.max_requests_per_minute,
+        window_seconds=60.0,
+    )
+
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
     try:
@@ -48,7 +57,7 @@ def create_app(
     application.state.settings = settings
     application.state.database = database or Database.create(settings.database_url)
     application.state.asset_store = asset_store or AssetStore(settings.asset_dir)
-    application.state.limiter = limiter or RequestLimiter()
+    application.state.limiter = limiter or build_request_limiter(settings)
     repository = MemoryRepository(application.state.database)
     runtime = build_runtime(
         settings,
