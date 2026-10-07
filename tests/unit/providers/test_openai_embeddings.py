@@ -1,13 +1,14 @@
 """OpenAI-compatible 文本 Embedding Provider 契约测试。"""
 
 import json
+import logging
 import math
 import traceback
 
 import httpx
 import pytest
 
-from masm.providers.errors import ProviderResponseError, ProviderUnavailableError
+from masm.providers.errors import ProviderError, ProviderResponseError, ProviderUnavailableError
 from masm.providers.openai_embeddings import OpenAICompatibleEmbeddingProvider
 
 
@@ -135,6 +136,71 @@ def test_embedding_error_never_contains_secret_or_response_body() -> None:
     assert "embedding-secret" not in rendered
     assert "private-provider-body" not in rendered
     assert "sensitive input" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_category", "expected_status", "expected_retry_after"),
+    [
+        ("http_status", "http_status", 429, 23.0),
+        ("timeout", "timeout", None, None),
+        ("transport", "transport", None, None),
+        ("invalid_response", "invalid_response", None, None),
+    ],
+)
+def test_embedding_failure_diagnostics_classify_attempt_without_leaking_payload(
+    caplog: pytest.LogCaptureFixture,
+    failure_kind: str,
+    expected_category: str,
+    expected_status: int | None,
+    expected_retry_after: float | None,
+) -> None:
+    """Embedding 失败必须可分类，同时不记录输入、响应、URL 或密钥。"""
+    private_response = "private-vector-response"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure_kind == "http_status":
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "23"},
+                json={"error": private_response},
+            )
+        if failure_kind == "timeout":
+            raise httpx.ReadTimeout(private_response, request=request)
+        if failure_kind == "transport":
+            raise httpx.ConnectError(private_response, request=request)
+        return httpx.Response(
+            200,
+            json={"data": [{"index": 0, "embedding": [0.1, private_response]}]},
+        )
+
+    caplog.set_level(logging.WARNING, logger="masm.provider")
+    provider = _provider(handler, max_attempts=1)
+    with pytest.raises(ProviderError):
+        provider.embed_texts(["private-embedding-input"])
+
+    diagnostics = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "masm.provider"
+    ]
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic["event"] == "provider.failed"
+    assert diagnostic["provider"] == "embedding"
+    assert diagnostic["attempt"] == 1
+    assert diagnostic["error_category"] == expected_category
+    assert diagnostic.get("status_code") == expected_status
+    assert diagnostic.get("retry_after_seconds") == expected_retry_after
+    assert diagnostic["latency_ms"] >= 0
+
+    rendered = caplog.text
+    for secret in (
+        private_response,
+        "private-embedding-input",
+        "embeddings.invalid",
+        "embedding-secret",
+    ):
+        assert secret not in rendered
 
 
 def test_embedding_invalid_payload_is_absent_from_full_traceback() -> None:

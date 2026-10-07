@@ -15,6 +15,11 @@ from typing import Any, TypeVar
 import httpx
 from pydantic import BaseModel
 
+from masm.providers.diagnostics import (
+    ProviderKind,
+    classify_provider_failure,
+    emit_provider_failure,
+)
 from masm.providers.errors import ProviderResponseError, ProviderUnavailableError
 from masm.schemas.content import ContentPart, TextPart
 
@@ -187,12 +192,29 @@ class OpenAICompatibleLLM(StructuredLLM):
         transport_failure = False
 
         for attempt in range(1, attempts + 1):
+            attempt_started = time.perf_counter()
             try:
                 result = self._post(body, output_type, timeout)
-            except httpx.HTTPError:
+            except httpx.HTTPError as exc:
                 transport_failure = True
-            except (ValueError, KeyError, IndexError, TypeError):
+                emit_provider_failure(
+                    classify_provider_failure(
+                        provider=ProviderKind.LLM,
+                        attempt=attempt,
+                        latency_ms=(time.perf_counter() - attempt_started) * 1000.0,
+                        error=exc,
+                    )
+                )
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
                 transport_failure = False
+                emit_provider_failure(
+                    classify_provider_failure(
+                        provider=ProviderKind.LLM,
+                        attempt=attempt,
+                        latency_ms=(time.perf_counter() - attempt_started) * 1000.0,
+                        error=exc,
+                    )
+                )
             else:
                 self._record(
                     request,
