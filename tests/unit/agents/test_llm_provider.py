@@ -4,6 +4,7 @@
 """
 
 import json
+import logging
 import traceback
 
 import httpx
@@ -284,6 +285,78 @@ def test_http_error_status_is_retried_once() -> None:
         _llm(handler).complete_json(_request(payload={}), PerceptionResult)
 
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_category", "expected_status", "expected_retry_after"),
+    [
+        ("http_status", "http_status", 429, 17.0),
+        ("timeout", "timeout", None, None),
+        ("transport", "transport", None, None),
+        ("invalid_response", "invalid_response", None, None),
+    ],
+)
+def test_llm_failure_diagnostics_classify_attempt_without_leaking_payload(
+    caplog: pytest.LogCaptureFixture,
+    failure_kind: str,
+    expected_category: str,
+    expected_status: int | None,
+    expected_retry_after: float | None,
+) -> None:
+    """失败尝试必须可分类，同时不记录请求、响应、URL 或密钥。"""
+    private_response = "private-provider-response"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure_kind == "http_status":
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "17"},
+                json={"error": private_response},
+            )
+        if failure_kind == "timeout":
+            raise httpx.ReadTimeout(private_response, request=request)
+        if failure_kind == "transport":
+            raise httpx.ConnectError(private_response, request=request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": private_response}}]},
+        )
+
+    caplog.set_level(logging.WARNING, logger="masm.provider")
+    llm = _llm(handler, max_attempts=1)
+    with pytest.raises(ProviderError):
+        llm.complete_json(
+            _request(
+                prompt="private-system-prompt",
+                payload={"content": "private-user-content"},
+            ),
+            PerceptionResult,
+        )
+
+    diagnostics = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "masm.provider"
+    ]
+    assert len(diagnostics) == 1
+    diagnostic = diagnostics[0]
+    assert diagnostic["event"] == "provider.failed"
+    assert diagnostic["provider"] == "llm"
+    assert diagnostic["attempt"] == 1
+    assert diagnostic["error_category"] == expected_category
+    assert diagnostic.get("status_code") == expected_status
+    assert diagnostic.get("retry_after_seconds") == expected_retry_after
+    assert diagnostic["latency_ms"] >= 0
+
+    rendered = caplog.text
+    for secret in (
+        private_response,
+        "private-system-prompt",
+        "private-user-content",
+        "models.invalid",
+        "test-key",
+    ):
+        assert secret not in rendered
 
 
 def test_llm_provider_errors_share_sanitized_boundary() -> None:

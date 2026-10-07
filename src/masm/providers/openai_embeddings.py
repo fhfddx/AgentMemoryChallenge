@@ -9,6 +9,11 @@ from typing import Any
 
 import httpx
 
+from masm.providers.diagnostics import (
+    ProviderKind,
+    classify_provider_failure,
+    emit_provider_failure,
+)
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.errors import ProviderResponseError, ProviderUnavailableError
 
@@ -81,12 +86,29 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
         started = time.perf_counter()
         unavailable = False
         for attempt in range(1, self._max_attempts + 1):
+            attempt_started = time.perf_counter()
             try:
                 result = self._post(body, len(inputs))
-            except httpx.HTTPError:
+            except httpx.HTTPError as exc:
                 unavailable = True
-            except (KeyError, TypeError, ValueError):
+                emit_provider_failure(
+                    classify_provider_failure(
+                        provider=ProviderKind.EMBEDDING,
+                        attempt=attempt,
+                        latency_ms=(time.perf_counter() - attempt_started) * 1000.0,
+                        error=exc,
+                    )
+                )
+            except (KeyError, TypeError, ValueError) as exc:
                 unavailable = False
+                emit_provider_failure(
+                    classify_provider_failure(
+                        provider=ProviderKind.EMBEDDING,
+                        attempt=attempt,
+                        latency_ms=(time.perf_counter() - attempt_started) * 1000.0,
+                        error=exc,
+                    )
+                )
             else:
                 self._record(inputs, attempt, started, succeeded=True)
                 return result
