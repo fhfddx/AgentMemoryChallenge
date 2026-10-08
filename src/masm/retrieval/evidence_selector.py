@@ -75,16 +75,17 @@ class DeterministicEvidenceSelector:
         )
 
 
-def _question_text(query: str | Sequence[ContentPart]) -> tuple[str, bool]:
+def _question_text(query: str | Sequence[ContentPart]) -> tuple[str, bool, bool]:
     if isinstance(query, str):
-        return query.strip()[:MAX_QUESTION_CHARS], False
+        text = query.strip()
+        return text[:MAX_QUESTION_CHARS], False, bool(text)
     text = " ".join(
         part.text.strip()
         for part in query
         if isinstance(part, TextPart) and part.text.strip()
     )
     visual = any(isinstance(part, ImageURLPart) for part in query)
-    return (text or "[visual query]")[:MAX_QUESTION_CHARS], visual
+    return (text or "[visual query]")[:MAX_QUESTION_CHARS], visual, bool(text)
 
 
 def _source_labels(pool: Sequence[RankedEvidence]) -> list[str]:
@@ -146,7 +147,11 @@ class EvidenceSelector:
         if not pool:
             return SelectionResult((), 0, 0, 0, False, True)
 
-        question, visual = _question_text(query)
+        question, visual, has_text = _question_text(query)
+        if visual and not has_text:
+            # A text-only selector cannot judge the query image from a placeholder.
+            # Preserve only question-admitted image/semantic anchors instead.
+            return self._fallback(ranked, strong_anchor_ids, len(pool), source_count, "none")
         payload = {
             "question": question,
             "visual_query_present": visual,
@@ -217,7 +222,7 @@ class EvidenceSelector:
         strong_anchor_ids: Collection[UUID],
         candidate_count: int,
         source_count: int,
-        category: Literal["unavailable", "invalid_output"],
+        category: Literal["none", "unavailable", "invalid_output"],
     ) -> SelectionResult:
         anchors = set(strong_anchor_ids)
         admitted = [item for item in ranked if item.memory_id in anchors]

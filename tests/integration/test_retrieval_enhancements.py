@@ -736,3 +736,16 @@ def test_selector_restores_original_multimodal_message_after_selection(
     assert isinstance(content, list)
     assert [part.type for part in content] == ["text", "image_url", "text"]
     assert base64.b64decode(content[1].image_url.url.split(",", 1)[1]) == image_bytes
+
+    # No text describes the image query to the selector, so retain admitted
+    # image hits without sending an uninformed selection request.
+    requests_before = len(llm.requests)
+    pure_visual = app.state.search_service.search(
+        SearchRequest(
+            query=[{"type": "image_url", "image_url": {"url": image_url}}],
+            user_id=user_id,
+            top_k=10,
+        )
+    )
+    assert any(isinstance(item.content, list) for item in pure_visual.data)
+    assert len(llm.requests) == requests_before

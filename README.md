@@ -36,6 +36,7 @@ v1.1 的 `official-masm` Search 先按原问题召回，不把多选项当作独
 证据不足时可返回空列表。候选文本会发给该 Provider：单条默认最多 1200 字符、配置上限
 4096 字符；问题、选项和候选总数也有硬上限，原图字节不会发送给证据选择器。选择失败时
 Search 保持 HTTP 200，只退回原问题信号准入的短证据列表，不把模型异常正文写入日志。
+纯图片查询因选择器无法看到查询图像，同样使用已通过图片/语义相关性门槛的短证据列表。
 这会增加一次 Search 的模型费用与延迟；默认 `local-fake` 不调用它，`official-baseline` 不启用它。
 运维参数见 `.env.example` 中的 `MASM_EVIDENCE_SELECTOR_ENABLED`、
 `MASM_SELECTOR_MAX_CANDIDATES`、`MASM_SELECTOR_MAX_SELECTED`、

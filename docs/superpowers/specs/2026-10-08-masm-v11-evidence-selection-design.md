@@ -126,6 +126,12 @@ Each selector candidate contains:
 The selector does not receive raw image bytes. It receives the stored canonical text or description;
 original media is rehydrated only after selection.
 
+Implementation ruling: for a pure-image query with no question text, the text-only selector cannot
+assess the query image from a placeholder. It skips the model call and uses the same bounded,
+question-admitted shortlist as deterministic fallback. Mixed text-and-image queries still use the
+selector, without sending image bytes. This preserves prior image recall rather than allowing an
+uninformed sufficiency decision to erase it.
+
 ## Selector contract
 
 Introduce a focused retrieval component, tentatively `EvidenceSelector`, backed by the existing

@@ -9,7 +9,7 @@ from masm.providers.fakes import FakeStructuredLLM
 from masm.providers.llm import ModelUnavailableError, StructuredOutputError
 from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.reranker import RankedEvidence
-from masm.schemas.content import ImageURLPart
+from masm.schemas.content import ImageURLPart, TextPart
 
 
 def _evidence(number: int, source: str, content: str) -> RankedEvidence:
@@ -122,16 +122,36 @@ def test_selector_payload_is_bounded_text_and_never_contains_image_bytes() -> No
     candidate = _evidence(1, "private-request-id", "X" * 1300)
     visual = ImageURLPart(image_url={"url": "data:image/png;base64,cHJpdmF0ZS1ieXRlcw=="})
 
-    EvidenceSelector(llm).select([visual], ["option"], [candidate], {candidate.memory_id})
+    EvidenceSelector(llm).select(
+        [TextPart(text="What is shown?"), visual], ["option"],
+        [candidate], {candidate.memory_id},
+    )
 
     payload = llm.requests[0].payload
     assert payload["visual_query_present"] is True
-    assert payload["question"] == "[visual query]"
+    assert payload["question"] == "What is shown?"
     assert len(payload["candidates"][0]["text"]) == 1200
     assert payload["candidates"][0]["source_group"] == "source-1"
     serialized = json.dumps(payload)
     assert "private-request-id" not in serialized
     assert "cHJpdmF0ZS1ieXRlcw==" not in serialized
+
+
+def test_pure_visual_query_preserves_image_recall_without_uninformed_model_call() -> None:
+    visual = ImageURLPart(image_url={"url": "data:image/png;base64,cHJpdmF0ZS1ieXRlcw=="})
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
+    anchor = _evidence(1, "image-request", "a blue bicycle beside a tree")
+    relation_only = _evidence(2, "related-request", "unverified related context")
+
+    result = EvidenceSelector(llm).select(
+        [visual], None, [anchor, relation_only], {anchor.memory_id}
+    )
+
+    assert result.evidence == (anchor,)
+    assert result.fallback is True
+    assert result.failure_category == "none"
+    assert result.abstained is False
+    assert llm.requests == []
 
 
 def test_empty_pool_abstains_without_model_request() -> None:
