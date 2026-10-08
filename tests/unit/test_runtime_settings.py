@@ -83,6 +83,7 @@ def test_official_profiles_reject_wrong_models_and_non_https_urls(
         ("selector_max_selected", 0),
         ("selector_max_selected", 13),
         ("selector_max_chars_per_candidate", 0),
+        ("selector_max_chars_per_candidate", 4097),
         ("selector_timeout_seconds", 0.0),
         ("selector_timeout_seconds", float("inf")),
         ("selector_timeout_seconds", 31.0),

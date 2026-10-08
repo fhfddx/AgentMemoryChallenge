@@ -16,6 +16,7 @@ from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 PROMPT_VERSION = "evidence-selector-v1"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
+MAX_CHARS_PER_CANDIDATE = 4096
 MAX_QUESTION_CHARS = 4000
 MAX_OPTIONS = 16
 MAX_OPTION_CHARS = 512
@@ -121,8 +122,8 @@ class EvidenceSelector:
             raise ValueError("max_candidates must be in 1..32")
         if not 1 <= max_selected <= min(max_candidates, MAX_SELECTED_EVIDENCE):
             raise ValueError("max_selected must be in 1..12 and <= max_candidates")
-        if max_chars_per_candidate < 1:
-            raise ValueError("max_chars_per_candidate must be positive")
+        if not 1 <= max_chars_per_candidate <= MAX_CHARS_PER_CANDIDATE:
+            raise ValueError("max_chars_per_candidate must be in 1..4096")
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive")
         self._llm = llm

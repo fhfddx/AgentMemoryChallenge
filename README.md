@@ -31,6 +31,17 @@ Commit、镜像 digest 与独立部署完成前没有可申报的公网端点。
 图片在正式档位中先由 `gpt-4o-mini` 提取可观察描述、OCR、实体和关键词，再与文本一起进入
 `text-embedding-v4` 向量空间。Embedding 依赖不可用时 Add/Search 返回脱敏的 HTTP 503。
 
+v1.1 的 `official-masm` Search 先按原问题召回，不把多选项当作独立检索词；随后最多额外调用
+一次已有的 `gpt-4o-mini` Provider，只让模型从至多 32 条候选中选择至多 12 条原始证据，
+证据不足时可返回空列表。候选文本会发给该 Provider：单条默认最多 1200 字符、配置上限
+4096 字符；问题、选项和候选总数也有硬上限，原图字节不会发送给证据选择器。选择失败时
+Search 保持 HTTP 200，只退回原问题信号准入的短证据列表，不把模型异常正文写入日志。
+这会增加一次 Search 的模型费用与延迟；默认 `local-fake` 不调用它，`official-baseline` 不启用它。
+运维参数见 `.env.example` 中的 `MASM_EVIDENCE_SELECTOR_ENABLED`、
+`MASM_SELECTOR_MAX_CANDIDATES`、`MASM_SELECTOR_MAX_SELECTED`、
+`MASM_SELECTOR_MAX_CHARS_PER_CANDIDATE`、`MASM_SELECTOR_TIMEOUT_SECONDS` 和
+`MASM_MIN_LEXICAL_RANK`。正式发布前应核对现有 Provider 的数据处理政策及预算。
+
 ## 技术栈
 
 Python 3.11+、FastAPI、Pydantic v2、PostgreSQL + pgvector、本地持久卷对象存储、HTTPX。

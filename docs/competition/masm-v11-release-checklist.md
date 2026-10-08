@@ -446,3 +446,78 @@ pgvector/pg16 临时库迁移到 `0005` 后，全量 **613 passed、74 warnings�
 两个非阻塞 Minor 暂缓：价格卡 `source` 可接受纯空白、旧文档较早段落仍保留
 后文已覆盖的谨慎表述。固定 Commit、干净导出构建、最终镜像 digest 和容器契约
 复验仍是 Gate 3 的下一步；本节不授权推送、云端、生产库、容量或官方评测。
+
+## 30. v1.1 精确证据选择候选的发布门槛（2026-10-09）
+
+本节针对 `docs/superpowers/specs/2026-10-08-masm-v11-evidence-selection-design.md`，
+不追认上文的历史候选为当前线上版本。当前已观察到的上一轮公开 Smoke 为总分
+23.08，检索 66.67、原子检索 100、直接召回 0、跨会话推理 0、弃答 11.11。
+新候选的目标是公开 v1.1 Smoke ≥50，**本机回归不能证明这个目标已达到**。
+本机候选回归为 **724 passed、1 skipped、92 warnings**；Ruff、mypy（58 个源码文件）、
+Compose 占位配置解析及差异检查均退出 0。跳过项仅在 POSIX 上验证权限语义，
+警告主要来自现有依赖弃用；这些结果不等于真实 Provider、容量或公网验证。
+
+发布前必须从推送到公开仓库的固定 Commit 克隆到新的固定来源目录，核对
+`rev-parse HEAD` 与干净工作树，记录完整 Commit、镜像 ID、旧 API 容器 ID、
+数据库容器 ID、旧镜像与旧 Compose 文件路径。新镜像必须使用不可变标签；不要
+覆盖旧镜像标签或原位修改旧来源目录。`docker compose config --images` 可检查
+镜像选择；不要把包含密钥的完整 Compose 配置输出到聊天或公开日志。新候选
+无数据库迁移，只替换 API 容器，不重建 PostgreSQL、资产卷或 Caddy。
+
+服务器终端先执行下面的只读预检；把 `<完整候选Commit>` 替换成最终推送的
+40 位 SHA。若线上镜像/配置与预期不符，停止，不按截图猜测路径：
+
+```bash
+CANDIDATE_SHA='<完整候选Commit>'
+SHORT="$(printf '%s' "$CANDIDATE_SHA" | cut -c1-7)"
+OLD_API="$(docker inspect -f '{{.Id}}' masm-v11-api-1)"
+OLD_DB="$(docker inspect -f '{{.Id}}' masm-v11-postgres-1)"
+docker inspect masm-v11-api-1 --format 'old_image={{.Config.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} config_files={{index .Config.Labels "com.docker.compose.project.config_files"}}'
+docker inspect masm-v11-postgres-1 --format 'db_image={{.Config.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'
+```
+
+已知上一候选是 `masm-v11-final-candidate:cd9df2c`；以下步骤仅在预检确认
+它仍是当前 API 镜像，且旧覆盖文件确实为
+`/opt/masm-v11/config/image.override.cd9df2c.yml` 时适用。`git clone` 与
+构建成功后，先核对 `SOURCE_OK`、`IMAGE_OK`、新旧覆盖文件仅镜像标签不同，
+再由操作者执行重建 API 的命令：
+
+```bash
+R="/opt/recovery-$SHORT"
+ENV=/opt/masm-v11/config/v11.env
+OLD_OVERRIDE=/opt/masm-v11/config/image.override.cd9df2c.yml
+NEW_OVERRIDE="/opt/masm-v11/config/image.override.$SHORT.yml"
+test ! -e "$R" && git clone -b codex/masm-v11-evidence-selector --single-branch https://github.com/fhfddx/AgentMemoryChallenge "$R"
+test "$(git -C "$R" rev-parse HEAD)" = "$CANDIDATE_SHA" && test -z "$(git -C "$R" status --porcelain)" && echo SOURCE_OK
+docker build --pull=false -t "masm-v11-final-candidate:$SHORT" "$R"
+docker image inspect "masm-v11-final-candidate:$SHORT" --format 'IMAGE_OK id={{.Id}} size={{.Size}}'
+test -f "$OLD_OVERRIDE" && grep -q 'masm-v11-final-candidate:cd9df2c' "$OLD_OVERRIDE" && sed "s/masm-v11-final-candidate:cd9df2c/masm-v11-final-candidate:$SHORT/" "$OLD_OVERRIDE" > "$NEW_OVERRIDE"
+diff -u "$OLD_OVERRIDE" "$NEW_OVERRIDE"
+docker compose --project-name masm-v11 --env-file "$ENV" -f "$R/deployments/docker-compose.v11.yml" -f "$NEW_OVERRIDE" config --images
+```
+
+上面的 `diff` 因预期的镜像标签变化会返回 1；须人工确认没有第二处差异，
+再执行：
+
+```bash
+docker compose --project-name masm-v11 --env-file "$ENV" -f "$R/deployments/docker-compose.v11.yml" -f "$NEW_OVERRIDE" up -d --no-deps api
+test "$OLD_API" != "$(docker inspect -f '{{.Id}}' masm-v11-api-1)" && echo API_REPLACED
+test "$OLD_DB" = "$(docker inspect -f '{{.Id}}' masm-v11-postgres-1)" && echo DB_UNCHANGED
+docker inspect masm-v11-api-1 --format 'new_image={{.Config.Image}} status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'
+docker exec masm-v11-api-1 python -c 'from masm.providers.openai_embeddings import MAX_BATCH_SIZE; print("BATCH_LIMIT_OK", MAX_BATCH_SIZE)'
+curl -fsS https://v11.agentmemorydev.icu/health
+```
+
+如模块检查中的导入路径与候选源码不同，改用镜像内对应模块做只读检查；
+不得把该检查的失败忽略为部署成功。还须检查内部 `GET /health`、最近日志
+没有新增 5xx/密钥/请求正文泄漏，并用唯一前缀的合成用户做一次正例、一次
+无关问题弃答验证。Provider 故障回退已由本机自动化测试覆盖；不要为了验证
+回退而修改生产密钥或中断生产 Provider。合成探针使用既有
+`scripts/delete_evaluation_run.py` 按精确 `user_id`/`request_id` 清理，随后
+以只读 SQL 和资产目录检查零残留；清理前后均不得打印样本正文与密钥。
+
+仅当镜像 ID、API 健康、数据库 ID 不变、探针清理为零全部通过后，在官网运行
+**一次** v1.1 Smoke；只对照公开聚合分数，不读取隐藏题目、答案或私有运行数据。
+若未达 50，保留旧镜像和配置以便回滚，先基于公开聚合结果定位，不反复定向调参。
+回滚时使用预检记录的旧 Compose 文件与 `$OLD_OVERRIDE`，同样只运行
+`up -d --no-deps api`，并再次核对 `$OLD_DB` 不变及内部/外部健康。

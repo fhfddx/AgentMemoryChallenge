@@ -78,6 +78,45 @@ def test_multi_source_question_keeps_both_selected_original_facts() -> None:
     assert result.selected_source_count == 2
 
 
+def test_atomic_fact_survives_even_when_its_rank_exceeds_response_cap() -> None:
+    ranked = [_evidence(number, f"source-{number}", f"fact {number}") for number in range(1, 15)]
+    llm = FakeStructuredLLM([{"selected_indices": [12], "sufficient_evidence": True}])
+
+    result = EvidenceSelector(llm, max_candidates=14).select(
+        "Which exact fact is needed?", None, ranked, {item.memory_id for item in ranked}
+    )
+
+    assert result.evidence == (ranked[12],)
+    assert result.fallback is False
+    assert result.candidate_count == 14
+
+
+@pytest.mark.parametrize(
+    ("question", "options", "content"),
+    [
+        ("What color was Alice's notebook?", ["blue", "green"], "Bob drove a blue car"),
+        ("What did Alice buy?", None, "Alice visited Paris"),
+    ],
+)
+def test_option_only_or_entity_only_memory_abstains(
+    question: str, options: list[str] | None, content: str
+) -> None:
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
+    candidate = _evidence(1, "source-a", content)
+
+    result = EvidenceSelector(llm).select(question, options, [candidate], {candidate.memory_id})
+
+    assert result.evidence == ()
+    assert result.abstained is True
+    assert result.fallback is False
+    assert llm.requests[0].payload["question"] == question
+
+
+def test_candidate_text_limit_cannot_be_configured_above_hard_cap() -> None:
+    with pytest.raises(ValueError, match="max_chars_per_candidate"):
+        EvidenceSelector(FakeStructuredLLM(), max_chars_per_candidate=4097)
+
+
 def test_selector_payload_is_bounded_text_and_never_contains_image_bytes() -> None:
     llm = FakeStructuredLLM([{"selected_indices": [0], "sufficient_evidence": True}])
     candidate = _evidence(1, "private-request-id", "X" * 1300)

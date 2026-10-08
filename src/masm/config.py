@@ -100,8 +100,8 @@ class Settings:
             raise ValueError("证据筛选候选上限必须在 1..32 内")
         if not 1 <= self.selector_max_selected <= min(self.selector_max_candidates, 12):
             raise ValueError("证据返回上限必须在 1..12 内且不大于候选上限")
-        if self.selector_max_chars_per_candidate < 1:
-            raise ValueError("证据候选文字上限必须为正整数")
+        if not 1 <= self.selector_max_chars_per_candidate <= 4096:
+            raise ValueError("证据候选文字上限必须在 1..4096 内")
         if (
             not math.isfinite(self.selector_timeout_seconds)
             or not 0.0 < self.selector_timeout_seconds <= self.model_timeout_seconds
