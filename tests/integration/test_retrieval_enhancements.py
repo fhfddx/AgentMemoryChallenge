@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from PIL import Image
 from sqlalchemy import delete, select, update
 
+from masm.api.app import create_app
 from masm.providers.reranker import RerankerProvider
 from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever, ParsedQuery
 from masm.retrieval.query_analyzer import QueryAnalyzer
@@ -584,3 +585,45 @@ def test_source_snapshots_are_batched_deduplicated_and_user_scoped(
     assert object_uri in snapshot.assets
     assert snapshot.assets[object_uri].media_type == "image/png"
     assert repository.source_messages_for_positions(other_user, [(request_id, 0)]) == {}
+
+
+def test_application_search_returns_original_ordered_multimodal_message(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("u")
+    request_id = _uid("render")
+    image_bytes, image_url = _png_data_url()
+    app = create_app(
+        settings,
+        database=database,
+        asset_store=asset_store,
+        embeddings=embeddings,
+    )
+    app.state.add_service.add(
+        AddRequest(
+            request_id=request_id,
+            user_id=user_id,
+            session_id="session-render",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "visual needle before"},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "visual needle after"},
+                    ],
+                }
+            ],
+        )
+    )
+
+    response = app.state.search_service.search(
+        SearchRequest(query="visual needle", user_id=user_id, top_k=2)
+    )
+
+    content = next(item.content for item in response.data if isinstance(item.content, list))
+    assert isinstance(content, list)
+    assert [part.type for part in content] == ["text", "image_url", "text"]
+    assert content[0].text == "visual needle before"
+    assert base64.b64decode(content[1].image_url.url.split(",", 1)[1]) == image_bytes
+    assert content[2].text == "visual needle after"

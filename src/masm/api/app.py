@@ -15,6 +15,7 @@ from masm.config import Settings
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.llm import StructuredLLM
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
+from masm.retrieval.evidence_renderer import EvidenceRenderer
 from masm.retrieval.response_packer import ResponsePacker
 from masm.runtime import build_runtime
 from masm.services.add_service import AddService
@@ -89,6 +90,11 @@ def create_app(
         expander=runtime.relation_expander,
         reranker=runtime.reranker,
         relevance_gate=runtime.relevance_gate,
+        renderer=EvidenceRenderer(
+            repository,
+            application.state.asset_store,
+            max_image_bytes=settings.max_image_bytes,
+        ),
         packer=packer
         if packer is not None
         else ResponsePacker(max_bytes=settings.max_search_response_bytes),
