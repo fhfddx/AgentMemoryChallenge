@@ -5,10 +5,12 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 from uuid import UUID
 
 from masm.providers.reranker import RerankerProvider, resolve_rerank_input
 from masm.retrieval.baseline import ParsedQuery
+from masm.schemas.content import ContentPart
 from masm.storage.types import MemoryCandidate
 
 # 最终证据上限与 Provider 输入上限分离，保持公开 top_k=100 契约。
@@ -21,7 +23,6 @@ _RELATION_BONUS = 0.05
 _CONFLICT_BONUS = 0.05
 _DUPLICATE_PENALTY = 0.20
 _PROVIDER_WEIGHT = 0.30
-_MESSAGE_BONUS = 0.05
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ class RankedEvidence:
 
     memory_id: UUID
     user_id: str
-    content: str
+    content: str | list[ContentPart]
     score: float
     rank: int
     matched_entities: Sequence[str] = ()
@@ -45,6 +46,9 @@ class RankedEvidence:
     duplicate_of: UUID | None = None
     provider_score: float | None = None
     metadata: Mapping[str, float] = field(default_factory=dict)
+    granularity: Literal["context", "message"] = "context"
+    request_id: str = ""
+    source_position: int | None = None
 
 
 class EvidenceReranker:
@@ -89,7 +93,14 @@ class EvidenceReranker:
             scored.append(
                 self._score(query, candidate, provider_scores[index], group_counts)
             )
-        scored.sort(key=lambda item: (-item.score, str(item.memory_id)))
+        granularity = {candidate.memory_id: candidate.granularity for candidate in pool}
+        scored.sort(
+            key=lambda item: (
+                -item.score,
+                0 if granularity[item.memory_id] == "message" else 1,
+                str(item.memory_id),
+            )
+        )
 
         ranked: list[RankedEvidence] = []
         seen_groups: set[UUID] = set()
@@ -115,6 +126,9 @@ class EvidenceReranker:
                     duplicate_of=evidence.duplicate_of,
                     provider_score=evidence.provider_score,
                     metadata=evidence.metadata,
+                    granularity=evidence.granularity,
+                    request_id=evidence.request_id,
+                    source_position=evidence.source_position,
                 )
             )
         return ranked
@@ -153,7 +167,8 @@ class EvidenceReranker:
         rest = sorted(
             (item for key, item in by_id.items() if key not in selected_ids),
             key=lambda item: (
-                -(item.score + (_MESSAGE_BONUS if item.granularity == "message" else 0.0)),
+                -item.score,
+                0 if item.granularity == "message" else 1,
                 str(item.memory_id),
             ),
         )
@@ -187,9 +202,6 @@ class EvidenceReranker:
         )
 
         score = candidate.score
-        if candidate.granularity == "message":
-            # 短的、可追溯的消息证据不应被同源长上下文淹没。
-            score += _MESSAGE_BONUS
         score += _ENTITY_BONUS * min(len(entities), 3)
         score += _LOCATION_BONUS * min(len(locations), 3)
         score += _RELATION_BONUS * min(len(relations), 3)
@@ -221,7 +233,10 @@ class EvidenceReranker:
             conflict_group_id=group_id,
             duplicate_of=candidate.duplicate_of,
             provider_score=provider_score,
-            metadata={"base_score": candidate.score},
+            metadata={"base_score": candidate.score, **candidate.retrieval_signals},
+            granularity=candidate.granularity,
+            request_id=candidate.request_id,
+            source_position=candidate.source_position,
         )
 
     def _provider_scores(

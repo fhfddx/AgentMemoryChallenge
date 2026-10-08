@@ -205,6 +205,49 @@ def test_message_precedes_same_run_context() -> None:
     assert [item.memory_id for item in ranked] == [message.memory_id, context.memory_id]
 
 
+def test_message_granularity_does_not_overpower_higher_relevance() -> None:
+    context = _candidate("relevant context", score=0.60, request_id="run-1")
+    message = _candidate(
+        "weaker message", score=0.59, granularity="message",
+        request_id="run-1", source_position=0,
+    )
+
+    ranked = EvidenceReranker().rank(
+        ParsedQuery(text_queries=("query",)), [message, context]
+    )
+
+    assert [item.memory_id for item in ranked] == [context.memory_id, message.memory_id]
+    assert [item.score for item in ranked] == [0.60, 0.59]
+
+
+def test_ranked_metadata_preserves_raw_retrieval_signals() -> None:
+    candidate = _candidate(
+        "matched", score=0.5,
+        retrieval_signals={"lexical": 0.2, "text_vector": 0.7},
+    )
+
+    ranked = EvidenceReranker().rank(ParsedQuery(text_queries=("matched",)), [candidate])
+
+    assert ranked[0].metadata == {
+        "base_score": 0.5,
+        "lexical": 0.2,
+        "text_vector": 0.7,
+    }
+
+
+def test_ranked_evidence_preserves_source_provenance_for_rendering() -> None:
+    candidate = _candidate(
+        "message summary", score=0.5, granularity="message",
+        request_id="run-9", source_position=3,
+    )
+
+    ranked = EvidenceReranker().rank(ParsedQuery(text_queries=("message",)), [candidate])
+
+    assert ranked[0].granularity == "message"
+    assert ranked[0].request_id == "run-9"
+    assert ranked[0].source_position == 3
+
+
 def test_top_100_prefers_distinct_message_positions_over_same_run_parent() -> None:
     context = _candidate(
         "needle parent", score=0.5, memory_id=UUID(int=0), request_id="run-1"

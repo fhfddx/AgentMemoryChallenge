@@ -11,7 +11,18 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import Connection, CursorResult, Engine, delete, func, or_, select, text, update
+from sqlalchemy import (
+    Connection,
+    CursorResult,
+    Engine,
+    delete,
+    func,
+    or_,
+    select,
+    text,
+    tuple_,
+    update,
+)
 from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -40,6 +51,8 @@ from masm.storage.types import (
     MemoryBundle,
     MemoryCandidate,
     ObjectDeletionOutcome,
+    SourceMessageSnapshot,
+    StoredAssetSnapshot,
     ValidatedActions,
 )
 
@@ -1653,6 +1666,72 @@ class MemoryRepository:
                 .limit(min(limit, 256))
             ).scalars().all()
         return [self._memory_candidate(row) for row in rows]
+
+    def source_messages_for_positions(
+        self, user_id: str, positions: Sequence[tuple[str, int]]
+    ) -> dict[tuple[str, int], SourceMessageSnapshot]:
+        """批量读取同用户的不可变来源消息与其引用的对象元数据。"""
+        keys = list(dict.fromkeys(positions))[:256]
+        if not keys:
+            return {}
+        with self._database.session() as session:
+            messages = (
+                session.execute(
+                    select(SourceMessage)
+                    .where(
+                        SourceMessage.user_id == user_id,
+                        tuple_(SourceMessage.request_id, SourceMessage.position).in_(keys),
+                    )
+                    .order_by(SourceMessage.request_id, SourceMessage.position, SourceMessage.id)
+                )
+                .scalars()
+                .all()
+            )
+            object_uris = sorted(
+                {uri for message in messages for uri in _image_object_uris(message.content)}
+            )
+            assets: Sequence[Asset] = ()
+            if object_uris:
+                assets = (
+                    session.execute(
+                        select(Asset)
+                        .where(
+                            Asset.user_id == user_id,
+                            Asset.object_uri.in_(object_uris),
+                        )
+                        .order_by(Asset.object_uri, Asset.created_at, Asset.id)
+                    )
+                    .scalars()
+                    .all()
+                )
+
+        asset_by_uri: dict[str, StoredAssetSnapshot] = {}
+        for asset in assets:
+            asset_by_uri.setdefault(
+                asset.object_uri,
+                StoredAssetSnapshot(
+                    object_uri=asset.object_uri,
+                    media_type=asset.media_type,
+                    decoded_size=asset.decoded_size,
+                    content_hash=asset.content_hash,
+                ),
+            )
+
+        snapshots: dict[tuple[str, int], SourceMessageSnapshot] = {}
+        for message in messages:
+            key = (message.request_id, message.position)
+            if key in snapshots:
+                continue
+            referenced = {
+                uri: asset_by_uri[uri]
+                for uri in _image_object_uris(message.content)
+                if uri in asset_by_uri
+            }
+            snapshots[key] = SourceMessageSnapshot(
+                content=message.content,
+                assets=referenced,
+            )
+        return snapshots
 
     @staticmethod
     def _memory_candidate(row: Memory) -> MemoryCandidate:

@@ -1,13 +1,18 @@
 """增强 Search 集成测试：真实 Repository 链路下的扩展、冲突补全与重复惩罚。"""
 
+import base64
+import io
 from uuid import UUID, uuid4
 
+from PIL import Image
 from sqlalchemy import delete, select, update
 
+from masm.api.app import create_app
 from masm.providers.reranker import RerankerProvider
 from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever, ParsedQuery
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
+from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import MAX_RERANK_CANDIDATES, EvidenceReranker
 from masm.retrieval.response_packer import ResponsePacker
 from masm.schemas.api import AddRequest, SearchRequest
@@ -31,6 +36,13 @@ def _request(request_id: str, user_id: str, text: str) -> AddRequest:
         session_id="session-1",
         messages=[{"role": "user", "content": text}],
     )
+
+
+def _png_data_url() -> tuple[bytes, str]:
+    buffer = io.BytesIO()
+    Image.new("RGB", (3, 2), (15, 25, 35)).save(buffer, format="PNG")
+    payload = buffer.getvalue()
+    return payload, f"data:image/png;base64,{base64.b64encode(payload).decode()}"
 
 
 def _seed(
@@ -194,7 +206,6 @@ def test_one_hop_expansion_enters_the_response(
     response = _enhanced(database, settings, embeddings).search(
         SearchRequest(query="anchor memory", user_id=user_id, top_k=10)
     )
-
     with database.session() as session:
         neighbour_run = session.get(Memory, neighbour_id).request_id
         neighbour_message = session.execute(
@@ -473,3 +484,146 @@ def test_same_source_content_is_not_returned_twice() -> None:
 
     assert len(response.data) == 1
     assert response.data[0].content == "Needle Fact"
+
+
+class _SignalRetriever:
+    def __init__(self, candidate: MemoryCandidate) -> None:
+        self.candidate = candidate
+
+    def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+        return [self.candidate]
+
+
+class _RecordingExpander:
+    max_seeds = 8
+
+    def __init__(self, neighbour: MemoryCandidate) -> None:
+        self.neighbour = neighbour
+        self.calls: list[list[UUID]] = []
+
+    def expand(self, user_id: str, seeds, limit: int):
+        self.calls.append([seed.memory_id for seed in seeds])
+        return [self.neighbour]
+
+
+def test_weak_nearest_neighbour_abstains_before_relation_expansion() -> None:
+    weak = MemoryCandidate(
+        memory_id=uuid4(), user_id="user-1", content="unrelated history", score=0.02,
+        retrieval_signals={"text_vector": 0.2},
+    )
+    neighbour = MemoryCandidate(
+        memory_id=uuid4(), user_id="user-1", content="related only by edge", score=0.0,
+    )
+    expander = _RecordingExpander(neighbour)
+
+    response = SearchService(
+        _SignalRetriever(weak), max_image_bytes=1024,
+        relevance_gate=RelevanceGate(), expander=expander, reranker=EvidenceReranker(),
+    ).search(SearchRequest(query="unknown topic", user_id="user-1", top_k=10))
+
+    assert response.data == []
+    assert expander.calls == []
+
+
+def test_admitted_anchor_keeps_relation_expanded_evidence() -> None:
+    anchor = MemoryCandidate(
+        memory_id=uuid4(), user_id="user-1", content="exact anchor", score=0.02,
+        retrieval_signals={"lexical": 0.01},
+    )
+    neighbour = MemoryCandidate(
+        memory_id=uuid4(), user_id="user-1", content="cross-session evidence", score=0.0,
+    )
+    expander = _RecordingExpander(neighbour)
+
+    response = SearchService(
+        _SignalRetriever(anchor), max_image_bytes=1024,
+        relevance_gate=RelevanceGate(), expander=expander, reranker=EvidenceReranker(),
+    ).search(SearchRequest(query="exact anchor", user_id="user-1", top_k=10))
+
+    assert expander.calls == [[anchor.memory_id]]
+    assert {item.id for item in response.data} == {
+        str(anchor.memory_id), str(neighbour.memory_id),
+    }
+
+
+def test_source_snapshots_are_batched_deduplicated_and_user_scoped(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("u")
+    other_user = _uid("u")
+    request_id = _uid("source")
+    _image_bytes, image_url = _png_data_url()
+    add = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    add.add(
+        AddRequest(
+            request_id=request_id,
+            user_id=user_id,
+            session_id="session-source",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "before"},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "after"},
+                    ],
+                }
+            ],
+        )
+    )
+
+    repository = MemoryRepository(database)
+    snapshots = repository.source_messages_for_positions(
+        user_id,
+        [(request_id, 0), (request_id, 0), ("missing", 0)],
+    )
+
+    assert list(snapshots) == [(request_id, 0)]
+    snapshot = snapshots[(request_id, 0)]
+    assert [part["type"] for part in snapshot.content] == ["text", "image_url", "text"]
+    object_uri = snapshot.content[1]["image_url"]["url"]
+    assert object_uri in snapshot.assets
+    assert snapshot.assets[object_uri].media_type == "image/png"
+    assert repository.source_messages_for_positions(other_user, [(request_id, 0)]) == {}
+
+
+def test_application_search_returns_original_ordered_multimodal_message(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("u")
+    request_id = _uid("render")
+    image_bytes, image_url = _png_data_url()
+    app = create_app(
+        settings,
+        database=database,
+        asset_store=asset_store,
+        embeddings=embeddings,
+    )
+    app.state.add_service.add(
+        AddRequest(
+            request_id=request_id,
+            user_id=user_id,
+            session_id="session-render",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "visual needle before"},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "visual needle after"},
+                    ],
+                }
+            ],
+        )
+    )
+
+    response = app.state.search_service.search(
+        SearchRequest(query="visual needle", user_id=user_id, top_k=2)
+    )
+
+    content = next(item.content for item in response.data if isinstance(item.content, list))
+    assert isinstance(content, list)
+    assert [part.type for part in content] == ["text", "image_url", "text"]
+    assert content[0].text == "visual needle before"
+    assert base64.b64decode(content[1].image_url.url.split(",", 1)[1]) == image_bytes
+    assert content[2].text == "visual needle after"

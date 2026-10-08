@@ -10,8 +10,10 @@ from uuid import uuid4
 
 from masm.retrieval.baseline import BaselineRetriever, ParsedQuery
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
-from masm.retrieval.query_analyzer import QueryAnalyzer
+from masm.retrieval.evidence_renderer import EvidenceRenderer
+from masm.retrieval.query_analyzer import QueryAnalyzer, with_option_variants
 from masm.retrieval.relation_expander import RelationExpander
+from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker, RankedEvidence
 from masm.retrieval.response_packer import ResponsePacker
 from masm.schemas.api import MemoryEvidence, SearchRequest, SearchResponse
@@ -30,6 +32,8 @@ class SearchService:
         analyzer: QueryAnalyzer | None = None,
         expander: RelationExpander | None = None,
         reranker: EvidenceReranker | None = None,
+        relevance_gate: RelevanceGate | None = None,
+        renderer: EvidenceRenderer | None = None,
         packer: ResponsePacker | None = None,
         runtime_profile: str = "unknown",
     ) -> None:
@@ -38,6 +42,8 @@ class SearchService:
         self._analyzer = analyzer
         self._expander = expander
         self._reranker = reranker
+        self._relevance_gate = relevance_gate
+        self._renderer = renderer
         self._packer = packer
         self._runtime_profile = runtime_profile
 
@@ -55,13 +61,17 @@ class SearchService:
             recalled = self._retriever.retrieve(request.user_id, parsed, pool_limit)
             channel_counts = {}
         candidates = [item for item in recalled if item.user_id == request.user_id]
-        if self._expander is not None:
+        if self._relevance_gate is not None:
+            candidates = self._relevance_gate.filter(candidates)
+        if self._expander is not None and candidates:
             candidates = self._with_expansion(request.user_id, candidates, top_k)
         candidate_count = len(candidates)
         if self._expander is not None or self._reranker is not None:
             candidates = self._deduplicate(candidates)
         dedup_count = len(candidates)
         ranked = self._rank(parsed, candidates)
+        if self._renderer is not None:
+            ranked = self._renderer.render(request.user_id, ranked)
         # 打包保持保留证据的相对顺序，但跳过超大条目以免遮蔽后续短证据。
         packed = (
             self._packer.pack(ranked, top_k) if self._packer is not None else ranked[:top_k]
@@ -113,8 +123,10 @@ class SearchService:
 
     def _analyze(self, request: SearchRequest) -> ParsedQuery:
         if self._analyzer is not None:
-            return self._analyzer.parse(request.query)
-        return self.analyze(request)
+            parsed = self._analyzer.parse(request.query)
+        else:
+            parsed = self.analyze(request)
+        return with_option_variants(parsed, request.query, request.options)
 
     def _with_expansion(
         self, user_id: str, candidates: Sequence[MemoryCandidate], top_k: int
@@ -197,7 +209,8 @@ class SearchService:
         ordered = sorted(
             candidates,
             key=lambda item: (
-                -(item.score + (0.05 if item.granularity == "message" else 0.0)),
+                -item.score,
+                0 if item.granularity == "message" else 1,
                 str(item.memory_id),
             ),
         )
@@ -210,6 +223,9 @@ class SearchService:
                 rank=position,
                 conflict_group_id=candidate.conflict_group_id,
                 duplicate_of=candidate.duplicate_of,
+                granularity=candidate.granularity,
+                request_id=candidate.request_id,
+                source_position=candidate.source_position,
             )
             for position, candidate in enumerate(ordered, start=1)
         ]

@@ -18,6 +18,7 @@ from masm.providers.reranker import LexicalReranker
 from masm.retrieval.baseline import BaselineRetriever, load_channel_weights
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
+from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker
 from masm.storage.repositories import MemoryRepository
 
@@ -34,6 +35,7 @@ class RuntimeComponents:
     query_analyzer: QueryAnalyzer | None
     relation_expander: RelationExpander | None
     reranker: EvidenceReranker | None
+    relevance_gate: RelevanceGate | None
 
     def close(self) -> None:
         """关闭运行时自身创建的模型与 Embedding HTTP 连接池。"""
@@ -115,6 +117,7 @@ def build_runtime(
     query_analyzer: QueryAnalyzer | None = None
     relation_expander: RelationExpander | None = None
     reranker: EvidenceReranker | None = None
+    relevance_gate: RelevanceGate | None = None
 
     if profile is RuntimeProfile.OFFICIAL_MASM:
         assert selected_llm is not None
@@ -131,6 +134,10 @@ def build_runtime(
         )
         relation_expander = RelationExpander(repository)
         reranker = EvidenceReranker(provider=LexicalReranker())
+        relevance_gate = RelevanceGate(
+            min_text_similarity=settings.min_text_similarity,
+            min_image_similarity=settings.min_image_similarity,
+        )
 
     return RuntimeComponents(
         profile=profile,
@@ -141,4 +148,5 @@ def build_runtime(
         query_analyzer=query_analyzer,
         relation_expander=relation_expander,
         reranker=reranker,
+        relevance_gate=relevance_gate,
     )

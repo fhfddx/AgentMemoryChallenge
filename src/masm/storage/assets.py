@@ -70,6 +70,10 @@ class AssetPathError(ValueError):
     """对象路径越出存储根目录（防御性检查，正常情况下不应触发）。"""
 
 
+class AssetIntegrityError(ValueError):
+    """已发布对象与数据库记录的大小或内容哈希不一致。"""
+
+
 def estimated_decoded_size(payload: str) -> int:
     """估算 Base64 文本解码后的字节数。
 
@@ -307,20 +311,48 @@ class AssetStore:
         路径先经 ``_resolve_within_root`` 解析，越界（目录穿越）会抛 ``AssetPathError``；
         对象不存在时返回 False，便于调用方区分「已删除」与「本来就不存在」。
         """
+        path = self._published_path(relative)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    def read_object(
+        self,
+        relative: str,
+        *,
+        max_bytes: int,
+        expected_size: int,
+        expected_hash: str,
+    ) -> bytes:
+        """安全读取并校验一个已发布对象，供 Search 恢复原始图片证据。"""
+        if max_bytes < 0 or expected_size < 0:
+            raise AssetIntegrityError("对象大小约束无效")
+        path = self._published_path(relative)
+        if not path.is_file():
+            raise FileNotFoundError("对象不存在")
+        size = path.stat().st_size
+        if size > max_bytes or size != expected_size:
+            raise AssetIntegrityError("对象大小与记录不一致")
+        data = path.read_bytes()
+        if len(data) > max_bytes or len(data) != expected_size:
+            raise AssetIntegrityError("对象读取大小与记录不一致")
+        if hashlib.sha256(data).hexdigest() != expected_hash:
+            raise AssetIntegrityError("对象哈希与记录不一致")
+        return data
+
+    def _published_path(self, relative: str) -> Path:
+        """解析已发布对象键，并同时做文本路径与真实路径边界检查。"""
         if not relative or relative.startswith(("/", "\\")) or Path(relative).is_absolute():
             raise AssetPathError("对象地址必须是存储根目录内的相对路径")
         path = self._resolve_within_root(relative)
-        # 真实路径校验：防御 `..`、符号链接与目录 junction 越界。
         real_root = Path(os.path.realpath(self.base_dir))
         real_parent = Path(os.path.realpath(path.parent))
         real_path = Path(os.path.realpath(path))
         for candidate in (real_parent, real_path):
             if not _is_within(real_root, candidate):
                 raise AssetPathError("对象真实路径越出存储根目录")
-        if not path.exists():
-            return False
-        path.unlink()
-        return True
+        return path
 
     def discard(self, user_id: str, request_id: str, owner_token: datetime) -> None:
         """丢弃本次处理尝试的暂存目录；绝不触碰已发布或其它所有者的对象。"""

@@ -15,6 +15,7 @@ from masm.config import Settings
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.llm import StructuredLLM
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
+from masm.retrieval.evidence_renderer import EvidenceRenderer
 from masm.retrieval.response_packer import ResponsePacker
 from masm.runtime import build_runtime
 from masm.services.add_service import AddService
@@ -82,15 +83,27 @@ def create_app(
         pipeline=runtime.add_pipeline,
     )
     # 官方 /search 路径始终受响应字节上限保护，不依赖调用方手工注入。
+    response_packer = (
+        packer
+        if packer is not None
+        else ResponsePacker(max_bytes=settings.max_search_response_bytes)
+    )
     application.state.search_service = SearchService(
         runtime.retriever,
         max_image_bytes=settings.max_image_bytes,
         analyzer=runtime.query_analyzer,
         expander=runtime.relation_expander,
         reranker=runtime.reranker,
-        packer=packer
-        if packer is not None
-        else ResponsePacker(max_bytes=settings.max_search_response_bytes),
+        relevance_gate=runtime.relevance_gate,
+        renderer=EvidenceRenderer(
+            repository,
+            application.state.asset_store,
+            max_image_bytes=settings.max_image_bytes,
+            # Base64 最多把原始字节放大到 4/3；先约束读取/编码总量，再由
+            # ResponsePacker 以实际 JSON 大小执行最终硬限制。
+            max_total_image_bytes=response_packer.max_bytes * 3 // 4,
+        ),
+        packer=response_packer,
         runtime_profile=settings.runtime_profile.value,
     )
 

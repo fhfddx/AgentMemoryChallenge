@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from masm.schemas.internal import DecodedImage
-from masm.storage.assets import AssetStore
+from masm.storage.assets import AssetIntegrityError, AssetPathError, AssetStore
 
 _BASE_TOKEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -170,6 +170,57 @@ def test_written_content_matches_input(tmp_path: Path) -> None:
     ref = store.put("user-1", "req-1", token, _image(payload))
     store.publish("user-1", "req-1", token)
     assert (store.base_dir / ref.object_uri).read_bytes() == payload
+
+
+def test_verified_read_returns_exact_published_bytes(tmp_path: Path) -> None:
+    store = AssetStore(tmp_path / "assets")
+    token = _token()
+    payload = b"verified-image-payload"
+    ref = store.put("user-1", "req-1", token, _image(payload))
+    store.publish("user-1", "req-1", token)
+
+    found = store.read_object(
+        ref.object_uri,
+        max_bytes=1024,
+        expected_size=len(payload),
+        expected_hash=hashlib.sha256(payload).hexdigest(),
+    )
+
+    assert found == payload
+
+
+def test_verified_read_rejects_traversal_missing_size_and_hash_mismatch(tmp_path: Path) -> None:
+    store = AssetStore(tmp_path / "assets")
+    token = _token()
+    payload = b"verified-image-payload"
+    ref = store.put("user-1", "req-1", token, _image(payload))
+    store.publish("user-1", "req-1", token)
+
+    with pytest.raises(AssetPathError):
+        store.read_object(
+            "../outside.png", max_bytes=1024,
+            expected_size=1, expected_hash=hashlib.sha256(b"x").hexdigest(),
+        )
+    with pytest.raises(FileNotFoundError):
+        store.read_object(
+            "missing/object.png", max_bytes=1024,
+            expected_size=1, expected_hash=hashlib.sha256(b"x").hexdigest(),
+        )
+    with pytest.raises(AssetIntegrityError):
+        store.read_object(
+            ref.object_uri, max_bytes=1024,
+            expected_size=len(payload) + 1, expected_hash=ref.content_hash,
+        )
+    with pytest.raises(AssetIntegrityError):
+        store.read_object(
+            ref.object_uri, max_bytes=1024,
+            expected_size=len(payload), expected_hash="0" * 64,
+        )
+    with pytest.raises(AssetIntegrityError):
+        store.read_object(
+            ref.object_uri, max_bytes=len(payload) - 1,
+            expected_size=len(payload), expected_hash=ref.content_hash,
+        )
 
 
 def test_concurrent_first_write_same_namespace_stress(tmp_path: Path) -> None:

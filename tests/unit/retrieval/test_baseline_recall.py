@@ -7,6 +7,9 @@
 import threading
 from uuid import UUID, uuid4
 
+import pytest
+
+from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.fakes import DeterministicFakeEmbeddingProvider
 from masm.retrieval.baseline import (
     IMAGE_VECTOR_CHANNEL,
@@ -305,3 +308,89 @@ def test_retrieve_with_stats_counts_each_channel() -> None:
         IMAGE_VECTOR_CHANNEL: 1,
         METADATA_CHANNEL: 1,
     }
+
+
+class _BatchRecordingEmbeddings(EmbeddingProvider):
+    model_name = "recording"
+    model_version = "v1"
+    dimensions = 1
+
+    def __init__(self) -> None:
+        self.text_batches: list[tuple[str, ...]] = []
+
+    def embed_texts(self, texts) -> list[list[float]]:
+        self.text_batches.append(tuple(texts))
+        return [[float(index + 1)] for index, _text in enumerate(texts)]
+
+    def embed_images(self, images) -> list[list[float]]:
+        return [[1.0] for _image in images]
+
+
+class _VariantRepository:
+    def __init__(self) -> None:
+        self.memory_id = UUID(int=99)
+        self.lexical_queries: list[str] = []
+        self.vector_queries: list[float] = []
+
+    def _result(self, score: float) -> list[MemoryCandidate]:
+        return [
+            MemoryCandidate(
+                memory_id=self.memory_id,
+                user_id="user-1",
+                content="shared source",
+                score=score,
+            )
+        ]
+
+    def lexical_candidates(self, user_id: str, query: str, limit: int):
+        self.lexical_queries.append(query)
+        return self._result(0.2 if query == "alpha" else 0.7)
+
+    def vector_candidates(
+        self,
+        user_id: str,
+        vector,
+        *,
+        modality: str,
+        model_name: str,
+        model_version: str,
+        limit: int,
+    ):
+        self.vector_queries.append(float(vector[0]))
+        return self._result(0.4 if vector[0] == 1.0 else 0.8)
+
+    def metadata_candidates(self, user_id: str, *, modality=None, keywords=(), limit: int):
+        return []
+
+
+def test_text_variants_are_recalled_independently_but_embedded_in_one_batch() -> None:
+    repository = _VariantRepository()
+    embeddings = _BatchRecordingEmbeddings()
+    retriever = BaselineRetriever(repository, embeddings, _WEIGHTS)
+
+    channels, _catalogue = retriever._recall(
+        "user-1", ParsedQuery(text_queries=("alpha", "beta")), 10
+    )
+
+    assert repository.lexical_queries == ["alpha", "beta"]
+    assert sorted(repository.vector_queries) == [1.0, 2.0]
+    assert embeddings.text_batches == [("alpha", "beta")]
+    assert [channel.name for channel in channels] == [LEXICAL_CHANNEL, TEXT_VECTOR_CHANNEL]
+    assert all(len(channel.candidates) == 1 for channel in channels)
+
+
+def test_variant_merge_preserves_best_raw_signal_without_double_rrf_weight() -> None:
+    repository = _VariantRepository()
+    retriever = BaselineRetriever(repository, _BatchRecordingEmbeddings(), _WEIGHTS)
+
+    candidates, counts = retriever.retrieve_with_stats(
+        "user-1", ParsedQuery(text_queries=("alpha", "beta")), 10
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].score == pytest.approx(2 / 61)
+    assert candidates[0].retrieval_signals == {
+        LEXICAL_CHANNEL: 0.7,
+        TEXT_VECTOR_CHANNEL: 0.8,
+    }
+    assert counts == {LEXICAL_CHANNEL: 1, TEXT_VECTOR_CHANNEL: 1}

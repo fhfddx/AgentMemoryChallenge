@@ -107,8 +107,11 @@ class BaselineRetriever:
             return [], {}
         channels, catalogue = self._recall(user_id, query, limit, granularity=granularity)
         counts: dict[str, int] = {}
+        signals: dict[UUID, dict[str, float]] = {}
         for channel in channels:
             counts[channel.name] = counts.get(channel.name, 0) + len(channel.candidates)
+            for candidate in channel.candidates:
+                signals.setdefault(candidate.memory_id, {})[channel.name] = candidate.score
         results: list[MemoryCandidate] = []
         for item in reciprocal_rank_fusion(channels, self._weights):
             if len(results) >= limit:
@@ -129,6 +132,7 @@ class BaselineRetriever:
                     granularity=source.granularity,
                     request_id=source.request_id,
                     source_position=source.source_position,
+                    retrieval_signals=dict(signals.get(source.memory_id, {})),
                 )
             )
         return results, counts
@@ -142,42 +146,30 @@ class BaselineRetriever:
         tasks: list[tuple[str, Callable[[], Sequence[MemoryCandidate]]]] = []
 
         # 查询向量先生成完毕，随后各通道并行执行；每个通道各自持有数据库 Session。
-        text = " ".join(part for part in query.text_queries if part).strip()
-        if text:
-            tasks.append(
-                (
-                    LEXICAL_CHANNEL,
-                    partial(
-                        self._repo.lexical_candidates, user_id, text, recall_limit,
-                        **granularity_kwargs,
-                    ),
-                )
-            )
-            text_vector = list(self._embeddings.embed_texts([text])[0])
-            tasks.append(
-                (
-                    TEXT_VECTOR_CHANNEL,
-                    partial(
-                        self._repo.vector_candidates,
-                        user_id,
-                        text_vector,
-                        modality="text",
-                        model_name=self._embeddings.model_name,
-                        model_version=self._embeddings.model_version,
-                        limit=recall_limit,
-                        **granularity_kwargs,
-                    ),
-                )
-            )
-            if self._text_queries_search_images:
+        text_queries = [part.strip() for part in query.text_queries if part.strip()]
+        if text_queries:
+            text_vectors = self._embeddings.embed_texts(text_queries)
+            if len(text_vectors) != len(text_queries):
+                raise ValueError("文本查询向量数量与查询变体数量不一致")
+            for text, raw_vector in zip(text_queries, text_vectors, strict=True):
                 tasks.append(
                     (
-                        IMAGE_VECTOR_CHANNEL,
+                        LEXICAL_CHANNEL,
+                        partial(
+                            self._repo.lexical_candidates, user_id, text, recall_limit,
+                            **granularity_kwargs,
+                        ),
+                    )
+                )
+                text_vector = list(raw_vector)
+                tasks.append(
+                    (
+                        TEXT_VECTOR_CHANNEL,
                         partial(
                             self._repo.vector_candidates,
                             user_id,
                             text_vector,
-                            modality="image",
+                            modality="text",
                             model_name=self._embeddings.model_name,
                             model_version=self._embeddings.model_version,
                             limit=recall_limit,
@@ -185,6 +177,22 @@ class BaselineRetriever:
                         ),
                     )
                 )
+                if self._text_queries_search_images:
+                    tasks.append(
+                        (
+                            IMAGE_VECTOR_CHANNEL,
+                            partial(
+                                self._repo.vector_candidates,
+                                user_id,
+                                text_vector,
+                                modality="image",
+                                model_name=self._embeddings.model_name,
+                                model_version=self._embeddings.model_version,
+                                limit=recall_limit,
+                                **granularity_kwargs,
+                            ),
+                        )
+                    )
 
         visual_queries = list(query.visual_queries)
         if visual_queries:
@@ -222,12 +230,39 @@ class BaselineRetriever:
                 )
             )
 
-        channels = self._run_channels(tasks)
+        channels = self._merge_channels(self._run_channels(tasks))
         catalogue: dict[UUID, MemoryCandidate] = {}
         for channel in channels:
             for candidate in channel.candidates:
                 catalogue.setdefault(candidate.memory_id, candidate)
         return channels, catalogue
+
+    @staticmethod
+    def _merge_channels(channels: Sequence[RankedChannel]) -> list[RankedChannel]:
+        """把查询变体产生的同名通道合并，每条记忆只保留最佳原始分数。"""
+        order: list[str] = []
+        merged: dict[str, dict[UUID, MemoryCandidate]] = {}
+        for channel in channels:
+            if channel.name not in merged:
+                order.append(channel.name)
+                merged[channel.name] = {}
+            by_id = merged[channel.name]
+            for candidate in channel.candidates:
+                current = by_id.get(candidate.memory_id)
+                if current is None or candidate.score > current.score:
+                    by_id[candidate.memory_id] = candidate
+        return [
+            RankedChannel(
+                name,
+                tuple(
+                    sorted(
+                        merged[name].values(),
+                        key=lambda item: (-item.score, str(item.memory_id)),
+                    )
+                ),
+            )
+            for name in order
+        ]
 
     def _run_channels(
         self, tasks: Sequence[tuple[str, Callable[[], Sequence[MemoryCandidate]]]]

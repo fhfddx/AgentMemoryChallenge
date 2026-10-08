@@ -1,5 +1,6 @@
 """响应打包单元测试：按实际序列化字节数裁剪，且只保留完整证据。"""
 
+import base64
 from uuid import uuid4
 
 import pytest  # noqa: I001
@@ -11,6 +12,7 @@ from masm.retrieval.response_packer import (
     resolve_max_response_bytes,
 )
 from masm.schemas.api import SearchResponse
+from masm.schemas.content import ImageURLPart
 
 _MAX_BYTES = 30 * 1024 * 1024
 
@@ -133,3 +135,17 @@ def test_minimum_is_derived_from_the_actual_response_schema() -> None:
 
 def test_empty_input_returns_empty() -> None:
     assert _packer().pack([], top_k=100) == []
+
+
+def test_rendered_base64_size_is_counted_and_does_not_hide_later_text() -> None:
+    encoded = base64.b64encode(b"x" * 5000).decode()
+    image = RankedEvidence(
+        memory_id=uuid4(), user_id="user-1",
+        content=[ImageURLPart(image_url={"url": f"data:image/png;base64,{encoded}"})],
+        score=1.0, rank=1,
+    )
+    short = _evidence("short evidence", 2)
+
+    kept = _packer(max_bytes=500).pack([image, short], top_k=100)
+
+    assert kept == [short]

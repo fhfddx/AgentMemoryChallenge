@@ -12,10 +12,13 @@ from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.fakes import DeterministicFakeEmbeddingProvider, FakeStructuredLLM
 from masm.providers.llm import OpenAICompatibleLLM
 from masm.providers.multimodal_embeddings import GroundedMultimodalEmbeddingProvider
+from masm.retrieval.evidence_renderer import EvidenceRenderer
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
+from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker
 from masm.runtime import build_runtime
+from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 from masm.storage.repositories import MemoryRepository
 
@@ -51,7 +54,18 @@ def test_local_fake_builds_no_llm_or_advanced_pipeline() -> None:
     assert runtime.query_analyzer is None
     assert runtime.relation_expander is None
     assert runtime.reranker is None
+    assert runtime.relevance_gate is None
     assert runtime.retriever._text_queries_search_images is False  # noqa: SLF001
+
+
+def test_application_factory_wires_original_evidence_renderer() -> None:
+    app = create_app(
+        _settings(RuntimeProfile.LOCAL_FAKE),
+        database=Mock(spec=Database),
+        asset_store=Mock(spec=AssetStore),
+    )
+
+    assert isinstance(app.state.search_service._renderer, EvidenceRenderer)  # noqa: SLF001
 
 
 def test_local_fake_ignores_unrelated_model_environment(
@@ -80,6 +94,7 @@ def test_official_baseline_builds_real_embeddings_without_add_pipeline() -> None
     assert runtime.query_analyzer is None
     assert runtime.relation_expander is None
     assert runtime.reranker is None
+    assert runtime.relevance_gate is None
     assert runtime.retriever._text_queries_search_images is True  # noqa: SLF001
 
 
@@ -132,6 +147,9 @@ def test_official_masm_builds_three_agents_and_all_search_components() -> None:
     assert isinstance(runtime.query_analyzer, QueryAnalyzer)
     assert isinstance(runtime.relation_expander, RelationExpander)
     assert isinstance(runtime.reranker, EvidenceReranker)
+    assert isinstance(runtime.relevance_gate, RelevanceGate)
+    assert runtime.relevance_gate.min_text_similarity == 0.48
+    assert runtime.relevance_gate.min_image_similarity == 0.42
     assert runtime.retriever._text_queries_search_images is True  # noqa: SLF001
 
 

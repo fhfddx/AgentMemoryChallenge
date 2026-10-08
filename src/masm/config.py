@@ -3,6 +3,7 @@
 密钥只通过环境变量注入；仓库只提交 `.env.example`，绝不将密钥写入源码。
 """
 
+import math
 import os
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -61,6 +62,8 @@ class Settings:
     model_timeout_seconds: float = 30.0
     model_max_attempts: int = 2
     fused_empty_history_text: bool = False
+    min_text_similarity: float = 0.48
+    min_image_similarity: float = 0.42
 
     @property
     def is_official(self) -> bool:
@@ -79,6 +82,12 @@ class Settings:
             raise ValueError("请求并发上限必须为正整数")
         if self.max_requests_per_minute < 1:
             raise ValueError("每分钟请求上限必须为正整数")
+        for name, similarity in (
+            ("文本相似度阈值", self.min_text_similarity),
+            ("图片相似度阈值", self.min_image_similarity),
+        ):
+            if not math.isfinite(similarity) or not -1.0 <= similarity <= 1.0:
+                raise ValueError(f"{name}必须是 [-1, 1] 内的有限值")
         if not self.is_official:
             return
 
@@ -131,4 +140,6 @@ class Settings:
             model_timeout_seconds=_float_env("MASM_MODEL_TIMEOUT_SECONDS", 30.0),
             model_max_attempts=_int_env("MASM_MODEL_MAX_ATTEMPTS", 2),
             fused_empty_history_text=os.getenv("MASM_FUSED_EMPTY_HISTORY_TEXT") == "1",
+            min_text_similarity=_float_env("MASM_MIN_TEXT_SIMILARITY", 0.48),
+            min_image_similarity=_float_env("MASM_MIN_IMAGE_SIMILARITY", 0.42),
         )
