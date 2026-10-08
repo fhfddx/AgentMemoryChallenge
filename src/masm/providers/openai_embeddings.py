@@ -18,6 +18,7 @@ from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.errors import ProviderResponseError, ProviderUnavailableError
 
 MAX_ATTEMPTS = 2
+MAX_BATCH_SIZE = 10
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
@@ -78,9 +79,16 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
         inputs = list(texts)
         if not inputs:
             return []
+        vectors: list[list[float]] = []
+        for offset in range(0, len(inputs), MAX_BATCH_SIZE):
+            vectors.extend(self._embed_batch(inputs[offset : offset + MAX_BATCH_SIZE]))
+        return vectors
+
+    def _embed_batch(self, inputs: Sequence[str]) -> list[list[float]]:
+        """执行一次不超过供应商同步接口上限的物理请求。"""
         body = {
             "model": self.model_name,
-            "input": inputs,
+            "input": list(inputs),
             "dimensions": self.dimensions,
         }
         started = time.perf_counter()

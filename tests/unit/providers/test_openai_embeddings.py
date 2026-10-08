@@ -59,6 +59,77 @@ def test_embedding_request_uses_fixed_model_dimensions_and_bearer_token() -> Non
     assert provider.records[-1].succeeded is True
 
 
+def test_embedding_splits_eleven_inputs_into_ten_plus_one_and_preserves_order() -> None:
+    batches: list[list[str]] = []
+    vectors = {
+        "item-0": [0.0, 0.5],
+        "item-1": [1.0, 1.5],
+        "item-2": [2.0, 2.5],
+        "item-3": [3.0, 3.5],
+        "item-4": [4.0, 4.5],
+        "item-5": [5.0, 5.5],
+        "item-6": [6.0, 6.5],
+        "item-7": [7.0, 7.5],
+        "item-8": [8.0, 8.5],
+        "item-9": [9.0, 9.5],
+        "item-10": [10.0, 10.5],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        batch = body["input"]
+        batches.append(batch)
+        return httpx.Response(200, json=_success([vectors[item] for item in batch]))
+
+    provider = _provider(handler)
+
+    result = provider.embed_texts(
+        [
+            "item-0",
+            "item-1",
+            "item-2",
+            "item-3",
+            "item-4",
+            "item-5",
+            "item-6",
+            "item-7",
+            "item-8",
+            "item-9",
+            "item-10",
+        ]
+    )
+
+    assert batches == [
+        [
+            "item-0",
+            "item-1",
+            "item-2",
+            "item-3",
+            "item-4",
+            "item-5",
+            "item-6",
+            "item-7",
+            "item-8",
+            "item-9",
+        ],
+        ["item-10"],
+    ]
+    assert result == [
+        [0.0, 0.5],
+        [1.0, 1.5],
+        [2.0, 2.5],
+        [3.0, 3.5],
+        [4.0, 4.5],
+        [5.0, 5.5],
+        [6.0, 6.5],
+        [7.0, 7.5],
+        [8.0, 8.5],
+        [9.0, 9.5],
+        [10.0, 10.5],
+    ]
+    assert [record.batch_size for record in provider.records] == [10, 1]
+
+
 def test_embedding_response_is_restored_by_index() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = {
