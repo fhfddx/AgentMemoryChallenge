@@ -1,6 +1,7 @@
 """查询分析：简单查询用确定性规则，复杂查询才调用 LLM，失败必须可靠降级。"""
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +14,9 @@ PROMPT_VERSION = "v1"
 
 # 子查询硬上限（设计规范 8.1：最多三个子查询）。
 MAX_SUBQUERIES = 3
+
+# Search 的全部文本变体硬上限；需保持在 Embedding Provider 的单批上限（10）以内。
+MAX_QUERY_VARIANTS = 8
 
 # 需要多子查询/关系与时间推理的复杂度标记。
 _COMPLEX_MARKERS = (
@@ -80,6 +84,54 @@ def resolve_max_subqueries(value: int | None = None) -> int:
     if value < 0:
         raise ValueError("max_subqueries 必须为非负整数")
     return min(value, MAX_SUBQUERIES)
+
+
+def with_option_variants(
+    parsed: ParsedQuery,
+    query: str | Sequence[ContentPart],
+    options: Sequence[str] | None,
+    *,
+    max_variants: int = MAX_QUERY_VARIANTS,
+) -> ParsedQuery:
+    """对称加入多选项检索变体，并保留分析器产生的其它查询属性。
+
+    所有选项都只作为检索文本参与，不携带标签或答案假设。规范化去重只用于判等，
+    实际送给 Provider 的文本仍保留第一份出现的内容。
+    """
+    if max_variants < 0:
+        raise ValueError("max_variants 必须为非负整数")
+
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def append(value: str) -> None:
+        text = value.strip()
+        key = " ".join(text.casefold().split())
+        if not key or key in seen or len(variants) >= max_variants:
+            return
+        seen.add(key)
+        variants.append(text)
+
+    for text in parsed.text_queries:
+        append(text)
+
+    question = _query_text(query)
+    for option in options or ():
+        choice = option.strip()
+        if not choice:
+            continue
+        prefix = f"{question}\n" if question else ""
+        append(f"{prefix}Candidate: {choice}")
+
+    return replace(parsed, text_queries=tuple(variants))
+
+
+def _query_text(query: str | Sequence[ContentPart]) -> str:
+    if isinstance(query, str):
+        return query.strip()
+    return " ".join(
+        part.text.strip() for part in query if isinstance(part, TextPart) and part.text.strip()
+    )
 
 
 class QueryAnalyzer:
