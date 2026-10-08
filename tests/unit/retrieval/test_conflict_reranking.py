@@ -235,6 +235,19 @@ def test_ranked_metadata_preserves_raw_retrieval_signals() -> None:
     }
 
 
+def test_ranked_evidence_preserves_source_provenance_for_rendering() -> None:
+    candidate = _candidate(
+        "message summary", score=0.5, granularity="message",
+        request_id="run-9", source_position=3,
+    )
+
+    ranked = EvidenceReranker().rank(ParsedQuery(text_queries=("message",)), [candidate])
+
+    assert ranked[0].granularity == "message"
+    assert ranked[0].request_id == "run-9"
+    assert ranked[0].source_position == 3
+
+
 def test_top_100_prefers_distinct_message_positions_over_same_run_parent() -> None:
     context = _candidate(
         "needle parent", score=0.5, memory_id=UUID(int=0), request_id="run-1"

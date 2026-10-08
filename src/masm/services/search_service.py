@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from masm.retrieval.baseline import BaselineRetriever, ParsedQuery
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
+from masm.retrieval.evidence_renderer import EvidenceRenderer
 from masm.retrieval.query_analyzer import QueryAnalyzer, with_option_variants
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
@@ -32,6 +33,7 @@ class SearchService:
         expander: RelationExpander | None = None,
         reranker: EvidenceReranker | None = None,
         relevance_gate: RelevanceGate | None = None,
+        renderer: EvidenceRenderer | None = None,
         packer: ResponsePacker | None = None,
         runtime_profile: str = "unknown",
     ) -> None:
@@ -41,6 +43,7 @@ class SearchService:
         self._expander = expander
         self._reranker = reranker
         self._relevance_gate = relevance_gate
+        self._renderer = renderer
         self._packer = packer
         self._runtime_profile = runtime_profile
 
@@ -67,6 +70,8 @@ class SearchService:
             candidates = self._deduplicate(candidates)
         dedup_count = len(candidates)
         ranked = self._rank(parsed, candidates)
+        if self._renderer is not None:
+            ranked = self._renderer.render(request.user_id, ranked)
         # 打包保持保留证据的相对顺序，但跳过超大条目以免遮蔽后续短证据。
         packed = (
             self._packer.pack(ranked, top_k) if self._packer is not None else ranked[:top_k]
@@ -218,6 +223,9 @@ class SearchService:
                 rank=position,
                 conflict_group_id=candidate.conflict_group_id,
                 duplicate_of=candidate.duplicate_of,
+                granularity=candidate.granularity,
+                request_id=candidate.request_id,
+                source_position=candidate.source_position,
             )
             for position, candidate in enumerate(ordered, start=1)
         ]

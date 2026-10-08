@@ -5,10 +5,12 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 from uuid import UUID
 
 from masm.providers.reranker import RerankerProvider, resolve_rerank_input
 from masm.retrieval.baseline import ParsedQuery
+from masm.schemas.content import ContentPart
 from masm.storage.types import MemoryCandidate
 
 # 最终证据上限与 Provider 输入上限分离，保持公开 top_k=100 契约。
@@ -32,7 +34,7 @@ class RankedEvidence:
 
     memory_id: UUID
     user_id: str
-    content: str
+    content: str | list[ContentPart]
     score: float
     rank: int
     matched_entities: Sequence[str] = ()
@@ -44,6 +46,9 @@ class RankedEvidence:
     duplicate_of: UUID | None = None
     provider_score: float | None = None
     metadata: Mapping[str, float] = field(default_factory=dict)
+    granularity: Literal["context", "message"] = "context"
+    request_id: str = ""
+    source_position: int | None = None
 
 
 class EvidenceReranker:
@@ -121,6 +126,9 @@ class EvidenceReranker:
                     duplicate_of=evidence.duplicate_of,
                     provider_score=evidence.provider_score,
                     metadata=evidence.metadata,
+                    granularity=evidence.granularity,
+                    request_id=evidence.request_id,
+                    source_position=evidence.source_position,
                 )
             )
         return ranked
@@ -226,6 +234,9 @@ class EvidenceReranker:
             duplicate_of=candidate.duplicate_of,
             provider_score=provider_score,
             metadata={"base_score": candidate.score, **candidate.retrieval_signals},
+            granularity=candidate.granularity,
+            request_id=candidate.request_id,
+            source_position=candidate.source_position,
         )
 
     def _provider_scores(
