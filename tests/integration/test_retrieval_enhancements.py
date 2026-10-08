@@ -243,6 +243,30 @@ def test_query_analysis_reaches_recall(
     assert str(message_id) in {evidence.id for evidence in response.data}
 
 
+def test_search_options_do_not_change_recall_query() -> None:
+    class RecordingRetriever:
+        def __init__(self) -> None:
+            self.queries: list[ParsedQuery] = []
+
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            self.queries.append(query)
+            return []
+
+    retriever = RecordingRetriever()
+    service = SearchService(retriever, max_image_bytes=1024)
+
+    service.search(
+        SearchRequest(query="What did Alice buy?", options=["Paris"], user_id="u", top_k=10)
+    )
+    service.search(
+        SearchRequest(query="What did Alice buy?", options=["Books"], user_id="u", top_k=10)
+    )
+
+    assert len(retriever.queries) == 2
+    assert retriever.queries[0].text_queries == ("What did Alice buy?",)
+    assert retriever.queries[1].text_queries == retriever.queries[0].text_queries
+
+
 def test_response_schema_is_unchanged(
     database: Database, asset_store: AssetStore, settings, embeddings
 ) -> None:

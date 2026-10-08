@@ -32,10 +32,18 @@ def test_similarity_thresholds_must_be_finite_cosine_values(value: float) -> Non
         RelevanceGate(min_image_similarity=value)
 
 
-def test_lexical_presence_is_a_strong_anchor_even_with_low_rank() -> None:
-    candidate = _candidate(**{LEXICAL_CHANNEL: 0.0})
+def test_lexical_rank_requires_positive_threshold() -> None:
+    zero = _candidate(**{LEXICAL_CHANNEL: 0.0})
+    below = _candidate(**{LEXICAL_CHANNEL: 0.0009})
+    admitted = _candidate(**{LEXICAL_CHANNEL: 0.001})
 
-    assert RelevanceGate().filter([candidate]) == [candidate]
+    assert RelevanceGate().filter([zero, below, admitted]) == [admitted]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 0.0, -0.1, 1.01])
+def test_lexical_threshold_must_be_finite_positive_rank(value: float) -> None:
+    with pytest.raises(ValueError):
+        RelevanceGate(min_lexical_rank=value)
 
 
 def test_text_and_image_vectors_use_independent_thresholds() -> None:

@@ -9,12 +9,9 @@ from PIL import Image
 
 from masm.providers.fakes import FakeStructuredLLM
 from masm.providers.llm import OpenAICompatibleLLM
-from masm.retrieval.baseline import ParsedQuery
 from masm.retrieval.query_analyzer import (
-    MAX_QUERY_VARIANTS,
     MAX_SUBQUERIES,
     QueryAnalyzer,
-    with_option_variants,
 )
 from masm.schemas.content import ImageURLPart, TextPart
 
@@ -164,51 +161,3 @@ def test_max_subqueries_cannot_exceed_hard_cap(configured: int) -> None:
 def test_negative_max_subqueries_is_rejected() -> None:
     with pytest.raises(ValueError):
         _analyzer(max_subqueries=-1)
-
-
-def test_option_variants_are_symmetric_deduplicated_and_preserve_visual_query() -> None:
-    parsed = ParsedQuery(
-        text_queries=("focused first", "focused second"),
-        visual_queries=(b"image-bytes",),
-        entities=("alice",),
-        intent="visual",
-    )
-    query = [TextPart(text="Which memory applies?"), ImageURLPart(image_url={"url": _data_url()})]
-
-    augmented = with_option_variants(
-        parsed,
-        query,
-        ["Alpha choice", "  alpha   choice  ", "Beta choice"],
-    )
-
-    assert augmented.text_queries == (
-        "focused first",
-        "focused second",
-        "Which memory applies?\nCandidate: Alpha choice",
-        "Which memory applies?\nCandidate: Beta choice",
-    )
-    assert augmented.visual_queries == (b"image-bytes",)
-    assert augmented.entities == ("alice",)
-    assert augmented.intent == "visual"
-
-
-def test_option_variants_have_deterministic_global_cap() -> None:
-    parsed = ParsedQuery(text_queries=("q1", "q2", "q3"))
-
-    augmented = with_option_variants(
-        parsed,
-        "original question",
-        [f"choice {index}" for index in range(20)],
-    )
-
-    assert len(augmented.text_queries) == MAX_QUERY_VARIANTS
-    assert augmented.text_queries[:3] == ("q1", "q2", "q3")
-    assert augmented.text_queries[-1] == "original question\nCandidate: choice 4"
-
-
-def test_option_variant_identical_to_existing_query_is_not_duplicated() -> None:
-    parsed = ParsedQuery(text_queries=("question\nCandidate: same",))
-
-    augmented = with_option_variants(parsed, " question ", [" same "])
-
-    assert augmented.text_queries == ("question\nCandidate: same",)

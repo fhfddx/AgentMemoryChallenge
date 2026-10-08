@@ -64,6 +64,7 @@ class Settings:
     fused_empty_history_text: bool = False
     min_text_similarity: float = 0.48
     min_image_similarity: float = 0.42
+    min_lexical_rank: float = 0.001
 
     @property
     def is_official(self) -> bool:
@@ -88,6 +89,8 @@ class Settings:
         ):
             if not math.isfinite(similarity) or not -1.0 <= similarity <= 1.0:
                 raise ValueError(f"{name}必须是 [-1, 1] 内的有限值")
+        if not math.isfinite(self.min_lexical_rank) or not 0.0 < self.min_lexical_rank <= 1.0:
+            raise ValueError("全文排名阈值必须是 (0, 1] 内的有限值")
         if not self.is_official:
             return
 
@@ -142,4 +145,5 @@ class Settings:
             fused_empty_history_text=os.getenv("MASM_FUSED_EMPTY_HISTORY_TEXT") == "1",
             min_text_similarity=_float_env("MASM_MIN_TEXT_SIMILARITY", 0.48),
             min_image_similarity=_float_env("MASM_MIN_IMAGE_SIMILARITY", 0.42),
+            min_lexical_rank=_float_env("MASM_MIN_LEXICAL_RANK", 0.001),
         )

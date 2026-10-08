@@ -12,6 +12,7 @@ from masm.storage.types import MemoryCandidate
 
 DEFAULT_MIN_TEXT_SIMILARITY = 0.48
 DEFAULT_MIN_IMAGE_SIMILARITY = 0.42
+DEFAULT_MIN_LEXICAL_RANK = 0.001
 
 
 def _validate_similarity(name: str, value: float) -> float:
@@ -27,15 +28,24 @@ class RelevanceGate:
     def __init__(
         self,
         *,
+        min_lexical_rank: float = DEFAULT_MIN_LEXICAL_RANK,
         min_text_similarity: float = DEFAULT_MIN_TEXT_SIMILARITY,
         min_image_similarity: float = DEFAULT_MIN_IMAGE_SIMILARITY,
     ) -> None:
+        lexical = float(min_lexical_rank)
+        if not math.isfinite(lexical) or not 0.0 < lexical <= 1.0:
+            raise ValueError("min_lexical_rank 必须是 (0, 1] 内的有限值")
+        self._min_lexical_rank = lexical
         self._min_text_similarity = _validate_similarity(
             "min_text_similarity", min_text_similarity
         )
         self._min_image_similarity = _validate_similarity(
             "min_image_similarity", min_image_similarity
         )
+
+    @property
+    def min_lexical_rank(self) -> float:
+        return self._min_lexical_rank
 
     @property
     def min_text_similarity(self) -> float:
@@ -51,7 +61,7 @@ class RelevanceGate:
 
     def _is_strong(self, candidate: MemoryCandidate) -> bool:
         signals = candidate.retrieval_signals
-        if LEXICAL_CHANNEL in signals:
+        if signals.get(LEXICAL_CHANNEL, 0.0) >= self._min_lexical_rank:
             return True
         if signals.get(TEXT_VECTOR_CHANNEL, -1.0) >= self._min_text_similarity:
             return True

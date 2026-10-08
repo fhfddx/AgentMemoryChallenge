@@ -11,7 +11,7 @@ from uuid import uuid4
 from masm.retrieval.baseline import BaselineRetriever, ParsedQuery
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
 from masm.retrieval.evidence_renderer import EvidenceRenderer
-from masm.retrieval.query_analyzer import QueryAnalyzer, with_option_variants
+from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker, RankedEvidence
@@ -126,7 +126,7 @@ class SearchService:
             parsed = self._analyzer.parse(request.query)
         else:
             parsed = self.analyze(request)
-        return with_option_variants(parsed, request.query, request.options)
+        return parsed
 
     def _with_expansion(
         self, user_id: str, candidates: Sequence[MemoryCandidate], top_k: int
