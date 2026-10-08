@@ -4,7 +4,9 @@ import json
 import logging
 from uuid import uuid4
 
+from masm.providers.fakes import FakeStructuredLLM
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
+from masm.retrieval.evidence_selector import EvidenceSelector
 from masm.retrieval.reranker import EvidenceReranker
 from masm.schemas.api import SearchRequest
 from masm.services.search_service import SearchService
@@ -47,6 +49,9 @@ def test_diagnostics_never_logs_payload_or_identity(caplog) -> None:
     assert set(payload) == {
         "request_tag", "runtime_profile", "candidate_count", "dedup_count",
         "returned_count", "response_bytes", "latency_ms", "status_code", "channel_counts",
+        "selector_candidate_count", "selector_selected_count", "selector_source_count",
+        "selector_selected_source_count", "selector_fallback", "selector_abstained",
+        "selector_failure_category", "selector_latency_ms",
     }
 
 
@@ -93,3 +98,55 @@ def test_search_emits_aggregate_counts_without_query(caplog) -> None:
     payload = _captured(caplog)
     assert payload["candidate_count"] == 1
     assert payload["returned_count"] == 1
+
+
+def test_selector_diagnostics_expose_only_aggregate_outcome(caplog) -> None:
+    class Retriever:
+        def retrieve(self, user_id, query, limit):
+            return [
+                MemoryCandidate(
+                    memory_id=uuid4(), user_id=user_id, content="private-content",
+                    score=1.0, request_id="private-request", retrieval_signals={"lexical": 0.1},
+                )
+            ]
+
+    service = SearchService(
+        Retriever(), max_image_bytes=1024,
+        selector=EvidenceSelector(FakeStructuredLLM([TimeoutError("private-error")])),
+        runtime_profile="official-masm",
+    )
+    with caplog.at_level(logging.INFO, logger="masm.search"):
+        response = service.search(
+            SearchRequest(query="private-query", options=["private-option"],
+                          user_id="private-user", top_k=10)
+        )
+
+    assert len(response.data) == 1
+    for secret in (
+        "private-content", "private-request", "private-error", "private-query",
+        "private-option", "private-user",
+    ):
+        assert secret not in caplog.text
+    payload = _captured(caplog)
+    assert payload["selector_candidate_count"] == 1
+    assert payload["selector_selected_count"] == 1
+    assert payload["selector_source_count"] == 1
+    assert payload["selector_selected_source_count"] == 1
+    assert payload["selector_fallback"] is True
+    assert payload["selector_abstained"] is False
+    assert payload["selector_failure_category"] == "unavailable"
+    assert payload["selector_latency_ms"] >= 0
+
+
+def test_diagnostics_sanitize_unrecognized_selector_failure_category(caplog) -> None:
+    diagnostic = SearchDiagnostics(
+        request_tag="a" * 32, runtime_profile="official-masm", candidate_count=0,
+        dedup_count=0, returned_count=0, response_bytes=0, latency_ms=0,
+        status_code=200, channel_counts={}, selector_failure_category="private-error",
+    )
+
+    with caplog.at_level(logging.INFO, logger="masm.search"):
+        emit_search_diagnostics(diagnostic)
+
+    assert "private-error" not in caplog.text
+    assert _captured(caplog)["selector_failure_category"] == "unknown"

@@ -65,6 +65,11 @@ class Settings:
     min_text_similarity: float = 0.48
     min_image_similarity: float = 0.42
     min_lexical_rank: float = 0.001
+    selector_enabled: bool = True
+    selector_max_candidates: int = 32
+    selector_max_selected: int = 12
+    selector_max_chars_per_candidate: int = 1200
+    selector_timeout_seconds: float = 30.0
 
     @property
     def is_official(self) -> bool:
@@ -91,6 +96,17 @@ class Settings:
                 raise ValueError(f"{name}必须是 [-1, 1] 内的有限值")
         if not math.isfinite(self.min_lexical_rank) or not 0.0 < self.min_lexical_rank <= 1.0:
             raise ValueError("全文排名阈值必须是 (0, 1] 内的有限值")
+        if not 1 <= self.selector_max_candidates <= 32:
+            raise ValueError("证据筛选候选上限必须在 1..32 内")
+        if not 1 <= self.selector_max_selected <= min(self.selector_max_candidates, 12):
+            raise ValueError("证据返回上限必须在 1..12 内且不大于候选上限")
+        if self.selector_max_chars_per_candidate < 1:
+            raise ValueError("证据候选文字上限必须为正整数")
+        if (
+            not math.isfinite(self.selector_timeout_seconds)
+            or not 0.0 < self.selector_timeout_seconds <= self.model_timeout_seconds
+        ):
+            raise ValueError("证据筛选超时必须为正数且不超过模型超时")
         if not self.is_official:
             return
 
@@ -146,4 +162,11 @@ class Settings:
             min_text_similarity=_float_env("MASM_MIN_TEXT_SIMILARITY", 0.48),
             min_image_similarity=_float_env("MASM_MIN_IMAGE_SIMILARITY", 0.42),
             min_lexical_rank=_float_env("MASM_MIN_LEXICAL_RANK", 0.001),
+            selector_enabled=os.getenv("MASM_EVIDENCE_SELECTOR_ENABLED", "1") == "1",
+            selector_max_candidates=_int_env("MASM_SELECTOR_MAX_CANDIDATES", 32),
+            selector_max_selected=_int_env("MASM_SELECTOR_MAX_SELECTED", 12),
+            selector_max_chars_per_candidate=_int_env(
+                "MASM_SELECTOR_MAX_CHARS_PER_CANDIDATE", 1200
+            ),
+            selector_timeout_seconds=_float_env("MASM_SELECTOR_TIMEOUT_SECONDS", 30.0),
         )

@@ -13,6 +13,7 @@ from masm.providers.fakes import DeterministicFakeEmbeddingProvider, FakeStructu
 from masm.providers.llm import OpenAICompatibleLLM
 from masm.providers.multimodal_embeddings import GroundedMultimodalEmbeddingProvider
 from masm.retrieval.evidence_renderer import EvidenceRenderer
+from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
@@ -55,6 +56,7 @@ def test_local_fake_builds_no_llm_or_advanced_pipeline() -> None:
     assert runtime.relation_expander is None
     assert runtime.reranker is None
     assert runtime.relevance_gate is None
+    assert isinstance(runtime.evidence_selector, DeterministicEvidenceSelector)
     assert runtime.retriever._text_queries_search_images is False  # noqa: SLF001
 
 
@@ -95,6 +97,7 @@ def test_official_baseline_builds_real_embeddings_without_add_pipeline() -> None
     assert runtime.relation_expander is None
     assert runtime.reranker is None
     assert runtime.relevance_gate is None
+    assert runtime.evidence_selector is None
     assert runtime.retriever._text_queries_search_images is True  # noqa: SLF001
 
 
@@ -148,9 +151,23 @@ def test_official_masm_builds_three_agents_and_all_search_components() -> None:
     assert isinstance(runtime.relation_expander, RelationExpander)
     assert isinstance(runtime.reranker, EvidenceReranker)
     assert isinstance(runtime.relevance_gate, RelevanceGate)
+    assert isinstance(runtime.evidence_selector, EvidenceSelector)
     assert runtime.relevance_gate.min_text_similarity == 0.48
     assert runtime.relevance_gate.min_image_similarity == 0.42
+    assert runtime.relevance_gate.min_lexical_rank == 0.001
     assert runtime.retriever._text_queries_search_images is True  # noqa: SLF001
+
+
+def test_official_masm_can_disable_selection_without_disabling_recall() -> None:
+    from dataclasses import replace
+
+    runtime = build_runtime(
+        replace(_settings(RuntimeProfile.OFFICIAL_MASM), selector_enabled=False),
+        _repository(), embeddings=OfficialTestEmbeddings(), llm=FakeStructuredLLM(),
+    )
+
+    assert runtime.evidence_selector is None
+    assert isinstance(runtime.relevance_gate, RelevanceGate)
 
 
 def test_official_masm_wires_fused_text_only_when_enabled() -> None:

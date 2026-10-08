@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 from masm.api.app import create_app
 from masm.config import RuntimeProfile, Settings
 from masm.providers.fakes import DeterministicFakeEmbeddingProvider, FakeStructuredLLM
-from masm.schemas.agents import ActionKind, CuratorAction, CuratorDecision
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 
@@ -40,15 +39,6 @@ def _llm() -> FakeStructuredLLM:
         [
             {"keywords": ["runtime", "marker"], "language": "en"},
             {},
-            CuratorDecision(
-                actions=(
-                    CuratorAction(
-                        kind=ActionKind.CREATE,
-                        confidence=0.9,
-                        evidence="runtime marker",
-                    ),
-                )
-            ),
         ],
         model="gpt-4o-mini",
     )
@@ -116,6 +106,8 @@ def test_official_masm_search_returns_evidence_not_generated_answer(
         },
     )
 
+    llm.queue({"selected_indices": [0], "sufficient_evidence": True})
+
     response = client.post(
         "/search",
         headers=headers,
@@ -127,7 +119,48 @@ def test_official_masm_search_returns_evidence_not_generated_answer(
     assert body["data"]
     assert body["data"][0]["content"] == "runtime marker evidence"
     assert set(body["data"][0]) <= {"id", "content", "score", "created_at"}
-    assert len(llm.records) == 2
+    assert [record.output_type for record in llm.records] == [
+        "PerceptionResult", "TemporalRelationResult", "EvidenceSelection"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("selection_response", "expected_count"),
+    [
+        ({"selected_indices": [], "sufficient_evidence": False}, 0),
+        (TimeoutError("private provider body"), 1),
+    ],
+)
+def test_official_search_abstention_and_provider_fallback_stay_http_200(
+    database: Database,
+    asset_store: AssetStore,
+    database_url: str,
+    selection_response,
+    expected_count: int,
+) -> None:
+    llm = _llm()
+    client = _client(database, asset_store, database_url, llm)
+    user_id = f"runtime-user-{uuid4().hex}"
+    headers = {"X-Api-Key": "test-key"}
+    added = client.post(
+        "/add", headers=headers,
+        json={
+            "request_id": f"runtime-request-{uuid4().hex}",
+            "user_id": user_id,
+            "session_id": "runtime-session",
+            "messages": [{"role": "user", "content": "runtime marker evidence"}],
+        },
+    )
+    assert added.status_code == 200
+    llm.queue(selection_response)
+
+    response = client.post(
+        "/search", headers=headers,
+        json={"query": "runtime marker", "user_id": user_id, "top_k": 10},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["data"]) == expected_count
 
 
 def test_app_state_exposes_only_nonsensitive_runtime_metadata(
@@ -153,6 +186,7 @@ def test_app_state_exposes_only_nonsensitive_runtime_metadata(
         "llm_model": "gpt-4o-mini",
         "prompt_versions": {"perception": "v1", "temporal": "v1", "curator": "v1"},
         "fused_empty_history_text": False,
+        "evidence_selector_enabled": True,
     }
     assert "llm-secret" not in rendered
     assert "embedding-secret" not in rendered

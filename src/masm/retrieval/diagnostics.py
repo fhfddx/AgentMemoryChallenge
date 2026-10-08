@@ -26,6 +26,14 @@ class SearchDiagnostics:
     latency_ms: float
     status_code: int
     channel_counts: Mapping[str, int]
+    selector_candidate_count: int = 0
+    selector_selected_count: int = 0
+    selector_source_count: int = 0
+    selector_selected_source_count: int = 0
+    selector_fallback: bool = False
+    selector_abstained: bool = False
+    selector_failure_category: str = "none"
+    selector_latency_ms: float = 0.0
 
 
 def emit_search_diagnostics(value: SearchDiagnostics) -> None:
@@ -47,5 +55,17 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
             name: max(0, int(value.channel_counts[name]))
             for name in sorted(_CHANNELS & value.channel_counts.keys())
         },
+        "selector_candidate_count": max(0, int(value.selector_candidate_count)),
+        "selector_selected_count": max(0, int(value.selector_selected_count)),
+        "selector_source_count": max(0, int(value.selector_source_count)),
+        "selector_selected_source_count": max(0, int(value.selector_selected_source_count)),
+        "selector_fallback": bool(value.selector_fallback),
+        "selector_abstained": bool(value.selector_abstained),
+        "selector_failure_category": (
+            value.selector_failure_category
+            if value.selector_failure_category in {"none", "unavailable", "invalid_output"}
+            else "unknown"
+        ),
+        "selector_latency_ms": round(max(0.0, float(value.selector_latency_ms)), 2),
     }
     _LOGGER.info(json.dumps(payload, sort_keys=True, separators=(",", ":")))

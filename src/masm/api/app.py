@@ -95,6 +95,7 @@ def create_app(
         expander=runtime.relation_expander,
         reranker=runtime.reranker,
         relevance_gate=runtime.relevance_gate,
+        selector=runtime.evidence_selector,
         renderer=EvidenceRenderer(
             repository,
             application.state.asset_store,

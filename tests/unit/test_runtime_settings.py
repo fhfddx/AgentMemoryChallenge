@@ -78,6 +78,14 @@ def test_official_profiles_reject_wrong_models_and_non_https_urls(
         ("min_lexical_rank", 0.0),
         ("min_lexical_rank", float("inf")),
         ("min_lexical_rank", 1.01),
+        ("selector_max_candidates", 0),
+        ("selector_max_candidates", 33),
+        ("selector_max_selected", 0),
+        ("selector_max_selected", 13),
+        ("selector_max_chars_per_candidate", 0),
+        ("selector_timeout_seconds", 0.0),
+        ("selector_timeout_seconds", float("inf")),
+        ("selector_timeout_seconds", 31.0),
     ],
 )
 def test_model_limits_require_positive_dimensions_timeout_and_one_or_two_attempts(
@@ -94,6 +102,11 @@ def test_settings_repr_redacts_provider_credentials() -> None:
 
     assert "llm-secret" not in rendered
     assert "embedding-secret" not in rendered
+
+
+def test_selected_limit_cannot_exceed_candidate_limit() -> None:
+    with pytest.raises(ValueError):
+        replace(_official(), selector_max_candidates=5, selector_max_selected=6).validate_runtime()
 
 
 def test_from_env_reads_runtime_provider_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,6 +127,11 @@ def test_from_env_reads_runtime_provider_configuration(monkeypatch: pytest.Monke
         "MASM_MIN_TEXT_SIMILARITY": "0.51",
         "MASM_MIN_IMAGE_SIMILARITY": "0.43",
         "MASM_MIN_LEXICAL_RANK": "0.002",
+        "MASM_EVIDENCE_SELECTOR_ENABLED": "0",
+        "MASM_SELECTOR_MAX_CANDIDATES": "24",
+        "MASM_SELECTOR_MAX_SELECTED": "8",
+        "MASM_SELECTOR_MAX_CHARS_PER_CANDIDATE": "900",
+        "MASM_SELECTOR_TIMEOUT_SECONDS": "20",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -131,6 +149,11 @@ def test_from_env_reads_runtime_provider_configuration(monkeypatch: pytest.Monke
     assert settings.min_text_similarity == 0.51
     assert settings.min_image_similarity == 0.43
     assert settings.min_lexical_rank == 0.002
+    assert settings.selector_enabled is False
+    assert settings.selector_max_candidates == 24
+    assert settings.selector_max_selected == 8
+    assert settings.selector_max_chars_per_candidate == 900
+    assert settings.selector_timeout_seconds == 20
 
 
 def test_fused_text_flag_is_off_unless_explicitly_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,6 +11,7 @@ from uuid import uuid4
 from masm.retrieval.baseline import BaselineRetriever, ParsedQuery
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
 from masm.retrieval.evidence_renderer import EvidenceRenderer
+from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
@@ -33,6 +34,7 @@ class SearchService:
         expander: RelationExpander | None = None,
         reranker: EvidenceReranker | None = None,
         relevance_gate: RelevanceGate | None = None,
+        selector: EvidenceSelector | DeterministicEvidenceSelector | None = None,
         renderer: EvidenceRenderer | None = None,
         packer: ResponsePacker | None = None,
         runtime_profile: str = "unknown",
@@ -43,6 +45,7 @@ class SearchService:
         self._expander = expander
         self._reranker = reranker
         self._relevance_gate = relevance_gate
+        self._selector = selector
         self._renderer = renderer
         self._packer = packer
         self._runtime_profile = runtime_profile
@@ -63,6 +66,7 @@ class SearchService:
         candidates = [item for item in recalled if item.user_id == request.user_id]
         if self._relevance_gate is not None:
             candidates = self._relevance_gate.filter(candidates)
+        strong_anchor_ids = {item.memory_id for item in candidates}
         if self._expander is not None and candidates:
             candidates = self._with_expansion(request.user_id, candidates, top_k)
         candidate_count = len(candidates)
@@ -70,6 +74,15 @@ class SearchService:
             candidates = self._deduplicate(candidates)
         dedup_count = len(candidates)
         ranked = self._rank(parsed, candidates)
+        selection = None
+        selector_latency_ms = 0.0
+        if self._selector is not None:
+            selector_started = perf_counter()
+            selection = self._selector.select(
+                request.query, request.options, ranked, strong_anchor_ids
+            )
+            selector_latency_ms = (perf_counter() - selector_started) * 1000.0
+            ranked = list(selection.evidence)
         if self._renderer is not None:
             ranked = self._renderer.render(request.user_id, ranked)
         # 打包保持保留证据的相对顺序，但跳过超大条目以免遮蔽后续短证据。
@@ -97,6 +110,16 @@ class SearchService:
                 latency_ms=(perf_counter() - started) * 1000.0,
                 status_code=200,
                 channel_counts=channel_counts,
+                selector_candidate_count=selection.candidate_count if selection else 0,
+                selector_selected_count=len(selection.evidence) if selection else 0,
+                selector_source_count=selection.source_count if selection else 0,
+                selector_selected_source_count=(
+                    selection.selected_source_count if selection else 0
+                ),
+                selector_fallback=selection.fallback if selection else False,
+                selector_abstained=selection.abstained if selection else False,
+                selector_failure_category=(selection.failure_category if selection else "none"),
+                selector_latency_ms=selector_latency_ms,
             )
         )
         return response

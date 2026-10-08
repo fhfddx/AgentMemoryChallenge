@@ -8,8 +8,11 @@ from PIL import Image
 from sqlalchemy import delete, select, update
 
 from masm.api.app import create_app
+from masm.providers.fakes import FakeStructuredLLM
 from masm.providers.reranker import RerankerProvider
 from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever, ParsedQuery
+from masm.retrieval.evidence_renderer import EvidenceRenderer
+from masm.retrieval.evidence_selector import EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
@@ -651,3 +654,85 @@ def test_application_search_returns_original_ordered_multimodal_message(
     assert content[0].text == "visual needle before"
     assert base64.b64decode(content[1].image_url.url.split(",", 1)[1]) == image_bytes
     assert content[2].text == "visual needle after"
+
+
+def test_selector_can_return_original_facts_from_two_add_requests(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("u")
+    _seed(database, asset_store, settings, embeddings, user_id, "Alice adopted Nimbus")
+    _seed(database, asset_store, settings, embeddings, user_id, "Nimbus sleeps greenhouse")
+    repository = MemoryRepository(database)
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
+    service = SearchService(
+        BaselineRetriever(repository, embeddings, DEFAULT_CHANNEL_WEIGHTS),
+        max_image_bytes=settings.max_image_bytes,
+        analyzer=QueryAnalyzer(),
+        relevance_gate=RelevanceGate(),
+        reranker=EvidenceReranker(),
+        selector=EvidenceSelector(llm),
+        renderer=EvidenceRenderer(repository, asset_store, max_image_bytes=1024),
+        packer=ResponsePacker(),
+    )
+    request = SearchRequest(
+        query="Alice adopted Nimbus; Nimbus sleeps greenhouse",
+        options=["Rover", "Nimbus"], user_id=user_id, top_k=10,
+    )
+
+    assert service.search(request).data == []
+    candidates = llm.requests[-1].payload["candidates"]
+    chosen = [
+        candidate["index"] for candidate in candidates
+        if candidate["granularity"] == "message"
+        and candidate["text"] in {"Alice adopted Nimbus", "Nimbus sleeps greenhouse"}
+    ]
+    assert len(chosen) == 2
+    llm.queue({"selected_indices": chosen, "sufficient_evidence": True})
+
+    response = service.search(request)
+
+    assert {item.content for item in response.data} == {
+        "Alice adopted Nimbus", "Nimbus sleeps greenhouse"
+    }
+
+
+def test_selector_restores_original_multimodal_message_after_selection(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("u")
+    image_bytes, image_url = _png_data_url()
+    app = create_app(
+        settings, database=database, asset_store=asset_store, embeddings=embeddings
+    )
+    app.state.add_service.add(
+        AddRequest(
+            request_id=_uid("r"), user_id=user_id, session_id="session-image",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "visual needle before"},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": "visual needle after"},
+                ],
+            }],
+        )
+    )
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
+    app.state.search_service._selector = EvidenceSelector(llm)  # noqa: SLF001
+    request = SearchRequest(query="visual needle", user_id=user_id, top_k=10)
+
+    assert app.state.search_service.search(request).data == []
+    candidates = llm.requests[-1].payload["candidates"]
+    message_indices = [
+        item["index"] for item in candidates if item["granularity"] == "message"
+    ]
+    assert len(message_indices) == 1
+    llm.queue({"selected_indices": message_indices, "sufficient_evidence": True})
+
+    response = app.state.search_service.search(request)
+
+    assert len(response.data) == 1
+    content = response.data[0].content
+    assert isinstance(content, list)
+    assert [part.type for part in content] == ["text", "image_url", "text"]
+    assert base64.b64decode(content[1].image_url.url.split(",", 1)[1]) == image_bytes
