@@ -88,6 +88,7 @@ def create_app(
         analyzer=runtime.query_analyzer,
         expander=runtime.relation_expander,
         reranker=runtime.reranker,
+        relevance_gate=runtime.relevance_gate,
         packer=packer
         if packer is not None
         else ResponsePacker(max_bytes=settings.max_search_response_bytes),

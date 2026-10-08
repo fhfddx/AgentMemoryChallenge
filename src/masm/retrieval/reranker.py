@@ -21,7 +21,6 @@ _RELATION_BONUS = 0.05
 _CONFLICT_BONUS = 0.05
 _DUPLICATE_PENALTY = 0.20
 _PROVIDER_WEIGHT = 0.30
-_MESSAGE_BONUS = 0.05
 
 
 @dataclass(frozen=True)
@@ -89,7 +88,14 @@ class EvidenceReranker:
             scored.append(
                 self._score(query, candidate, provider_scores[index], group_counts)
             )
-        scored.sort(key=lambda item: (-item.score, str(item.memory_id)))
+        granularity = {candidate.memory_id: candidate.granularity for candidate in pool}
+        scored.sort(
+            key=lambda item: (
+                -item.score,
+                0 if granularity[item.memory_id] == "message" else 1,
+                str(item.memory_id),
+            )
+        )
 
         ranked: list[RankedEvidence] = []
         seen_groups: set[UUID] = set()
@@ -153,7 +159,8 @@ class EvidenceReranker:
         rest = sorted(
             (item for key, item in by_id.items() if key not in selected_ids),
             key=lambda item: (
-                -(item.score + (_MESSAGE_BONUS if item.granularity == "message" else 0.0)),
+                -item.score,
+                0 if item.granularity == "message" else 1,
                 str(item.memory_id),
             ),
         )
@@ -187,9 +194,6 @@ class EvidenceReranker:
         )
 
         score = candidate.score
-        if candidate.granularity == "message":
-            # 短的、可追溯的消息证据不应被同源长上下文淹没。
-            score += _MESSAGE_BONUS
         score += _ENTITY_BONUS * min(len(entities), 3)
         score += _LOCATION_BONUS * min(len(locations), 3)
         score += _RELATION_BONUS * min(len(relations), 3)
@@ -221,7 +225,7 @@ class EvidenceReranker:
             conflict_group_id=group_id,
             duplicate_of=candidate.duplicate_of,
             provider_score=provider_score,
-            metadata={"base_score": candidate.score},
+            metadata={"base_score": candidate.score, **candidate.retrieval_signals},
         )
 
     def _provider_scores(

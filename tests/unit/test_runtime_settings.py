@@ -72,6 +72,9 @@ def test_official_profiles_reject_wrong_models_and_non_https_urls(
         ("model_max_attempts", 3),
         ("max_concurrent_requests", 0),
         ("max_requests_per_minute", 0),
+        ("min_text_similarity", float("nan")),
+        ("min_text_similarity", 1.01),
+        ("min_image_similarity", -1.01),
     ],
 )
 def test_model_limits_require_positive_dimensions_timeout_and_one_or_two_attempts(
@@ -105,6 +108,8 @@ def test_from_env_reads_runtime_provider_configuration(monkeypatch: pytest.Monke
         "MASM_MODEL_MAX_ATTEMPTS": "1",
         "MASM_MAX_CONCURRENT_REQUESTS": "16",
         "MASM_MAX_REQUESTS_PER_MINUTE": "1000",
+        "MASM_MIN_TEXT_SIMILARITY": "0.51",
+        "MASM_MIN_IMAGE_SIMILARITY": "0.43",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -119,6 +124,8 @@ def test_from_env_reads_runtime_provider_configuration(monkeypatch: pytest.Monke
     assert settings.model_max_attempts == 1
     assert settings.max_concurrent_requests == 16
     assert settings.max_requests_per_minute == 1000
+    assert settings.min_text_similarity == 0.51
+    assert settings.min_image_similarity == 0.43
 
 
 def test_fused_text_flag_is_off_unless_explicitly_enabled(monkeypatch: pytest.MonkeyPatch) -> None:

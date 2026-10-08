@@ -8,6 +8,7 @@ from masm.providers.reranker import RerankerProvider
 from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever, ParsedQuery
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
+from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import MAX_RERANK_CANDIDATES, EvidenceReranker
 from masm.retrieval.response_packer import ResponsePacker
 from masm.schemas.api import AddRequest, SearchRequest
@@ -473,3 +474,63 @@ def test_same_source_content_is_not_returned_twice() -> None:
 
     assert len(response.data) == 1
     assert response.data[0].content == "Needle Fact"
+
+
+class _SignalRetriever:
+    def __init__(self, candidate: MemoryCandidate) -> None:
+        self.candidate = candidate
+
+    def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+        return [self.candidate]
+
+
+class _RecordingExpander:
+    max_seeds = 8
+
+    def __init__(self, neighbour: MemoryCandidate) -> None:
+        self.neighbour = neighbour
+        self.calls: list[list[UUID]] = []
+
+    def expand(self, user_id: str, seeds, limit: int):
+        self.calls.append([seed.memory_id for seed in seeds])
+        return [self.neighbour]
+
+
+def test_weak_nearest_neighbour_abstains_before_relation_expansion() -> None:
+    weak = MemoryCandidate(
+        memory_id=uuid4(), user_id="user-1", content="unrelated history", score=0.02,
+        retrieval_signals={"text_vector": 0.2},
+    )
+    neighbour = MemoryCandidate(
+        memory_id=uuid4(), user_id="user-1", content="related only by edge", score=0.0,
+    )
+    expander = _RecordingExpander(neighbour)
+
+    response = SearchService(
+        _SignalRetriever(weak), max_image_bytes=1024,
+        relevance_gate=RelevanceGate(), expander=expander, reranker=EvidenceReranker(),
+    ).search(SearchRequest(query="unknown topic", user_id="user-1", top_k=10))
+
+    assert response.data == []
+    assert expander.calls == []
+
+
+def test_admitted_anchor_keeps_relation_expanded_evidence() -> None:
+    anchor = MemoryCandidate(
+        memory_id=uuid4(), user_id="user-1", content="exact anchor", score=0.02,
+        retrieval_signals={"lexical": 0.01},
+    )
+    neighbour = MemoryCandidate(
+        memory_id=uuid4(), user_id="user-1", content="cross-session evidence", score=0.0,
+    )
+    expander = _RecordingExpander(neighbour)
+
+    response = SearchService(
+        _SignalRetriever(anchor), max_image_bytes=1024,
+        relevance_gate=RelevanceGate(), expander=expander, reranker=EvidenceReranker(),
+    ).search(SearchRequest(query="exact anchor", user_id="user-1", top_k=10))
+
+    assert expander.calls == [[anchor.memory_id]]
+    assert {item.id for item in response.data} == {
+        str(anchor.memory_id), str(neighbour.memory_id),
+    }

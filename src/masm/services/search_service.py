@@ -12,6 +12,7 @@ from masm.retrieval.baseline import BaselineRetriever, ParsedQuery
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
 from masm.retrieval.query_analyzer import QueryAnalyzer, with_option_variants
 from masm.retrieval.relation_expander import RelationExpander
+from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker, RankedEvidence
 from masm.retrieval.response_packer import ResponsePacker
 from masm.schemas.api import MemoryEvidence, SearchRequest, SearchResponse
@@ -30,6 +31,7 @@ class SearchService:
         analyzer: QueryAnalyzer | None = None,
         expander: RelationExpander | None = None,
         reranker: EvidenceReranker | None = None,
+        relevance_gate: RelevanceGate | None = None,
         packer: ResponsePacker | None = None,
         runtime_profile: str = "unknown",
     ) -> None:
@@ -38,6 +40,7 @@ class SearchService:
         self._analyzer = analyzer
         self._expander = expander
         self._reranker = reranker
+        self._relevance_gate = relevance_gate
         self._packer = packer
         self._runtime_profile = runtime_profile
 
@@ -55,7 +58,9 @@ class SearchService:
             recalled = self._retriever.retrieve(request.user_id, parsed, pool_limit)
             channel_counts = {}
         candidates = [item for item in recalled if item.user_id == request.user_id]
-        if self._expander is not None:
+        if self._relevance_gate is not None:
+            candidates = self._relevance_gate.filter(candidates)
+        if self._expander is not None and candidates:
             candidates = self._with_expansion(request.user_id, candidates, top_k)
         candidate_count = len(candidates)
         if self._expander is not None or self._reranker is not None:
@@ -199,7 +204,8 @@ class SearchService:
         ordered = sorted(
             candidates,
             key=lambda item: (
-                -(item.score + (0.05 if item.granularity == "message" else 0.0)),
+                -item.score,
+                0 if item.granularity == "message" else 1,
                 str(item.memory_id),
             ),
         )
