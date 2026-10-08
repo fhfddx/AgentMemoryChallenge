@@ -21,12 +21,16 @@ class EvidenceRenderer:
         asset_store: AssetStore,
         *,
         max_image_bytes: int,
+        max_total_image_bytes: int | None = None,
     ) -> None:
         if max_image_bytes < 1:
             raise ValueError("max_image_bytes 必须为正整数")
+        if max_total_image_bytes is not None and max_total_image_bytes < 0:
+            raise ValueError("max_total_image_bytes 不能为负数")
         self._repo = repository
         self._assets = asset_store
         self._max_image_bytes = max_image_bytes
+        self._max_total_image_bytes = max_total_image_bytes
 
     def render(
         self, user_id: str, evidence: Sequence[RankedEvidence]
@@ -45,6 +49,7 @@ class EvidenceRenderer:
             return list(evidence)
         snapshots = self._repo.source_messages_for_positions(user_id, locations)
         rendered: list[RankedEvidence] = []
+        remaining_image_bytes = self._max_total_image_bytes
         for item in evidence:
             snapshot = (
                 snapshots.get((item.request_id, item.source_position))
@@ -55,11 +60,41 @@ class EvidenceRenderer:
                 rendered.append(item)
                 continue
             try:
-                content = self._render_snapshot(snapshot)
+                image_bytes = self._image_byte_size(snapshot)
+                content = (
+                    None
+                    if remaining_image_bytes is not None
+                    and image_bytes > remaining_image_bytes
+                    else self._render_snapshot(snapshot)
+                )
             except (KeyError, OSError, TypeError, ValueError):
                 content = None
+                image_bytes = 0
+            if content is not None and remaining_image_bytes is not None:
+                remaining_image_bytes -= image_bytes
             rendered.append(item if content is None else replace(item, content=content))
         return rendered
+
+    @staticmethod
+    def _image_byte_size(snapshot: SourceMessageSnapshot) -> int:
+        """在读取对象前按已记录大小计算单条消息的图片预算。"""
+        content = snapshot.content
+        if isinstance(content, str):
+            return 0
+        if not isinstance(content, list):
+            raise TypeError("来源内容必须为文本或分片数组")
+        total = 0
+        for raw in content:
+            if not isinstance(raw, dict):
+                raise TypeError("来源内容分片必须为对象")
+            if raw.get("type") == "text":
+                continue
+            object_uri = _object_uri(raw)
+            size = snapshot.assets[object_uri].decoded_size
+            if size < 0:
+                raise ValueError("来源图片大小无效")
+            total += size
+        return total
 
     def _render_snapshot(
         self, snapshot: SourceMessageSnapshot

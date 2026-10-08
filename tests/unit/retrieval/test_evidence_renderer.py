@@ -145,3 +145,35 @@ def test_missing_or_wrong_user_snapshot_keeps_summary(tmp_path: Path) -> None:
 
     assert rendered[0].content == "scoped summary"
     assert repository.calls == [("other-user", (("run-1", 0),))]
+
+
+def test_total_image_budget_skips_large_candidate_but_allows_later_smaller_one(
+    tmp_path: Path,
+) -> None:
+    store = AssetStore(tmp_path / "assets")
+    assets = [_published(store, payload) for payload in (b"abc", b"def", b"z")]
+    snapshots = {
+        (f"run-{index}", 0): SourceMessageSnapshot(
+            content=[
+                {"type": "image_url", "image_url": {"url": asset.object_uri}}
+            ],
+            assets={asset.object_uri: asset},
+        )
+        for index, asset in enumerate(assets, start=1)
+    }
+    renderer = EvidenceRenderer(
+        _SnapshotRepository(snapshots),
+        store,
+        max_image_bytes=1024,
+        max_total_image_bytes=4,
+    )
+    evidence = [
+        _evidence(f"summary-{index}", request_id=f"run-{index}")
+        for index in range(1, 4)
+    ]
+
+    rendered = renderer.render("user-1", evidence)
+
+    assert isinstance(rendered[0].content, list)
+    assert rendered[1].content == "summary-2"
+    assert isinstance(rendered[2].content, list)

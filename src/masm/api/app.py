@@ -83,6 +83,11 @@ def create_app(
         pipeline=runtime.add_pipeline,
     )
     # 官方 /search 路径始终受响应字节上限保护，不依赖调用方手工注入。
+    response_packer = (
+        packer
+        if packer is not None
+        else ResponsePacker(max_bytes=settings.max_search_response_bytes)
+    )
     application.state.search_service = SearchService(
         runtime.retriever,
         max_image_bytes=settings.max_image_bytes,
@@ -94,10 +99,11 @@ def create_app(
             repository,
             application.state.asset_store,
             max_image_bytes=settings.max_image_bytes,
+            # Base64 最多把原始字节放大到 4/3；先约束读取/编码总量，再由
+            # ResponsePacker 以实际 JSON 大小执行最终硬限制。
+            max_total_image_bytes=response_packer.max_bytes * 3 // 4,
         ),
-        packer=packer
-        if packer is not None
-        else ResponsePacker(max_bytes=settings.max_search_response_bytes),
+        packer=response_packer,
         runtime_profile=settings.runtime_profile.value,
     )
 
