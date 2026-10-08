@@ -124,6 +124,24 @@ class MemoryCandidate:
 
 
 @dataclass(frozen=True)
+class StoredAssetSnapshot:
+    """渲染原始证据所需的、用户作用域内的对象元数据。"""
+
+    object_uri: str
+    media_type: str
+    decoded_size: int
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class SourceMessageSnapshot:
+    """一条不可变来源消息及其实际引用的对象元数据。"""
+
+    content: Any
+    assets: Mapping[str, StoredAssetSnapshot] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class DeletedRun:
     """一次运行删除的**数据库阶段**结果。
 

@@ -1,7 +1,10 @@
 """增强 Search 集成测试：真实 Repository 链路下的扩展、冲突补全与重复惩罚。"""
 
+import base64
+import io
 from uuid import UUID, uuid4
 
+from PIL import Image
 from sqlalchemy import delete, select, update
 
 from masm.providers.reranker import RerankerProvider
@@ -32,6 +35,13 @@ def _request(request_id: str, user_id: str, text: str) -> AddRequest:
         session_id="session-1",
         messages=[{"role": "user", "content": text}],
     )
+
+
+def _png_data_url() -> tuple[bytes, str]:
+    buffer = io.BytesIO()
+    Image.new("RGB", (3, 2), (15, 25, 35)).save(buffer, format="PNG")
+    payload = buffer.getvalue()
+    return payload, f"data:image/png;base64,{base64.b64encode(payload).decode()}"
 
 
 def _seed(
@@ -195,7 +205,6 @@ def test_one_hop_expansion_enters_the_response(
     response = _enhanced(database, settings, embeddings).search(
         SearchRequest(query="anchor memory", user_id=user_id, top_k=10)
     )
-
     with database.session() as session:
         neighbour_run = session.get(Memory, neighbour_id).request_id
         neighbour_message = session.execute(
@@ -534,3 +543,44 @@ def test_admitted_anchor_keeps_relation_expanded_evidence() -> None:
     assert {item.id for item in response.data} == {
         str(anchor.memory_id), str(neighbour.memory_id),
     }
+
+
+def test_source_snapshots_are_batched_deduplicated_and_user_scoped(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("u")
+    other_user = _uid("u")
+    request_id = _uid("source")
+    _image_bytes, image_url = _png_data_url()
+    add = AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings)
+    add.add(
+        AddRequest(
+            request_id=request_id,
+            user_id=user_id,
+            session_id="session-source",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "before"},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "after"},
+                    ],
+                }
+            ],
+        )
+    )
+
+    repository = MemoryRepository(database)
+    snapshots = repository.source_messages_for_positions(
+        user_id,
+        [(request_id, 0), (request_id, 0), ("missing", 0)],
+    )
+
+    assert list(snapshots) == [(request_id, 0)]
+    snapshot = snapshots[(request_id, 0)]
+    assert [part["type"] for part in snapshot.content] == ["text", "image_url", "text"]
+    object_uri = snapshot.content[1]["image_url"]["url"]
+    assert object_uri in snapshot.assets
+    assert snapshot.assets[object_uri].media_type == "image/png"
+    assert repository.source_messages_for_positions(other_user, [(request_id, 0)]) == {}
