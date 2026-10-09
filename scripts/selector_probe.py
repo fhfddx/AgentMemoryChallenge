@@ -13,9 +13,9 @@ from masm.retrieval.reranker import RankedEvidence
 
 
 def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
-    """Check one supported fact and one same-entity unsupported question."""
+    """Check direct, abstention, option-overlap, and multi-source boundaries."""
     known_id, distractor_id = UUID(int=1), UUID(int=2)
-    ranked = (
+    direct_ranked = (
         RankedEvidence(
             memory_id=known_id,
             user_id="synthetic-selector-probe",
@@ -35,6 +35,27 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
             request_id="synthetic-source-2",
         ),
     )
+    project_id, review_id = UUID(int=3), UUID(int=4)
+    multi_source_ranked = (
+        RankedEvidence(
+            memory_id=project_id,
+            user_id="synthetic-selector-probe",
+            content="The Atlas project uses code name Zephyr.",
+            score=1.0,
+            rank=1,
+            granularity="message",
+            request_id="synthetic-source-3",
+        ),
+        RankedEvidence(
+            memory_id=review_id,
+            user_id="synthetic-selector-probe",
+            content="The review for the Atlas project is scheduled on April 18.",
+            score=0.9,
+            rank=2,
+            granularity="message",
+            request_id="synthetic-source-4",
+        ),
+    )
     selector = EvidenceSelector(
         llm,
         max_candidates=settings.selector_max_candidates,
@@ -42,22 +63,43 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
         max_chars_per_candidate=settings.selector_max_chars_per_candidate,
         timeout_seconds=settings.selector_timeout_seconds,
     )
-    checks: tuple[tuple[str, str, set[UUID]], ...] = (
-        ("positive", "Where did Nora store the amber key?", {known_id}),
-        ("unrelated", "What is Nora's passport number?", set()),
+    checks: tuple[
+        tuple[str, str, list[str] | None, tuple[RankedEvidence, ...], set[UUID]], ...
+    ] = (
+        ("positive", "Where did Nora store the amber key?", None, direct_ranked, {known_id}),
+        ("unrelated", "What is Nora's passport number?", None, direct_ranked, set()),
+        (
+            "option_overlap_abstention",
+            "What is Nora's passport number?",
+            ["drawer three", "P-4821"],
+            direct_ranked,
+            set(),
+        ),
+        (
+            "multi_source",
+            "What are the code name and review date of the Atlas project?",
+            None,
+            multi_source_ranked,
+            {project_id, review_id},
+        ),
     )
     all_passed = True
     provider_logger = logging.getLogger("masm.provider")
     was_disabled = provider_logger.disabled
     provider_logger.disabled = True
     try:
-        for name, question, expected_ids in checks:
-            result = selector.select(question, None, ranked, {known_id, distractor_id})
+        for name, question, options, ranked, expected_ids in checks:
+            result = selector.select(
+                question,
+                options,
+                ranked,
+                {item.memory_id for item in ranked},
+            )
             selected_ids = {item.memory_id for item in result.evidence}
             passed = (
                 selected_ids == expected_ids
                 and not result.fallback
-                and result.abstained == (name == "unrelated")
+                and result.abstained == (not expected_ids)
             )
             all_passed &= passed
             print(

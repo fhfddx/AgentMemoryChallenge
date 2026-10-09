@@ -16,12 +16,14 @@ from masm.providers.fakes import FakeStructuredLLM
 from masm.providers.llm import OpenAICompatibleLLM
 
 
-def test_probe_reports_positive_selection_and_unrelated_abstention() -> None:
+def test_probe_reports_all_four_selection_boundaries() -> None:
     probe = importlib.import_module("scripts.selector_probe")
     llm = FakeStructuredLLM(
         [
             {"selected_indices": [0], "sufficient_evidence": True},
             {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [0, 1], "sufficient_evidence": True},
         ]
     )
     output = StringIO()
@@ -50,7 +52,32 @@ def test_probe_reports_positive_selection_and_unrelated_abstention() -> None:
             "failure_category": "none",
             "passed": True,
         },
+        {
+            "case": "option_overlap_abstention",
+            "candidate_source_count": 2,
+            "selected_count": 0,
+            "selected_source_count": 0,
+            "fallback": False,
+            "abstained": True,
+            "failure_category": "none",
+            "passed": True,
+        },
+        {
+            "case": "multi_source",
+            "candidate_source_count": 2,
+            "selected_count": 2,
+            "selected_source_count": 2,
+            "fallback": False,
+            "abstained": False,
+            "failure_category": "none",
+            "passed": True,
+        },
     ]
+    assert llm.requests[2].payload["options"] == ["drawer three", "P-4821"]
+    assert {row["source_group"] for row in llm.requests[3].payload["candidates"]} == {
+        "source-1",
+        "source-2",
+    }
 
 
 def test_main_rejects_disabled_selector_without_printing_credentials(
@@ -113,6 +140,8 @@ def test_main_uses_existing_provider_config_and_prints_only_safe_counts(
         [
             {"selected_indices": [0], "sufficient_evidence": True},
             {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [0, 1], "sufficient_evidence": True},
         ]
     )
 
@@ -128,7 +157,9 @@ def test_main_uses_existing_provider_config_and_prints_only_safe_counts(
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert [row["passed"] for row in map(json.loads, output.splitlines())] == [True, True]
+    assert [row["passed"] for row in map(json.loads, output.splitlines())] == [
+        True, True, True, True,
+    ]
     assert "private-probe-key" not in output
     assert "private-embedding-key" not in output
     assert "Nora" not in output
@@ -188,6 +219,6 @@ def test_provider_failure_prints_only_probe_rows_not_provider_logs(capsys) -> No
 
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert exit_code == 1
-    assert len(rows) == 2
+    assert len(rows) == 4
     assert all(row["fallback"] and row["failure_category"] == "unavailable" for row in rows)
     assert capsys.readouterr().err == ""
