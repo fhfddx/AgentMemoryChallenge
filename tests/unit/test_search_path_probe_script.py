@@ -1,0 +1,254 @@
+"""The full-path probe uses synthetic data and leaves no persistent rows."""
+
+import importlib
+import json
+from collections.abc import Sequence
+from dataclasses import dataclass
+from io import StringIO
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from masm.services.deletion_service import DeletionReport
+
+
+@dataclass(frozen=True)
+class _Response:
+    status_code: int
+    payload: dict[str, Any]
+
+    @property
+    def content(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
+
+    def json(self) -> dict[str, Any]:
+        return self.payload
+
+
+class _InMemoryBackend:
+    def __init__(self, *, run_tag: str, fail_on_search: int | None = None) -> None:
+        self.run_tag = run_tag
+        self.fail_on_search = fail_on_search
+        self.runs: dict[str, dict[str, Any]] = {}
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+        self._search_index = 0
+
+    def post(self, path: str, *, json: dict[str, Any]) -> _Response:
+        self.requests.append((path, json))
+        if path == "/add":
+            self.runs[json["request_id"]] = json
+            return _Response(
+                200,
+                {
+                    "success": True,
+                    "request_id": json["request_id"],
+                    "user_id": json["user_id"],
+                    "session_id": json["session_id"],
+                },
+            )
+        assert path == "/search"
+        if self._search_index == self.fail_on_search:
+            self._search_index += 1
+            return _Response(503, {"detail": "private-response-body"})
+        code_name = f"Cobalt-{self.run_tag}"
+        cabinet = f"Cabinet-Seven-{self.run_tag}"
+        searches: tuple[dict[str, Any], ...] = (
+            {"data": [{"id": "direct", "content": f"Stored in {cabinet}."}]},
+            {
+                "data": [
+                    {"id": "multi-1", "content": f"Code name {code_name}."},
+                    {"id": "multi-2", "content": "Review is November 14, 2026."},
+                ]
+            },
+            {"data": []},
+        )
+        payload = searches[self._search_index]
+        self._search_index += 1
+        return _Response(200, payload)
+
+    def context_candidates_for_requests(
+        self, user_id: str, request_ids: Sequence[str]
+    ) -> list[SimpleNamespace]:
+        return self._candidates(user_id, request_ids)
+
+    def message_candidates_for_requests(
+        self, user_id: str, request_ids: Sequence[str], limit: int
+    ) -> list[SimpleNamespace]:
+        return self._candidates(user_id, request_ids)[:limit]
+
+    def _candidates(
+        self, user_id: str, request_ids: Sequence[str]
+    ) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(content=self.runs[run_id]["messages"][0]["content"])
+            for run_id in request_ids
+            if run_id in self.runs and self.runs[run_id]["user_id"] == user_id
+        ]
+
+    def delete_run(self, run_id: str, *, user_id: str) -> DeletionReport:
+        payload = self.runs.get(run_id)
+        if payload is None or payload["user_id"] != user_id:
+            return DeletionReport(user_id=user_id, run_id=run_id)
+        del self.runs[run_id]
+        return DeletionReport(
+            user_id=user_id,
+            run_id=run_id,
+            memories_deleted=2,
+            sources_deleted=1,
+        )
+
+
+def test_probe_exercises_three_search_boundaries_and_cleans_all_runs() -> None:
+    probe = importlib.import_module("scripts.search_path_probe")
+    backend = _InMemoryBackend(run_tag="abc123")
+    output = StringIO()
+
+    exit_code = probe.run_probe(
+        backend,
+        backend,
+        backend.delete_run,
+        output,
+        run_tag="abc123",
+    )
+
+    assert exit_code == 0
+    assert backend.runs == {}
+    assert [path for path, _payload in backend.requests] == [
+        "/add",
+        "/add",
+        "/search",
+        "/search",
+        "/search",
+    ]
+    assert [json.loads(line) for line in output.getvalue().splitlines()] == [
+        {
+            "case": "storage",
+            "context_count": 2,
+            "expected_marker_count": 4,
+            "message_count": 2,
+            "passed": True,
+            "stored_marker_count": 4,
+        },
+        {
+            "case": "direct_recall",
+            "expected_marker_count": 1,
+            "matched_marker_count": 1,
+            "passed": True,
+            "returned_count": 1,
+        },
+        {
+            "case": "multi_session",
+            "expected_marker_count": 2,
+            "matched_marker_count": 2,
+            "passed": True,
+            "returned_count": 2,
+        },
+        {
+            "case": "same_entity_abstention",
+            "expected_marker_count": 0,
+            "matched_marker_count": 0,
+            "passed": True,
+            "returned_count": 0,
+        },
+        {
+            "case": "cleanup",
+            "cleanup_attempt_error_count": 0,
+            "complete": True,
+            "first_pass_memories_deleted": 4,
+            "first_pass_sources_deleted": 2,
+            "passed": True,
+            "registered_run_count": 2,
+            "residual_memories_deleted": 0,
+            "residual_sources_deleted": 0,
+            "retry_memories_deleted": 0,
+            "retry_sources_deleted": 0,
+        },
+    ]
+
+
+def test_probe_sanitizes_request_failure_and_still_cleans_all_runs() -> None:
+    probe = importlib.import_module("scripts.search_path_probe")
+    backend = _InMemoryBackend(run_tag="failure", fail_on_search=1)
+    output = StringIO()
+
+    exit_code = probe.run_probe(
+        backend,
+        backend,
+        backend.delete_run,
+        output,
+        run_tag="failure",
+    )
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert exit_code == 2
+    assert backend.runs == {}
+    assert rows[-2] == {
+        "case": "probe",
+        "failure_category": "request_or_contract",
+        "passed": False,
+    }
+    assert rows[-1]["case"] == "cleanup"
+    assert rows[-1]["passed"] is True
+    assert "private-response-body" not in output.getvalue()
+
+
+def test_probe_retries_transient_cleanup_error_and_verifies_zero_residuals() -> None:
+    probe = importlib.import_module("scripts.search_path_probe")
+    backend = _InMemoryBackend(run_tag="cleanup")
+    output = StringIO()
+    failed_once = False
+
+    def transient_delete(run_id: str, *, user_id: str) -> DeletionReport:
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise RuntimeError("private-cleanup-error")
+        return backend.delete_run(run_id, user_id=user_id)
+
+    exit_code = probe.run_probe(
+        backend,
+        backend,
+        transient_delete,
+        output,
+        run_tag="cleanup",
+    )
+
+    cleanup = json.loads(output.getvalue().splitlines()[-1])
+    assert exit_code == 0
+    assert backend.runs == {}
+    assert cleanup == {
+        "case": "cleanup",
+        "cleanup_attempt_error_count": 1,
+        "complete": True,
+        "first_pass_memories_deleted": 2,
+        "first_pass_sources_deleted": 1,
+        "passed": True,
+        "registered_run_count": 2,
+        "residual_memories_deleted": 0,
+        "residual_sources_deleted": 0,
+        "retry_memories_deleted": 2,
+        "retry_sources_deleted": 1,
+    }
+    assert "private-cleanup-error" not in output.getvalue()
+
+
+def test_main_rejects_invalid_environment_without_printing_secrets(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    probe = importlib.import_module("scripts.search_path_probe")
+    monkeypatch.setenv("MASM_RUNTIME_PROFILE", "official-masm")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://private-database")
+    monkeypatch.setenv("MASM_API_KEYS", "private-api-key")
+    monkeypatch.setenv("MASM_LLM_API_KEY", "private-llm-key")
+
+    exit_code = probe.main([])
+
+    output = capsys.readouterr()
+    assert exit_code == 2
+    assert json.loads(output.out) == {
+        "case": "preflight",
+        "failure_category": "configuration",
+        "passed": False,
+    }
+    assert "private-" not in output.out + output.err
