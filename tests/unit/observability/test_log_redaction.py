@@ -233,6 +233,25 @@ def test_formatter_keeps_valid_token_statistics() -> None:
     assert '"total_tokens": 5' in output
 
 
+def test_formatter_limits_search_channel_counts_to_known_numbers() -> None:
+    formatter = RedactingFormatter("%(message)s")
+    record = logging.LogRecord("masm.search", logging.INFO, __file__, 1, "done", (), None)
+    record.extra = {
+        "event": "search.completed",
+        "channel_counts": {
+            "lexical": 2,
+            "text_vector": "private-query",
+            "private-channel": 9,
+        },
+    }
+
+    output = formatter.format(record)
+
+    assert json.loads(output)["channel_counts"] == {"lexical": 2}
+    assert "private-query" not in output
+    assert "private-channel" not in output
+
+
 def test_raw_content_and_images_never_appear() -> None:
     payload = {
         "request_id": "r-1",

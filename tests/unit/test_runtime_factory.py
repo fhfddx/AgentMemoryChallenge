@@ -1,5 +1,10 @@
 """Runtime Factory 的档位装配测试。"""
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -68,6 +73,52 @@ def test_application_factory_wires_original_evidence_renderer() -> None:
     )
 
     assert isinstance(app.state.search_service._renderer, EvidenceRenderer)  # noqa: SLF001
+
+
+def test_environment_factory_emits_sanitized_search_info_logs() -> None:
+    root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "DATABASE_URL": "sqlite+pysqlite:///:memory:",
+            "MASM_RUNTIME_PROFILE": "local-fake",
+            "PYTHONPATH": str(root / "src"),
+        }
+    )
+    program = """
+from masm.api.app import create_app_from_env
+from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
+
+create_app_from_env()
+emit_search_diagnostics(SearchDiagnostics(
+    request_tag="a" * 32,
+    runtime_profile="official-masm",
+    candidate_count=3,
+    dedup_count=2,
+    returned_count=1,
+    response_bytes=128,
+    latency_ms=4.5,
+    status_code=200,
+    channel_counts={"lexical": 2},
+))
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    log_row = json.loads(completed.stderr)
+    assert log_row["event"] == "search.completed"
+    assert log_row["status"] == "INFO"
+    assert log_row["candidate_count"] == 3
+    assert log_row["channel_counts"] == {"lexical": 2}
+    assert completed.stdout == ""
 
 
 def test_local_fake_ignores_unrelated_model_environment(
@@ -188,4 +239,6 @@ def test_official_masm_wires_fused_text_only_when_enabled() -> None:
     assert enabled.add_pipeline._fused_text is not None
     assert disabled.audit_metadata()["fused_empty_history_text"] is False
     assert enabled.audit_metadata()["fused_empty_history_text"] is True
-    assert enabled.audit_metadata()["prompt_versions"]["fused_text"] == "fused-text-v2"
+    prompt_versions = enabled.audit_metadata()["prompt_versions"]
+    assert isinstance(prompt_versions, dict)
+    assert prompt_versions["fused_text"] == "fused-text-v2"

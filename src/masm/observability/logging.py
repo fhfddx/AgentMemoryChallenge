@@ -28,7 +28,21 @@ ALLOWED_LOG_FIELDS = frozenset(
         "latency_ms",
         "count",
         "candidate_count",
+        "dedup_count",
         "evidence_count",
+        "returned_count",
+        "response_bytes",
+        "request_tag",
+        "runtime_profile",
+        "channel_counts",
+        "selector_candidate_count",
+        "selector_selected_count",
+        "selector_source_count",
+        "selector_selected_source_count",
+        "selector_fallback",
+        "selector_abstained",
+        "selector_failure_category",
+        "selector_latency_ms",
         "channel",
         "model_name",
         "model_version",
@@ -109,6 +123,10 @@ _ALLOWED_TOKEN_USAGE_KEYS = frozenset(
     }
 )
 
+_ALLOWED_CHANNEL_COUNT_KEYS = frozenset(
+    {"lexical", "text_vector", "image_vector", "metadata"}
+)
+
 # 内部错误码显式枚举：只有这些值允许作为 ``failure`` 进入日志。
 INTERNAL_ERROR_CODES = frozenset(
     {
@@ -139,6 +157,20 @@ def _is_token_statistics(value: Any) -> bool:
     return True
 
 
+def _channel_statistics(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, Mapping):
+        return None
+    statistics: dict[str, int] = {}
+    for key, item in value.items():
+        name = str(key)
+        if name not in _ALLOWED_CHANNEL_COUNT_KEYS:
+            continue
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            continue
+        statistics[name] = item
+    return statistics
+
+
 def _failure_from_exception(exc: type[BaseException] | None) -> str | None:
     """异常类型名是唯一来自异常的可信失败标识（绝不使用 str(exc)）。"""
     if exc is None:
@@ -166,6 +198,11 @@ def redact_fields(payload: Any) -> Any:
             if name == "token_usage":
                 if _is_token_statistics(value):
                     projected[name] = dict(value)
+                continue
+            if name == "channel_counts":
+                statistics = _channel_statistics(value)
+                if statistics is not None:
+                    projected[name] = statistics
                 continue
             if name == "error_code":
                 # 内部错误码必须是显式枚举成员；其他取值一律丢弃。

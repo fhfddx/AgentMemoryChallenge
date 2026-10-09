@@ -68,4 +68,7 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
         ),
         "selector_latency_ms": round(max(0.0, float(value.selector_latency_ms)), 2),
     }
-    _LOGGER.info(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    _LOGGER.info(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        extra={"event": "search.completed", "extra": payload},
+    )

@@ -12,6 +12,7 @@ from masm.api.health import probe_dependencies
 from masm.api.limits import RequestLimiter
 from masm.api.routes import router
 from masm.config import Settings
+from masm.observability.logging import configure_logging
 from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.llm import StructuredLLM
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
@@ -143,4 +144,6 @@ def create_app(
 
 def create_app_from_env() -> FastAPI:
     """供 Uvicorn ``--factory`` 使用的环境变量应用工厂。"""
-    return create_app(Settings.from_env())
+    settings = Settings.from_env()
+    configure_logging(settings)
+    return create_app(settings)
