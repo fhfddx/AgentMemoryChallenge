@@ -57,6 +57,7 @@ class ModelRequest:
     content: Sequence[ContentPart] | None = None
     timeout_seconds: float | None = None
     max_attempts: int | None = None
+    temperature: float | None = None
 
 
 @dataclass(frozen=True)
@@ -237,7 +238,7 @@ class OpenAICompatibleLLM(StructuredLLM):
         raise StructuredOutputError("模型输出无法通过 Schema 校验") from None
 
     def _build_body(self, request: ModelRequest, output_type: type[BaseModel]) -> dict[str, Any]:
-        return {
+        body: dict[str, Any] = {
             "model": request.model or self.model,
             "messages": [
                 {"role": "system", "content": request.prompt},
@@ -252,6 +253,9 @@ class OpenAICompatibleLLM(StructuredLLM):
                 },
             },
         }
+        if request.temperature is not None:
+            body["temperature"] = request.temperature
+        return body
 
     def _post(self, body: dict[str, Any], output_type: type[T], timeout: float) -> T:
         response = self._http_client().post(

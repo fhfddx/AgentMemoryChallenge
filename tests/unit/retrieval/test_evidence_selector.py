@@ -46,9 +46,27 @@ def test_direct_fact_selection_returns_the_original_evidence_object() -> None:
     assert result.abstained is False
     assert len(llm.requests) == 1
     assert llm.requests[0].max_attempts == 1
-    assert llm.requests[0].prompt_version == "evidence-selector-v1"
+    assert llm.requests[0].prompt_version == "evidence-selector-v2"
     assert llm.requests[0].payload["question"] == "What did Alice buy?"
     assert llm.requests[0].payload["options"] == ["Notebook", "Paris"]
+
+
+def test_selector_requests_deterministic_fact_coverage_decision() -> None:
+    llm = FakeStructuredLLM(
+        [{"selected_indices": [], "sufficient_evidence": False}]
+    )
+    entity_only = _evidence(1, "source-a", "Alice stored a notebook in cabinet seven")
+
+    EvidenceSelector(llm).select(
+        "What is the notebook serial number?", None,
+        [entity_only], {entity_only.memory_id},
+    )
+
+    request = llm.requests[0]
+    assert request.temperature == 0.0
+    assert "every requested fact" in request.prompt
+    assert "attribute, relation, value, or event" in request.prompt
+    assert "distinct source_group" in request.prompt
 
 
 def test_insufficient_decision_abstains_without_fallback() -> None:

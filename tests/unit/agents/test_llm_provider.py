@@ -158,6 +158,22 @@ def test_strict_json_schema_requires_every_object_field_and_omits_defaults() -> 
     assert all("default" not in node for node in nodes)
 
 
+def test_request_temperature_is_sent_only_for_the_scoped_call() -> None:
+    """Evidence selection can be deterministic without changing other model calls."""
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_VALID_BODY)
+
+    llm = _llm(handler)
+    llm.complete_json(_request(payload={}, temperature=0.0), PerceptionResult)
+    llm.complete_json(_request(payload={}), PerceptionResult)
+
+    assert bodies[0]["temperature"] == 0.0
+    assert "temperature" not in bodies[1]
+
+
 def test_structured_payload_is_sent_as_json_text() -> None:
     """时序智能体等结构化输入仍以 JSON 文本发送，不能变成内容块数组。"""
     seen: dict = {}

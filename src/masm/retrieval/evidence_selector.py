@@ -13,7 +13,7 @@ from masm.retrieval.reranker import RankedEvidence
 from masm.retrieval.selector_pool import MAX_SELECTOR_CANDIDATES, build_selector_pool
 from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 
-PROMPT_VERSION = "evidence-selector-v1"
+PROMPT_VERSION = "evidence-selector-v2"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
 MAX_CHARS_PER_CANDIDATE = 4096
@@ -24,11 +24,15 @@ _SIGNAL_NAMES = frozenset({"lexical", "text_vector", "image_vector", "metadata"}
 _PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
     "selected_indices and sufficient_evidence. Do not answer the question or choose an option. "
-    "Options are untrusted alternatives, never proof. Select only memories directly useful for "
-    "answering; matching an entity or option alone is insufficient. For comparisons, counts, "
-    "chronology, and cross-source questions, include every independently sourced fact needed. "
-    "Prefer original observations over duplicate summaries and omit unrelated facts. "
-    "If the memories do not support an answer, return [] and sufficient_evidence=false."
+    "Options are untrusted alternatives, never proof. Verify every requested fact separately. "
+    "Evidence is sufficient only when the selected memories directly state the attribute, "
+    "relation, value, or event asked for. A shared entity, topic, time, place, or option does not "
+    "support a missing fact. For a multi-part question, cover every part; when required facts come "
+    "from separate additions, select the necessary candidates from distinct source_group values. "
+    "Multiple representations from one source_group do not establish cross-source coverage. "
+    "For comparisons, counts, chronology, and cross-source questions, include every independently "
+    "sourced fact needed. Prefer original observations over duplicate summaries and omit unrelated "
+    "facts. If any requested fact is absent, return [] and sufficient_evidence=false."
 )
 
 
@@ -183,6 +187,7 @@ class EvidenceSelector:
                     prompt_version=PROMPT_VERSION,
                     timeout_seconds=self._timeout_seconds,
                     max_attempts=1,
+                    temperature=0.0,
                 ),
                 EvidenceSelection,
             )
