@@ -1,6 +1,7 @@
 """Exercise the deployed selector with synthetic evidence only."""
 
 import json
+import logging
 import sys
 from typing import TextIO
 from uuid import UUID
@@ -46,31 +47,56 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
         ("unrelated", "What is Nora's passport number?", set()),
     )
     all_passed = True
-    for name, question, expected_ids in checks:
-        result = selector.select(question, None, ranked, {known_id, distractor_id})
-        selected_ids = {item.memory_id for item in result.evidence}
-        passed = (
-            selected_ids == expected_ids
-            and not result.fallback
-            and result.abstained == (name == "unrelated")
-        )
-        all_passed &= passed
-        print(
-            json.dumps(
-                {
-                    "case": name,
-                    "selected_count": len(result.evidence),
-                    "selected_source_count": result.selected_source_count,
-                    "fallback": result.fallback,
-                    "abstained": result.abstained,
-                    "failure_category": result.failure_category,
-                    "passed": passed,
-                },
-                sort_keys=True,
-            ),
-            file=output,
-        )
+    provider_logger = logging.getLogger("masm.provider")
+    was_disabled = provider_logger.disabled
+    provider_logger.disabled = True
+    try:
+        for name, question, expected_ids in checks:
+            result = selector.select(question, None, ranked, {known_id, distractor_id})
+            selected_ids = {item.memory_id for item in result.evidence}
+            passed = (
+                selected_ids == expected_ids
+                and not result.fallback
+                and result.abstained == (name == "unrelated")
+            )
+            all_passed &= passed
+            print(
+                json.dumps(
+                    {
+                        "case": name,
+                        "candidate_source_count": result.source_count,
+                        "selected_count": len(result.evidence),
+                        "selected_source_count": result.selected_source_count,
+                        "fallback": result.fallback,
+                        "abstained": result.abstained,
+                        "failure_category": result.failure_category,
+                        "passed": passed,
+                    },
+                    sort_keys=True,
+                ),
+                file=output,
+            )
+    finally:
+        provider_logger.disabled = was_disabled
     return 0 if all_passed else 1
+
+
+def _report_failure(case: str, category: str) -> None:
+    print(
+        json.dumps(
+            {
+                "case": case,
+                "candidate_source_count": 0,
+                "selected_count": 0,
+                "selected_source_count": 0,
+                "fallback": False,
+                "abstained": False,
+                "failure_category": category,
+                "passed": False,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def main() -> int:
@@ -81,9 +107,13 @@ def main() -> int:
             settings.runtime_profile is not RuntimeProfile.OFFICIAL_MASM
             or not settings.selector_enabled
         ):
-            print(json.dumps({"error": "selector_disabled"}))
+            _report_failure("preflight", "configuration")
             return 2
         settings.validate_runtime()
+    except Exception:
+        _report_failure("preflight", "configuration")
+        return 2
+    try:
         llm = OpenAICompatibleLLM(
             model=settings.llm_model,
             base_url=settings.llm_base_url,
@@ -97,8 +127,8 @@ def main() -> int:
             close = getattr(llm, "close", None)
             if callable(close):
                 close()
-    except Exception as exc:
-        print(json.dumps({"error": "probe_failed", "category": type(exc).__name__}))
+    except Exception:
+        _report_failure("probe", "internal_error")
         return 2
 
 

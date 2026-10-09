@@ -2,14 +2,18 @@
 
 import importlib
 import json
+import logging
 import os
 import subprocess
 import sys
 from io import StringIO
 from pathlib import Path
 
+import httpx
+
 from masm.config import Settings
 from masm.providers.fakes import FakeStructuredLLM
+from masm.providers.llm import OpenAICompatibleLLM
 
 
 def test_probe_reports_positive_selection_and_unrelated_abstention() -> None:
@@ -28,6 +32,7 @@ def test_probe_reports_positive_selection_and_unrelated_abstention() -> None:
     assert [json.loads(line) for line in output.getvalue().splitlines()] == [
         {
             "case": "positive",
+            "candidate_source_count": 2,
             "selected_count": 1,
             "selected_source_count": 1,
             "fallback": False,
@@ -37,6 +42,7 @@ def test_probe_reports_positive_selection_and_unrelated_abstention() -> None:
         },
         {
             "case": "unrelated",
+            "candidate_source_count": 2,
             "selected_count": 0,
             "selected_source_count": 0,
             "fallback": False,
@@ -58,7 +64,16 @@ def test_main_rejects_disabled_selector_without_printing_credentials(
     exit_code = probe.main()
 
     assert exit_code == 2
-    assert json.loads(capsys.readouterr().out) == {"error": "selector_disabled"}
+    assert json.loads(capsys.readouterr().out) == {
+        "case": "preflight",
+        "candidate_source_count": 0,
+        "selected_count": 0,
+        "selected_source_count": 0,
+        "fallback": False,
+        "abstained": False,
+        "failure_category": "configuration",
+        "passed": False,
+    }
 
 
 def test_main_sanitizes_invalid_environment_before_provider_construction(
@@ -71,7 +86,16 @@ def test_main_sanitizes_invalid_environment_before_provider_construction(
 
     output = capsys.readouterr()
     assert exit_code == 2
-    assert json.loads(output.out) == {"error": "probe_failed", "category": "ValueError"}
+    assert json.loads(output.out) == {
+        "case": "preflight",
+        "candidate_source_count": 0,
+        "selected_count": 0,
+        "selected_source_count": 0,
+        "fallback": False,
+        "abstained": False,
+        "failure_category": "configuration",
+        "passed": False,
+    }
     assert "private-probe-key" not in output.out + output.err
 
 
@@ -127,5 +151,43 @@ def test_script_entrypoint_exits_without_model_call_when_selector_disabled() -> 
     )
 
     assert completed.returncode == 2
-    assert json.loads(completed.stdout) == {"error": "selector_disabled"}
+    assert json.loads(completed.stdout) == {
+        "case": "preflight",
+        "candidate_source_count": 0,
+        "selected_count": 0,
+        "selected_source_count": 0,
+        "fallback": False,
+        "abstained": False,
+        "failure_category": "configuration",
+        "passed": False,
+    }
     assert completed.stderr == ""
+
+
+def test_provider_failure_prints_only_probe_rows_not_provider_logs(capsys) -> None:
+    probe = importlib.import_module("scripts.selector_probe")
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("private-provider-secret", request=request)
+
+    provider_logger = logging.getLogger("masm.provider")
+    handler = logging.StreamHandler(sys.stderr)
+    provider_logger.addHandler(handler)
+    output = StringIO()
+    try:
+        with httpx.Client(transport=httpx.MockTransport(timeout)) as client:
+            llm = OpenAICompatibleLLM(
+                model="gpt-4o-mini",
+                base_url="https://synthetic.example/v1",
+                api_key="private-provider-secret",
+                client=client,
+            )
+            exit_code = probe.run_probe(llm, Settings(database_url=""), output)
+    finally:
+        provider_logger.removeHandler(handler)
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert exit_code == 1
+    assert len(rows) == 2
+    assert all(row["fallback"] and row["failure_category"] == "unavailable" for row in rows)
+    assert capsys.readouterr().err == ""
