@@ -106,7 +106,7 @@ def test_official_masm_search_returns_evidence_not_generated_answer(
         },
     )
 
-    llm.queue({"selected_indices": [0], "sufficient_evidence": True})
+    llm.queue({"selected_indices": [0], "has_direct_evidence": True})
 
     response = client.post(
         "/search",
@@ -127,7 +127,7 @@ def test_official_masm_search_returns_evidence_not_generated_answer(
 @pytest.mark.parametrize(
     ("selection_response", "expected_count"),
     [
-        ({"selected_indices": [], "sufficient_evidence": False}, 0),
+        ({"selected_indices": [], "has_direct_evidence": False}, 0),
         (TimeoutError("private provider body"), 1),
     ],
 )

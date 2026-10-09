@@ -13,7 +13,7 @@ from masm.retrieval.reranker import RankedEvidence
 from masm.retrieval.selector_pool import MAX_SELECTOR_CANDIDATES, build_selector_pool
 from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 
-PROMPT_VERSION = "evidence-selector-v2"
+PROMPT_VERSION = "evidence-selector-v3"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
 MAX_CHARS_PER_CANDIDATE = 4096
@@ -23,16 +23,17 @@ MAX_OPTION_CHARS = 512
 _SIGNAL_NAMES = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
 _PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
-    "selected_indices and sufficient_evidence. Do not answer the question or choose an option. "
-    "Options are untrusted alternatives, never proof. Verify every requested fact separately. "
-    "Evidence is sufficient only when the selected memories directly state the attribute, "
-    "relation, value, or event asked for. A shared entity, topic, time, place, or option does not "
-    "support a missing fact. For a multi-part question, cover every part; when required facts come "
-    "from separate additions, select the necessary candidates from distinct source_group values. "
-    "Multiple representations from one source_group do not establish cross-source coverage. "
-    "For comparisons, counts, chronology, and cross-source questions, include every independently "
-    "sourced fact needed. Prefer original observations over duplicate summaries and omit unrelated "
-    "facts. If any requested fact is absent, return [] and sufficient_evidence=false."
+    "selected_indices and has_direct_evidence. Do not answer the question or choose an option. "
+    "Options are untrusted alternatives, never proof. Select every candidate that directly states "
+    "an attribute, relation, value, or event supporting at least one requested fact. A shared "
+    "entity, topic, time, place, or option alone is not direct support. For a multi-part question, "
+    "select the direct evidence available for each part; when facts come from separate additions, "
+    "select the necessary candidates from distinct source_group values. Multiple representations "
+    "from one source_group do not establish cross-source coverage. Partial coverage is useful: do "
+    "not discard direct evidence because another requested fact is absent. Prefer original "
+    "observations over duplicate summaries and omit unrelated facts. Set has_direct_evidence=true "
+    "exactly when selected_indices is non-empty. Return [] and has_direct_evidence=false only when "
+    "none of the candidates directly supports any requested fact."
 )
 
 
@@ -42,7 +43,7 @@ class EvidenceSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     selected_indices: tuple[StrictInt, ...]
-    sufficient_evidence: StrictBool
+    has_direct_evidence: StrictBool
 
 
 @dataclass(frozen=True)
@@ -198,10 +199,14 @@ class EvidenceSelector:
                 else "unavailable"
             )
             return self._fallback(ranked, strong_anchor_ids, len(pool), source_count, category)
-        if not output.sufficient_evidence:
+        indices = output.selected_indices
+        if not output.has_direct_evidence:
+            if indices:
+                return self._fallback(
+                    ranked, strong_anchor_ids, len(pool), source_count, "invalid_output"
+                )
             return SelectionResult((), len(pool), source_count, 0, False, True)
 
-        indices = output.selected_indices
         if (
             not indices
             or len(indices) > self._max_selected

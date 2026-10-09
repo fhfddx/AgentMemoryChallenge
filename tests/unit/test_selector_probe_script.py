@@ -20,10 +20,10 @@ def test_probe_reports_all_four_selection_boundaries() -> None:
     probe = importlib.import_module("scripts.selector_probe")
     llm = FakeStructuredLLM(
         [
-            {"selected_indices": [0], "sufficient_evidence": True},
-            {"selected_indices": [], "sufficient_evidence": False},
-            {"selected_indices": [], "sufficient_evidence": False},
-            {"selected_indices": [0, 1], "sufficient_evidence": True},
+            {"selected_indices": [0], "has_direct_evidence": True},
+            {"selected_indices": [], "has_direct_evidence": False},
+            {"selected_indices": [], "has_direct_evidence": False},
+            {"selected_indices": [0, 1], "has_direct_evidence": True},
         ]
     )
     output = StringIO()
@@ -84,8 +84,8 @@ def test_extended_only_probe_makes_exactly_two_new_model_calls() -> None:
     probe = importlib.import_module("scripts.selector_probe")
     llm = FakeStructuredLLM(
         [
-            {"selected_indices": [], "sufficient_evidence": False},
-            {"selected_indices": [0, 1], "sufficient_evidence": True},
+            {"selected_indices": [], "has_direct_evidence": False},
+            {"selected_indices": [0, 1], "has_direct_evidence": True},
         ]
     )
     output = StringIO()
@@ -107,8 +107,8 @@ def test_crowded_only_probe_sends_two_pools_of_exactly_32_candidates() -> None:
     probe = importlib.import_module("scripts.selector_probe")
     llm = FakeStructuredLLM(
         [
-            {"selected_indices": [], "sufficient_evidence": False},
-            {"selected_indices": [30, 31], "sufficient_evidence": True},
+            {"selected_indices": [], "has_direct_evidence": False},
+            {"selected_indices": [30, 31], "has_direct_evidence": True},
         ]
     )
     output = StringIO()
@@ -192,8 +192,8 @@ def test_main_uses_existing_provider_config_and_prints_only_safe_counts(
     monkeypatch.setenv("MASM_EMBEDDING_API_KEY", "private-embedding-key")
     llm = FakeStructuredLLM(
         [
-            {"selected_indices": [], "sufficient_evidence": False},
-            {"selected_indices": [30, 31], "sufficient_evidence": True},
+            {"selected_indices": [], "has_direct_evidence": False},
+            {"selected_indices": [30, 31], "has_direct_evidence": True},
         ]
     )
 
