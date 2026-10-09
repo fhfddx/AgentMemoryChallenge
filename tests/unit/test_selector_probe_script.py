@@ -103,6 +103,37 @@ def test_extended_only_probe_makes_exactly_two_new_model_calls() -> None:
     assert len(llm.requests) == 2
 
 
+def test_crowded_only_probe_sends_two_pools_of_exactly_32_candidates() -> None:
+    probe = importlib.import_module("scripts.selector_probe")
+    llm = FakeStructuredLLM(
+        [
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [30, 31], "sufficient_evidence": True},
+        ]
+    )
+    output = StringIO()
+
+    exit_code = probe.run_probe(
+        llm, Settings(database_url=""), output, crowded_only=True
+    )
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert exit_code == 0
+    assert [row["case"] for row in rows] == [
+        "crowded_abstention",
+        "crowded_multi_source",
+    ]
+    assert [row["candidate_source_count"] for row in rows] == [32, 32]
+    assert [row["selected_count"] for row in rows] == [0, 2]
+    assert len(llm.requests) == 2
+    assert [len(request.payload["candidates"]) for request in llm.requests] == [32, 32]
+    assert "Atlas project" in llm.requests[0].payload["question"]
+    assert all(
+        "Atlas project" in candidate["text"]
+        for candidate in llm.requests[0].payload["candidates"]
+    )
+
+
 def test_main_rejects_disabled_selector_without_printing_credentials(
     monkeypatch, capsys
 ) -> None:
@@ -111,7 +142,7 @@ def test_main_rejects_disabled_selector_without_printing_credentials(
     monkeypatch.setenv("MASM_EVIDENCE_SELECTOR_ENABLED", "0")
     monkeypatch.setenv("MASM_LLM_API_KEY", "private-probe-key")
 
-    exit_code = probe.main(["--extended-only"])
+    exit_code = probe.main(["--crowded-only"])
 
     assert exit_code == 2
     assert json.loads(capsys.readouterr().out) == {
@@ -162,7 +193,7 @@ def test_main_uses_existing_provider_config_and_prints_only_safe_counts(
     llm = FakeStructuredLLM(
         [
             {"selected_indices": [], "sufficient_evidence": False},
-            {"selected_indices": [0, 1], "sufficient_evidence": True},
+            {"selected_indices": [30, 31], "sufficient_evidence": True},
         ]
     )
 
@@ -174,13 +205,14 @@ def test_main_uses_existing_provider_config_and_prints_only_safe_counts(
 
     monkeypatch.setattr(probe, "OpenAICompatibleLLM", provider, raising=False)
 
-    exit_code = probe.main(["--extended-only"])
+    exit_code = probe.main(["--crowded-only"])
 
     output = capsys.readouterr().out
     assert exit_code == 0
     assert [row["passed"] for row in map(json.loads, output.splitlines())] == [
         True, True,
     ]
+    assert [len(request.payload["candidates"]) for request in llm.requests] == [32, 32]
     assert "private-probe-key" not in output
     assert "private-embedding-key" not in output
     assert "Nora" not in output

@@ -19,6 +19,7 @@ def run_probe(
     output: TextIO,
     *,
     extended_only: bool = False,
+    crowded_only: bool = False,
 ) -> int:
     """Check direct, abstention, option-overlap, and multi-source boundaries."""
     known_id, distractor_id = UUID(int=1), UUID(int=2)
@@ -63,6 +64,41 @@ def run_probe(
             request_id="synthetic-source-4",
         ),
     )
+    crowded_ranked = (
+        *(
+            RankedEvidence(
+                memory_id=UUID(int=100 + index),
+                user_id="synthetic-selector-probe",
+                content=(
+                    f"The Atlas project archived document {index} "
+                    f"in cabinet {index % 10}."
+                ),
+                score=1.0 - (index * 0.01),
+                rank=index + 1,
+                granularity="message",
+                request_id=f"synthetic-crowded-source-{index}",
+            )
+            for index in range(30)
+        ),
+        RankedEvidence(
+            memory_id=project_id,
+            user_id="synthetic-selector-probe",
+            content="The Atlas project uses code name Zephyr.",
+            score=0.69,
+            rank=31,
+            granularity="message",
+            request_id="synthetic-crowded-source-30",
+        ),
+        RankedEvidence(
+            memory_id=review_id,
+            user_id="synthetic-selector-probe",
+            content="The review for the Atlas project is scheduled on April 18.",
+            score=0.68,
+            rank=32,
+            granularity="message",
+            request_id="synthetic-crowded-source-31",
+        ),
+    )
     selector = EvidenceSelector(
         llm,
         max_candidates=settings.selector_max_candidates,
@@ -90,7 +126,27 @@ def run_probe(
             {project_id, review_id},
         ),
     )
-    if extended_only:
+    crowded_checks: tuple[
+        tuple[str, str, list[str] | None, tuple[RankedEvidence, ...], set[UUID]], ...
+    ] = (
+        (
+            "crowded_abstention",
+            "What is the Atlas project's budget authorization code?",
+            ["cabinet 3", "P-4821"],
+            crowded_ranked,
+            set(),
+        ),
+        (
+            "crowded_multi_source",
+            "What are the code name and review date of the Atlas project?",
+            None,
+            crowded_ranked,
+            {project_id, review_id},
+        ),
+    )
+    if crowded_only:
+        checks = crowded_checks
+    elif extended_only:
         checks = checks[2:]
     all_passed = True
     provider_logger = logging.getLogger("masm.provider")
@@ -153,7 +209,9 @@ def _report_failure(case: str, category: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run the probe only when the deployed official selector is enabled."""
     parser = argparse.ArgumentParser(description="Run synthetic selector diagnostics")
-    parser.add_argument("--extended-only", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--extended-only", action="store_true")
+    mode.add_argument("--crowded-only", action="store_true")
     args = parser.parse_args([] if argv is None else argv)
     try:
         settings = Settings.from_env()
@@ -181,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
                 settings,
                 sys.stdout,
                 extended_only=args.extended_only,
+                crowded_only=args.crowded_only,
             )
         finally:
             close = getattr(llm, "close", None)
