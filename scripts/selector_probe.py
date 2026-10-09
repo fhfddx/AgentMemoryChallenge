@@ -1,5 +1,6 @@
 """Exercise the deployed selector with synthetic evidence only."""
 
+import argparse
 import json
 import logging
 import sys
@@ -12,7 +13,13 @@ from masm.retrieval.evidence_selector import EvidenceSelector
 from masm.retrieval.reranker import RankedEvidence
 
 
-def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
+def run_probe(
+    llm: StructuredLLM,
+    settings: Settings,
+    output: TextIO,
+    *,
+    extended_only: bool = False,
+) -> int:
     """Check direct, abstention, option-overlap, and multi-source boundaries."""
     known_id, distractor_id = UUID(int=1), UUID(int=2)
     direct_ranked = (
@@ -83,6 +90,8 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
             {project_id, review_id},
         ),
     )
+    if extended_only:
+        checks = checks[2:]
     all_passed = True
     provider_logger = logging.getLogger("masm.provider")
     was_disabled = provider_logger.disabled
@@ -141,8 +150,11 @@ def _report_failure(case: str, category: str) -> None:
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Run the probe only when the deployed official selector is enabled."""
+    parser = argparse.ArgumentParser(description="Run synthetic selector diagnostics")
+    parser.add_argument("--extended-only", action="store_true")
+    args = parser.parse_args([] if argv is None else argv)
     try:
         settings = Settings.from_env()
         if (
@@ -164,7 +176,12 @@ def main() -> int:
             max_attempts=settings.model_max_attempts,
         )
         try:
-            return run_probe(llm, settings, sys.stdout)
+            return run_probe(
+                llm,
+                settings,
+                sys.stdout,
+                extended_only=args.extended_only,
+            )
         finally:
             close = getattr(llm, "close", None)
             if callable(close):
@@ -175,4 +192,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
