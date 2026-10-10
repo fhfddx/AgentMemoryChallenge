@@ -75,6 +75,105 @@ def test_disconnected_similar_memory_is_not_traversed() -> None:
     assert d not in {candidate.memory_id for candidate in expanded}
 
 
+def test_reciprocal_cycle_does_not_return_the_original_seed() -> None:
+    """A-B-A 环不能把原始种子 A 当作二跳证据再次返回。"""
+    a, b = uuid4(), uuid4()
+    repository = _GraphRepository({a: [b], b: [a]})
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [_candidate(a)], 10)
+
+    assert [candidate.memory_id for candidate in expanded] == [b]
+    assert repository.related_calls == [[a], [b]]
+
+
+def test_diamond_graph_emits_shared_second_hop_once() -> None:
+    """A-B/C-D 菱形中的共享端点 D 只能出现一次。"""
+    a, b, c, d = uuid4(), uuid4(), uuid4(), uuid4()
+    repository = _GraphRepository({a: [b, c], b: [d], c: [d]})
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [_candidate(a)], 10)
+    ids = [candidate.memory_id for candidate in expanded]
+
+    assert set(ids[:2]) == {b, c}
+    assert ids[2:] == [d]
+
+
+def test_empty_first_hop_skips_second_relation_query() -> None:
+    """没有一跳邻居时不得发起无意义的第二次关系查询。"""
+    a = uuid4()
+    repository = _GraphRepository()
+    expander = RelationExpander(repository)
+
+    assert expander.expand(_USER, [_candidate(a)], 10) == []
+    assert repository.related_calls == [[a]]
+
+
+def test_second_hop_traversal_uses_at_most_eight_first_hop_seeds() -> None:
+    """拥挤图中用于第二跳的桥节点必须硬限制为八个。"""
+    a = uuid4()
+    bridges = [uuid4() for _ in range(12)]
+    endpoints = [uuid4() for _ in bridges]
+    adjacency = {a: bridges}
+    adjacency.update(
+        {bridge: [endpoint] for bridge, endpoint in zip(bridges, endpoints, strict=True)}
+    )
+    repository = _GraphRepository(adjacency)
+    expander = RelationExpander(repository)
+
+    expander.expand(_USER, [_candidate(a)], 32)
+
+    assert len(repository.related_calls) == 2
+    assert len(repository.related_calls[1]) == 8
+    assert set(repository.related_calls[1]).issubset(set(bridges))
+
+
+def test_second_hop_emits_at_most_eight_candidates() -> None:
+    """单个桥节点后的宽扇出不能把超过八个二跳节点送入候选池。"""
+    a, bridge = uuid4(), uuid4()
+    endpoints = [uuid4() for _ in range(12)]
+    repository = _GraphRepository({a: [bridge], bridge: endpoints})
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [_candidate(a)], 32)
+    ids = {candidate.memory_id for candidate in expanded}
+
+    assert bridge in ids
+    assert len(ids.intersection(endpoints)) == 8
+
+
+def test_crowded_first_hop_reserves_eight_second_hop_slots() -> None:
+    """一跳填满预算时仍为最多八个链端点保留位置。"""
+    a = uuid4()
+    bridges = [uuid4() for _ in range(30)]
+    endpoints = [uuid4() for _ in range(30)]
+    adjacency = {a: bridges}
+    adjacency.update(
+        {bridge: [endpoint] for bridge, endpoint in zip(bridges, endpoints, strict=True)}
+    )
+    repository = _GraphRepository(adjacency)
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [_candidate(a)], 32)
+    ids = {candidate.memory_id for candidate in expanded}
+
+    assert len(expanded) == 32
+    assert len(ids.intersection(bridges)) == 24
+    assert len(ids.intersection(endpoints)) == 8
+
+
+def test_budget_of_one_keeps_the_direct_bridge() -> None:
+    """预算不足以容纳完整链时，一跳桥 B 必须优先于二跳 C。"""
+    a, b, c = uuid4(), uuid4(), uuid4()
+    repository = _GraphRepository({a: [b], b: [c]})
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [_candidate(a)], 1)
+
+    assert [candidate.memory_id for candidate in expanded] == [b]
+
+
 def test_seeds_are_not_returned_as_expansion() -> None:
     a, b = uuid4(), uuid4()
     repository = _GraphRepository({a: [b, a]})
