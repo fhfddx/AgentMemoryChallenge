@@ -54,6 +54,8 @@ class RelationExpander:
         self, user_id: str, seeds: Sequence[MemoryCandidate], limit: int
     ) -> list[MemoryCandidate]:
         """返回冲突同伴与至多二跳的显式关系邻居。"""
+        if self._max_seeds < 1:
+            return []
         bounded_seeds: list[MemoryCandidate] = []
         seed_ids_seen: set[UUID] = set()
         for seed in seeds:
@@ -88,30 +90,40 @@ class RelationExpander:
         if relation_budget < 1:
             return results
 
-        first_hop = _ordered_unique(
+        direct_hop = _ordered_unique(
             self._repo.related(user_id, seed_ids, budget),
-            excluded=seen,
+            excluded=seed_ids,
         )
-        if not first_hop:
+        if not direct_hop:
             return results
+        direct_ids = {candidate.memory_id for candidate in direct_hop}
+        bridge_already_emitted = any(
+            candidate.memory_id in direct_ids for candidate in results
+        )
+        first_hop = [
+            candidate for candidate in direct_hop if candidate.memory_id not in seen
+        ]
+        required_first_slots = 0 if bridge_already_emitted else 1
 
-        # 一个槽位只能保留直接桥节点，无法构成完整二跳链，也无需第二次查询。
-        if relation_budget == 1:
+        # 若输出中还没有桥节点，最后一个槽位必须留给直接一跳，不能被端点挤掉。
+        if relation_budget <= required_first_slots:
             results.append(first_hop[0])
             return results
 
-        traversal_seeds = first_hop[: self._max_seeds]
+        traversal_seeds = direct_hop[: self._max_seeds]
         second_hop = _ordered_unique(
             self._repo.related(
                 user_id,
                 [candidate.memory_id for candidate in traversal_seeds],
-                min(MAX_SECOND_HOP, relation_budget - 1),
+                min(MAX_SECOND_HOP, relation_budget - required_first_slots),
             ),
-            excluded={*seen, *(candidate.memory_id for candidate in first_hop)},
+            excluded={*seen, *(candidate.memory_id for candidate in direct_hop)},
         )
 
         # 为第二跳预留至多八个槽位，但始终至少保留一个直接桥节点。
-        second_quota = min(len(second_hop), MAX_SECOND_HOP, relation_budget - 1)
+        second_quota = min(
+            len(second_hop), MAX_SECOND_HOP, relation_budget - required_first_slots
+        )
         first_quota = min(len(first_hop), relation_budget - second_quota)
         unused = relation_budget - first_quota - second_quota
         if unused:

@@ -87,7 +87,7 @@ def run_probe(
     leaf = f"Leaf-{run_tag}"
     terminal = f"Terminal-{run_tag}"
     missing = f"Unconnected-{run_tag}"
-    run_ids = [f"{user_id}-{index}" for index in range(3)]
+    run_ids = [f"{user_id}-{index}" for index in range(4)]
     registered: list[str] = []
     all_passed = True
     cleanup_passed = False
@@ -97,6 +97,10 @@ def run_probe(
             f"The registered chain {root} continues through {bridge}.",
             f"For the same registered chain, {bridge} continues through {leaf}.",
             f"The terminal record associated with {leaf} is {terminal}.",
+            (
+                f"The isolated catalog entry {missing} uses registered-chain terminology "
+                "but belongs to a separate archive."
+            ),
         )
         for index, (run_id, content) in enumerate(
             zip(run_ids, additions, strict=True)
@@ -121,11 +125,11 @@ def run_probe(
         stored_text = " ".join(
             candidate.content for candidate in [*contexts, *messages]
         )
-        storage_markers = (root, bridge, leaf, terminal)
+        storage_markers = (root, bridge, leaf, terminal, missing)
         stored_marker_count = sum(marker in stored_text for marker in storage_markers)
         storage_passed = (
-            len(contexts) == 3
-            and len(messages) == 3
+            len(contexts) == 4
+            and len(messages) == 4
             and stored_marker_count == len(storage_markers)
         )
         all_passed &= storage_passed
@@ -145,15 +149,17 @@ def run_probe(
             (
                 "connected_chain",
                 f"Follow the registered chain from {root} and identify its terminal record.",
-                storage_markers,
+                (root, bridge, leaf, terminal),
+                (missing,),
             ),
             (
                 "disconnected_chain",
                 f"What terminal record is linked to {missing}?",
                 (),
+                (),
             ),
         )
-        for name, query, expected_markers in searches:
+        for name, query, expected_markers, forbidden_markers in searches:
             body = _post(
                 client,
                 "/search",
@@ -166,10 +172,14 @@ def run_probe(
             matched_marker_count = sum(
                 marker in returned_text for marker in expected_markers
             )
+            forbidden_marker_count = sum(
+                marker in returned_text for marker in forbidden_markers
+            )
             passed = (
                 len(data) == 0
                 if not expected_markers
                 else matched_marker_count == len(expected_markers)
+                and forbidden_marker_count == 0
             )
             all_passed &= passed
             _print_row(
@@ -178,6 +188,7 @@ def run_probe(
                     "case": name,
                     "returned_count": len(data),
                     "matched_marker_count": matched_marker_count,
+                    "forbidden_marker_count": forbidden_marker_count,
                     "expected_marker_count": len(expected_markers),
                     "passed": passed,
                 },

@@ -229,6 +229,16 @@ def test_empty_seeds_return_no_expansion() -> None:
     assert repository.related_calls == []
 
 
+def test_zero_seed_limit_skips_all_relation_queries() -> None:
+    """显式关闭种子预算时不能偷偷使用第一个种子或发起空查询。"""
+    seed_id, neighbour = uuid4(), uuid4()
+    repository = _GraphRepository({seed_id: [neighbour]})
+    expander = RelationExpander(repository, max_seeds=0)
+
+    assert expander.expand(_USER, [_candidate(seed_id)], 10) == []
+    assert repository.related_calls == []
+
+
 def test_conflict_peers_win_the_budget_over_plain_neighbours() -> None:
     """普通邻居占满预算时，命中冲突组的同伴仍必须出现。"""
     seed_a, peer, neighbour_one, neighbour_two = uuid4(), uuid4(), uuid4(), uuid4()
@@ -245,6 +255,27 @@ def test_conflict_peers_win_the_budget_over_plain_neighbours() -> None:
     ids = [candidate.memory_id for candidate in expanded]
     assert peer in ids, "冲突组同伴被普通邻居挤掉"
     assert len(ids) <= 2
+
+
+def test_conflict_peer_can_also_be_a_second_hop_bridge() -> None:
+    """冲突同伴若也是直接邻居，仍必须作为桥节点参与第二跳。"""
+    seed_id, bridge, endpoint = uuid4(), uuid4(), uuid4()
+    group = uuid4()
+    repository = _GraphRepository({seed_id: [bridge], bridge: [endpoint]})
+    repository.conflict_members = {seed_id: [bridge], bridge: [seed_id]}
+    seed = MemoryCandidate(
+        memory_id=seed_id,
+        user_id=_USER,
+        content="seed",
+        score=1.0,
+        conflict_group_id=group,
+    )
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [seed], 3)
+
+    assert [candidate.memory_id for candidate in expanded] == [bridge, endpoint]
+    assert repository.related_calls == [[seed_id], [bridge]]
 
 
 def test_multiple_conflict_groups_use_deterministic_order() -> None:

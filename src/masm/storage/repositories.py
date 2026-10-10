@@ -949,6 +949,7 @@ class MemoryRepository:
                 session.execute(
                     select(Memory)
                     .where(Memory.user_id == user_id, Memory.id.in_(list(related_ids)))
+                    .order_by(Memory.id)
                     .limit(limit)
                 )
                 .scalars()

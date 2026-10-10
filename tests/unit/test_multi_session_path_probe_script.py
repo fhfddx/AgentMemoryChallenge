@@ -23,9 +23,16 @@ class _Response:
 
 
 class _InMemoryBackend:
-    def __init__(self, *, run_tag: str, fail_on_search: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        run_tag: str,
+        fail_on_search: int | None = None,
+        leak_disconnected: bool = False,
+    ) -> None:
         self.run_tag = run_tag
         self.fail_on_search = fail_on_search
+        self.leak_disconnected = leak_disconnected
         self.runs: dict[str, dict[str, Any]] = {}
         self.requests: list[tuple[str, dict[str, Any]]] = []
         self._search_index = 0
@@ -52,13 +59,21 @@ class _InMemoryBackend:
         bridge = f"Bridge-{self.run_tag}"
         leaf = f"Leaf-{self.run_tag}"
         terminal = f"Terminal-{self.run_tag}"
+        connected = [
+            {"id": "chain-1", "content": f"{root} points through {bridge}."},
+            {"id": "chain-2", "content": f"{bridge} points through {leaf}."},
+            {"id": "chain-3", "content": f"{leaf} ends at {terminal}."},
+        ]
+        if self.leak_disconnected:
+            connected.append(
+                {
+                    "id": "disconnected",
+                    "content": f"Unconnected-{self.run_tag} is only a lookalike.",
+                }
+            )
         searches: tuple[dict[str, Any], ...] = (
             {
-                "data": [
-                    {"id": "chain-1", "content": f"{root} points through {bridge}."},
-                    {"id": "chain-2", "content": f"{bridge} points through {leaf}."},
-                    {"id": "chain-3", "content": f"{leaf} ends at {terminal}."},
-                ]
+                "data": connected
             },
             {"data": []},
         )
@@ -117,21 +132,23 @@ def test_probe_exercises_connected_and_disconnected_paths_then_cleans() -> None:
         "/add",
         "/add",
         "/add",
+        "/add",
         "/search",
         "/search",
     ]
     assert [json.loads(line) for line in output.getvalue().splitlines()] == [
         {
             "case": "storage",
-            "context_count": 3,
-            "expected_marker_count": 4,
-            "message_count": 3,
+            "context_count": 4,
+            "expected_marker_count": 5,
+            "message_count": 4,
             "passed": True,
-            "stored_marker_count": 4,
+            "stored_marker_count": 5,
         },
         {
             "case": "connected_chain",
             "expected_marker_count": 4,
+            "forbidden_marker_count": 0,
             "matched_marker_count": 4,
             "passed": True,
             "returned_count": 3,
@@ -139,6 +156,7 @@ def test_probe_exercises_connected_and_disconnected_paths_then_cleans() -> None:
         {
             "case": "disconnected_chain",
             "expected_marker_count": 0,
+            "forbidden_marker_count": 0,
             "matched_marker_count": 0,
             "passed": True,
             "returned_count": 0,
@@ -147,10 +165,10 @@ def test_probe_exercises_connected_and_disconnected_paths_then_cleans() -> None:
             "case": "cleanup",
             "cleanup_attempt_error_count": 0,
             "complete": True,
-            "first_pass_memories_deleted": 6,
-            "first_pass_sources_deleted": 3,
+            "first_pass_memories_deleted": 8,
+            "first_pass_sources_deleted": 4,
             "passed": True,
-            "registered_run_count": 3,
+            "registered_run_count": 4,
             "residual_memories_deleted": 0,
             "residual_sources_deleted": 0,
             "retry_memories_deleted": 0,
@@ -180,7 +198,7 @@ def test_probe_failure_is_sanitized_and_registered_runs_are_cleaned() -> None:
         "failure_category": "request_or_contract",
         "passed": False,
     }
-    assert rows[-1]["registered_run_count"] == 3
+    assert rows[-1]["registered_run_count"] == 4
     assert rows[-1]["passed"] is True
     assert "private-provider-body" not in output.getvalue()
 
@@ -213,16 +231,37 @@ def test_probe_retries_cleanup_and_proves_zero_residuals() -> None:
         "case": "cleanup",
         "cleanup_attempt_error_count": 1,
         "complete": True,
-        "first_pass_memories_deleted": 4,
-        "first_pass_sources_deleted": 2,
+        "first_pass_memories_deleted": 6,
+        "first_pass_sources_deleted": 3,
         "passed": True,
-        "registered_run_count": 3,
+        "registered_run_count": 4,
         "residual_memories_deleted": 0,
         "residual_sources_deleted": 0,
         "retry_memories_deleted": 2,
         "retry_sources_deleted": 1,
     }
     assert "private-cleanup-error" not in output.getvalue()
+
+
+def test_probe_rejects_a_stored_disconnected_lookalike_in_chain_results() -> None:
+    probe = importlib.import_module("scripts.multi_session_path_probe")
+    backend = _InMemoryBackend(run_tag="leak", leak_disconnected=True)
+    output = StringIO()
+
+    exit_code = probe.run_probe(
+        backend,
+        backend,
+        backend.delete_run,
+        output,
+        run_tag="leak",
+    )
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    connected = next(row for row in rows if row["case"] == "connected_chain")
+    assert exit_code == 1
+    assert connected["forbidden_marker_count"] == 1
+    assert connected["passed"] is False
+    assert backend.runs == {}
 
 
 def test_probe_output_uses_only_safe_aggregate_fields() -> None:
@@ -241,6 +280,7 @@ def test_probe_output_uses_only_safe_aggregate_fields() -> None:
         "stored_marker_count",
         "expected_marker_count",
         "matched_marker_count",
+        "forbidden_marker_count",
         "returned_count",
         "passed",
         "cleanup_attempt_error_count",
