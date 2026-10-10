@@ -41,6 +41,12 @@ class _Case:
     expected: frozenset[int]
 
 
+class _InvalidSelectionError(ValueError):
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
 def _candidate(index: int, text: str, source: str) -> dict[str, object]:
     return {
         "index": index,
@@ -141,17 +147,18 @@ def _evaluate(
         indices = decision.selected_indices
         if not decision.sufficient_evidence:
             if indices:
-                raise ValueError("insufficient evidence cannot select indices")
+                raise _InvalidSelectionError("insufficient_with_indices")
             selected: tuple[int, ...] = ()
             abstained = True
         else:
-            if (
-                not indices
-                or len(indices) > settings.selector_max_selected
-                or len(indices) != len(set(indices))
-                or any(index < 0 or index >= len(case.candidates) for index in indices)
-            ):
-                raise ValueError("invalid selected indices")
+            if not indices:
+                raise _InvalidSelectionError("sufficient_without_indices")
+            if len(indices) > settings.selector_max_selected:
+                raise _InvalidSelectionError("too_many_indices")
+            if len(indices) != len(set(indices)):
+                raise _InvalidSelectionError("duplicate_indices")
+            if any(index < 0 or index >= len(case.candidates) for index in indices):
+                raise _InvalidSelectionError("out_of_range_indices")
             selected = indices
             abstained = False
         selected_sources = {
@@ -169,6 +176,14 @@ def _evaluate(
             "passed": passed,
         }
     except Exception as exc:
+        if isinstance(exc, _InvalidSelectionError):
+            failure_detail = exc.detail
+        elif isinstance(
+            exc, (StructuredOutputError, ValidationError, ValueError, TypeError)
+        ):
+            failure_detail = "schema_validation"
+        else:
+            failure_detail = "provider_unavailable"
         return {
             "variant": variant,
             "case": case.name,
@@ -177,6 +192,7 @@ def _evaluate(
             "selected_source_count": 0,
             "abstained": False,
             "failure_category": _failure_category(exc),
+            "failure_detail": failure_detail,
             "passed": False,
         }
 
