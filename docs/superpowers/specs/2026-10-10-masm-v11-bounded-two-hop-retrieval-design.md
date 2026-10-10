@@ -209,14 +209,24 @@ anchor `Unconnected-<tag>` **plus** an unrelated chain record. `relation_isolati
 rounds, so the failure is confined to the model selection step.
 
 The set-level check added in `015986a` only proved that the *union* of the selected text mentions
-an anchor. The required property is per-evidence: every selected memory must either state an anchor
-itself or lie in the anchor-rooted, user-scoped relation neighbourhood. Text alone cannot decide
-this — a legitimate downstream chain link does not repeat the Root string, and is textually
-identical to an unrelated chain record. The check therefore consumes persisted relations through
-`masm.retrieval.anchor_connectivity.AnchorConnectivity`, which maps message evidence to its
-same-request context parent (governance edges attach to context memories) and walks at most
-`DEFAULT_ANCHOR_HOPS` bounded hops. The selector drops ungrounded selected evidence, keeps the
-grounded evidence as `partial`, and downgrades `sufficient` to `partial` when anything was dropped.
-`build_runtime` wires the oracle for the official profile; construction without it keeps the
-previous set-level behaviour. The prompt, schema, three-state semantics, fallback anchors, pool
-construction, relation-expansion budgets, and public Add/Search contracts are unchanged.
+an anchor. The required property is per-evidence: every selected memory must lie in the
+anchor-rooted, user-scoped allowed-evidence component.
+
+A first attempt (`c7eede8`) defined that component only over persisted relation edges through
+`masm.retrieval.anchor_connectivity.AnchorConnectivity`. The deployed round 1 of the same probe
+rejected it: with the model output unchanged (`[root, bridge, leaf]`, `sufficient`), the wired
+selector returned only 1 of 3 items and covered 2 of 4 markers, because `related()` found no
+neighbours for that chain. Relation-only grounding collapsed to "keep the anchor's own memory",
+while the probe's `connected_chain` case passes on `015986a` without any traversal at all, since
+every run enters the candidate pool through recall.
+
+The allowed path is therefore defined over **two** edge sources. Two selected memories are linked
+when they share an explicit structured identifier (matched per evidence pair, so a downstream link
+may share `Bridge-*`/`Leaf-*` instead of repeating `Root-*`), or when they are connected inside the
+bounded relation closure that `AnchorConnectivity` returns (message evidence is mapped to its
+same-request context parent first, because governance edges attach to context memories). The
+selector keeps the component rooted at the anchor-bearing evidence, drops the rest, and downgrades
+`sufficient` to `partial` when anything was dropped. `build_runtime` wires the relation oracle for
+the official profile; identifier adjacency needs no database and therefore applies even when no
+oracle is wired. The prompt, schema, three-state semantics, fallback anchors, pool construction,
+relation-expansion budgets, and public Add/Search contracts are unchanged.

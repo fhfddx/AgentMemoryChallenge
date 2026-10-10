@@ -202,11 +202,6 @@ def _anchor_tokens(text: str) -> frozenset[str]:
     )
 
 
-def _mentions_any_anchor(evidence: RankedEvidence, anchors: frozenset[str]) -> bool:
-    """该条证据自身是否显式提到问题锚点之一。"""
-    return bool(anchors & _anchor_tokens(_evidence_text(evidence)))
-
-
 def _distinct_source_count(selected: Sequence[RankedEvidence]) -> int:
     return len({item.request_id or str(item.memory_id) for item in selected})
 
@@ -429,37 +424,68 @@ class EvidenceSelector:
         question: str,
         selected: Sequence[RankedEvidence],
     ) -> tuple[RankedEvidence, ...]:
-        """只保留「自身含问题锚点」或「与含锚点证据同关系分量」的选中证据。
+        """只保留以问题锚点为根的「允许证据路径」连通分量。
 
         集合级并集校验只证明「选中文本里出现过锚点」，无法区分「正确锚点证据」与
-        「额外无关链证据」的混合选择。要区分二者必须使用持久化关系信息：合法的下游链
-        证据通常不重复 Root 字符串，文本层面与无关链证据完全同形。
+        「额外无关链证据」的混合选择。修复方式是逐条判定接地：两条证据只要满足下面任一
+        条件就算相连，然后保留与含锚点证据同分量的部分——
 
-        未接线 ``AnchorConnectivity`` 时保持加校验之前的集合级行为；只有一条选中证据时
-        它与自身天然同分量，不需要关系读取。返回空元组表示整组完全没有锚点接地。
+        * **共享显式标识符**：合法下游链靠共享标识符串起来（`Bridge-*`、`Leaf-*`），
+          不要求下游重复 Root 字符串。这一步纯文本，不需要数据库。
+        * **持久化关系边**：注入 ``AnchorConnectivity`` 时，锚点关系闭包内的证据也算相连。
+
+        为什么必须同时保留文本相邻：线上的 `related()` 对这条链路找不回任何邻居
+        （c7eede8 的 round 1 里模型原始选择不变，但只返回 1/3 条），只按关系接地会把
+        合法下游链整条删掉。关系边是额外的、更宽松的边来源，不是唯一依据。
+
+        返回空元组表示整组完全没有锚点接地；没有显式锚点时行为完全不变。
         """
         anchors = _anchor_tokens(question)
         if not anchors:
             return tuple(selected)
-        anchor_items = tuple(
-            item for item in selected if _mentions_any_anchor(item, anchors)
-        )
-        if not anchor_items:
+        item_tokens = [_anchor_tokens(_evidence_text(item)) for item in selected]
+        keep = {
+            index for index, tokens in enumerate(item_tokens) if tokens & anchors
+        }
+        if not keep:
             return ()
-        if self._anchor_connectivity is None or len(selected) <= 1:
-            return tuple(selected)
-        connected = self._anchor_connectivity.connected(
+        while True:
+            linked = frozenset().union(*(item_tokens[index] for index in keep))
+            added = {
+                index for index, tokens in enumerate(item_tokens) if tokens & linked
+            }
+            added |= self._relation_linked_indices(selected, keep)
+            if added <= keep:
+                break
+            keep |= added
+        return tuple(
+            item for index, item in enumerate(selected) if index in keep
+        )
+
+    def _relation_linked_indices(
+        self,
+        selected: Sequence[RankedEvidence],
+        keep: Collection[int],
+    ) -> set[int]:
+        """返回位于「当前保留集合」关系闭包内的选中下标；未接线时为空集。"""
+        if self._anchor_connectivity is None:
+            return set()
+        connectivity = self._anchor_connectivity.connected(
             selected[0].user_id,
-            [item.memory_id for item in anchor_items],
-            [item.request_id for item in anchor_items if item.request_id],
+            [selected[index].memory_id for index in sorted(keep)],
+            [
+                selected[index].request_id
+                for index in sorted(keep)
+                if selected[index].request_id
+            ],
             self._max_anchor_hops,
         )
-        return tuple(
-            item
-            for item in selected
-            if item.memory_id in connected.memory_ids
-            or (bool(item.request_id) and item.request_id in connected.request_ids)
-        )
+        return {
+            index
+            for index, item in enumerate(selected)
+            if item.memory_id in connectivity.memory_ids
+            or (bool(item.request_id) and item.request_id in connectivity.request_ids)
+        }
 
     def _fallback(
         self,

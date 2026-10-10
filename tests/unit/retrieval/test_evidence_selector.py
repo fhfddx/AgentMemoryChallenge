@@ -260,8 +260,145 @@ class _ChainGraph:
         return neighbours[:limit]
 
 
-def _connected_selector(llm: FakeStructuredLLM, graph: _ChainGraph) -> EvidenceSelector:
-    return EvidenceSelector(llm, anchor_connectivity=AnchorConnectivity(graph))
+class _NoRelations:
+    """关系图为空的假仓库：复现云端「related 找不到任何邻居」的事实。"""
+
+    def __init__(self) -> None:
+        self.context_calls: list[list[str]] = []
+
+    def context_candidates_for_requests(
+        self, user_id: str, request_ids: Sequence[str]
+    ) -> list[MemoryCandidate]:
+        del user_id
+        self.context_calls.append(list(request_ids))
+        return [
+            MemoryCandidate(
+                memory_id=UUID(int=300 + index),
+                user_id="user-1",
+                content="context",
+                score=0.0,
+                request_id=run,
+            )
+            for index, run in enumerate(request_ids)
+        ]
+
+    def related(
+        self, user_id: str, memory_ids: Sequence[UUID], limit: int
+    ) -> list[MemoryCandidate]:
+        del user_id, memory_ids, limit
+        return []
+
+
+class _SingleEdgeGraph:
+    """只有 run-a 的 context 与 run-b 的 context 之间一条边。"""
+
+    def context_candidates_for_requests(
+        self, user_id: str, request_ids: Sequence[str]
+    ) -> list[MemoryCandidate]:
+        return [
+            MemoryCandidate(
+                memory_id=UUID(int=200 + index),
+                user_id=user_id,
+                content="context",
+                score=0.0,
+                request_id=run,
+            )
+            for index, run in enumerate(request_ids)
+        ]
+
+    def related(
+        self, user_id: str, memory_ids: Sequence[UUID], limit: int
+    ) -> list[MemoryCandidate]:
+        del limit
+        if all(memory_id.int != 200 for memory_id in memory_ids):
+            return []
+        return [
+            MemoryCandidate(
+                memory_id=UUID(int=201),
+                user_id=user_id,
+                content="context",
+                score=0.0,
+                request_id="run-b",
+            )
+        ]
+
+
+def _connected_selector(
+    llm: FakeStructuredLLM, connectivity: AnchorConnectivity
+) -> EvidenceSelector:
+    return EvidenceSelector(llm, anchor_connectivity=connectivity)
+
+
+def test_identifier_linked_chain_is_kept_when_the_relation_graph_is_empty() -> None:
+    """云端回归的最小复现：关系图为空时，共享标识符相连的下游链必须整链保留。
+
+    c7eede8 在线上的 round 1 里，模型原始选择与未接线时逐字相同（`[0,1,2]`、sufficient），
+    但接入关系可达性后只返回 1 条（2/4 标记），因为 `related()` 没有找回任何邻居。合法下游
+    证据是靠共享标识符（Bridge-case、Leaf-case）串起来的，不能因为关系图为空就丢弃。
+    """
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "sufficient"}])
+    pool = _chain_pool()
+
+    result = _connected_selector(llm, AnchorConnectivity(_NoRelations())).select(
+        "Follow the registered chain from Root-case and identify its terminal record.",
+        None,
+        pool,
+        {item.memory_id for item in pool},
+    )
+
+    assert result.evidence == (pool[0], pool[1], pool[2])
+    assert result.evidence_state == "sufficient"
+    assert result.abstained is False
+
+
+def test_mixed_selection_is_rejected_without_any_relation_oracle() -> None:
+    """标识符连通判定不依赖注入的关系图：未接线时也必须拦住混合过选。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0, 3], "evidence_state": "partial"}])
+    pool = _chain_pool()
+
+    result = EvidenceSelector(llm).select(
+        "What terminal record is linked to Unconnected-case?",
+        None,
+        pool,
+        {item.memory_id for item in pool},
+    )
+
+    assert result.evidence == (pool[3],)
+    assert result.abstained is False
+
+
+def test_relation_edge_links_selected_evidence_without_shared_identifiers() -> None:
+    """关系边是额外的边来源：两条证据没有共同标识符时仍可按关系连通保留。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "sufficient"}])
+    anchor = _evidence(1, "run-a", "Root-case is recorded here.")
+    unrelated_wording = _evidence(2, "run-b", "A separate archive note with no shared terms.")
+
+    result = _connected_selector(
+        llm, AnchorConnectivity(_SingleEdgeGraph())
+    ).select(
+        "What does Root-case describe?",
+        None,
+        [anchor, unrelated_wording],
+        {anchor.memory_id, unrelated_wording.memory_id},
+    )
+
+    assert result.evidence == (anchor, unrelated_wording)
+    assert result.evidence_state == "sufficient"
+
+
+def test_identifier_linked_chain_beyond_the_relation_hops_is_kept() -> None:
+    """链路比关系跳数上限更长时，标识符相邻仍必须让整条链留下。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "sufficient"}])
+    pool = _chain_pool()
+
+    result = _connected_selector(llm, AnchorConnectivity(_NoRelations())).select(
+        "Follow the registered chain from Root-case and identify its terminal record.",
+        None,
+        pool,
+        {item.memory_id for item in pool},
+    )
+
+    assert result.evidence == (pool[0], pool[1], pool[2])
 
 
 def test_mixed_selection_of_anchor_and_unrelated_chain_evidence_is_rejected() -> None:
@@ -276,7 +413,7 @@ def test_mixed_selection_of_anchor_and_unrelated_chain_evidence_is_rejected() ->
     pool = _chain_pool()
     graph = _ChainGraph()
 
-    result = _connected_selector(llm, graph).select(
+    result = _connected_selector(llm, AnchorConnectivity(graph)).select(
         "What terminal record is linked to Unconnected-case?",
         None,
         pool,
@@ -290,33 +427,13 @@ def test_mixed_selection_of_anchor_and_unrelated_chain_evidence_is_rejected() ->
     assert result.evidence_state == "partial"
 
 
-def test_unwired_selector_keeps_the_previous_set_level_behaviour() -> None:
-    """固定未接线 oracle 时的兼容契约：集合级行为不变，混合选择仍会放行。
-
-    这是可选构造参数的契约，不是目标行为：生产路径必须由 ``build_runtime`` 接线
-    ``AnchorConnectivity``（见 `test_runtime_factory.py` 的接线用例），否则云端断开链
-    过选会静默复发。
-    """
-    llm = FakeStructuredLLM([{"selected_indices": [0, 3], "evidence_state": "partial"}])
-    pool = _chain_pool()
-
-    result = EvidenceSelector(llm).select(
-        "What terminal record is linked to Unconnected-case?",
-        None,
-        pool,
-        {item.memory_id for item in pool},
-    )
-
-    assert result.evidence == (pool[0], pool[3])
-
-
 def test_connected_multi_hop_selection_keeps_every_downstream_link() -> None:
     """合法链的回归护栏：下游证据不重复 Root 字符串，也必须整链保留。"""
     llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "sufficient"}])
     pool = _chain_pool()
     graph = _ChainGraph()
 
-    result = _connected_selector(llm, graph).select(
+    result = _connected_selector(llm, AnchorConnectivity(graph)).select(
         "Follow the registered chain from Root-case and identify its terminal record.",
         None,
         pool,
@@ -333,7 +450,7 @@ def test_sufficient_selection_with_an_unrelated_extra_downgrades_to_partial() ->
     llm = FakeStructuredLLM([{"selected_indices": [0, 3], "evidence_state": "sufficient"}])
     pool = _chain_pool()
 
-    result = _connected_selector(llm, _ChainGraph()).select(
+    result = _connected_selector(llm, AnchorConnectivity(_ChainGraph())).select(
         "What terminal record is linked to Unconnected-case?",
         None,
         pool,
@@ -351,7 +468,7 @@ def test_unrelated_chain_evidence_alone_still_abstains() -> None:
     pool = _chain_pool()
     graph = _ChainGraph()
 
-    result = _connected_selector(llm, graph).select(
+    result = _connected_selector(llm, AnchorConnectivity(graph)).select(
         "What terminal record is linked to Unconnected-case?",
         None,
         pool,
@@ -370,7 +487,7 @@ def test_selection_without_explicit_anchors_skips_relation_reads() -> None:
     pool = _chain_pool()
     graph = _ChainGraph()
 
-    result = _connected_selector(llm, graph).select(
+    result = _connected_selector(llm, AnchorConnectivity(graph)).select(
         "Which records belong to the registered chain?",
         None,
         pool,

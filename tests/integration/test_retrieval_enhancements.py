@@ -994,6 +994,86 @@ def test_probe_stage_diagnostic_rejects_the_mixed_disconnected_selection(
     assert selected_row["passed"] is True
 
 
+def test_anchor_grounded_selection_keeps_a_connected_chain_without_relation_edges(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """云端回归的真实链路复现：关系图为空时，靠共享标识符相连的链必须整条保留。
+
+    c7eede8 的线上 round 1 就是这种形态：候选池里四条 run 全部由召回直接带入（不依赖
+    关系遍历），模型也选对了整条链，但 `related()` 找不回任何邻居，只按关系接地会把下游
+    两条丢掉（4 个标记只剩 2 个）。这里刻意不建任何关系边。
+    """
+    user_id = _uid("u")
+    stored = [
+        _seed(database, asset_store, settings, embeddings, user_id, text)
+        for text in _CHAIN_TEXTS
+    ]
+    repository = MemoryRepository(database)
+    with database.session() as session:
+        runs = {
+            row.id: row.request_id
+            for row in session.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id, Memory.id.in_(stored)
+                )
+            ).scalars()
+        }
+        message_ids = {
+            row.request_id: row.id
+            for row in session.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.granularity == "message",
+                    Memory.request_id.in_(list(runs.values())),
+                )
+            ).scalars()
+        }
+
+    class _ChainMessageRetriever:
+        def __init__(self) -> None:
+            self.repository = repository
+
+        def retrieve(self, requested_user: str, query: ParsedQuery, limit: int):
+            del query, limit
+            return [
+                MemoryCandidate(
+                    memory_id=message_ids[runs[stored[index]]],
+                    user_id=requested_user,
+                    content=_CHAIN_TEXTS[index],
+                    score=0.5 - index * 0.01,
+                    granularity="message",
+                    request_id=runs[stored[index]],
+                    source_position=0,
+                    retrieval_signals={"lexical": 0.05},
+                )
+                for index in range(3)
+            ]
+
+    llm = FakeStructuredLLM(
+        [{"selected_indices": [0, 1, 2], "evidence_state": "sufficient"}]
+    )
+    response = SearchService(
+        _ChainMessageRetriever(),
+        max_image_bytes=settings.max_image_bytes,
+        expander=RelationExpander(repository),
+        reranker=EvidenceReranker(),
+        relevance_gate=RelevanceGate(),
+        selector=EvidenceSelector(
+            llm, anchor_connectivity=AnchorConnectivity(repository)
+        ),
+        renderer=EvidenceRenderer(repository, asset_store, max_image_bytes=1024),
+        packer=ResponsePacker(),
+    ).search(
+        SearchRequest(
+            query="Follow the registered chain from Root-case and identify its terminal record.",
+            user_id=user_id,
+            top_k=10,
+        )
+    )
+
+    assert {item.content for item in response.data} == set(_CHAIN_TEXTS[:3])
+
+
 def test_selector_restores_original_multimodal_message_after_selection(
     database: Database, asset_store: AssetStore, settings, embeddings
 ) -> None:
