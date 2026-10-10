@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from io import StringIO
 from types import SimpleNamespace
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
@@ -29,11 +30,13 @@ class _InMemoryBackend:
         run_tag: str,
         fail_on_search: int | None = None,
         leak_disconnected: bool = False,
+        link_disconnected_graph: bool = False,
         return_disconnected_evidence: bool = False,
     ) -> None:
         self.run_tag = run_tag
         self.fail_on_search = fail_on_search
         self.leak_disconnected = leak_disconnected
+        self.link_disconnected_graph = link_disconnected_graph
         self.return_disconnected_evidence = return_disconnected_evidence
         self.runs: dict[str, dict[str, Any]] = {}
         self.requests: list[tuple[str, dict[str, Any]]] = []
@@ -107,10 +110,27 @@ class _InMemoryBackend:
         self, user_id: str, request_ids: Sequence[str]
     ) -> list[SimpleNamespace]:
         return [
-            SimpleNamespace(content=self.runs[run_id]["messages"][0]["content"])
+            SimpleNamespace(
+                content=self.runs[run_id]["messages"][0]["content"],
+                memory_id=uuid5(NAMESPACE_URL, run_id),
+                request_id=run_id,
+            )
             for run_id in request_ids
             if run_id in self.runs and self.runs[run_id]["user_id"] == user_id
         ]
+
+    def related(
+        self, user_id: str, memory_ids: Sequence[Any], limit: int
+    ) -> list[SimpleNamespace]:
+        if not self.link_disconnected_graph:
+            return []
+        disconnected_run = f"multi-session-path-probe-{self.run_tag}-3"
+        if uuid5(NAMESPACE_URL, disconnected_run) not in memory_ids:
+            return []
+        return self._candidates(
+            user_id,
+            [f"multi-session-path-probe-{self.run_tag}-2"],
+        )[:limit]
 
     def delete_run(self, run_id: str, *, user_id: str) -> DeletionReport:
         payload = self.runs.get(run_id)
@@ -156,6 +176,12 @@ def test_probe_exercises_connected_and_disconnected_paths_then_cleans() -> None:
             "message_count": 4,
             "passed": True,
             "stored_marker_count": 5,
+        },
+        {
+            "case": "relation_isolation",
+            "forbidden_marker_count": 0,
+            "neighbor_count": 0,
+            "passed": True,
         },
         {
             "case": "connected_chain",
@@ -307,6 +333,38 @@ def test_probe_allows_only_the_disconnected_record_for_its_own_query() -> None:
     assert backend.runs == {}
 
 
+def test_probe_reports_a_disconnected_relation_to_the_main_chain() -> None:
+    """A graph edge from the isolated record must be visible without printing content."""
+    probe = importlib.import_module("scripts.multi_session_path_probe")
+    backend = _InMemoryBackend(
+        run_tag="graph-leak",
+        link_disconnected_graph=True,
+    )
+    output = StringIO()
+
+    exit_code = probe.run_probe(
+        backend,
+        backend,
+        backend.delete_run,
+        output,
+        run_tag="graph-leak",
+    )
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    relation_isolation = next(
+        row for row in rows if row["case"] == "relation_isolation"
+    )
+    assert exit_code == 1
+    assert relation_isolation == {
+        "case": "relation_isolation",
+        "forbidden_marker_count": 2,
+        "neighbor_count": 1,
+        "passed": False,
+    }
+    assert backend.runs == {}
+    assert "Root-graph-leak" not in output.getvalue()
+
+
 def test_probe_output_uses_only_safe_aggregate_fields() -> None:
     probe = importlib.import_module("scripts.multi_session_path_probe")
     backend = _InMemoryBackend(run_tag="safe")
@@ -324,6 +382,7 @@ def test_probe_output_uses_only_safe_aggregate_fields() -> None:
         "expected_marker_count",
         "matched_marker_count",
         "forbidden_marker_count",
+        "neighbor_count",
         "returned_count",
         "passed",
         "cleanup_attempt_error_count",

@@ -6,7 +6,7 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, TextIO
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 
@@ -29,6 +29,8 @@ class _Client(Protocol):
 
 class _StoredCandidate(Protocol):
     content: str
+    memory_id: UUID
+    request_id: str
 
 
 class _Repository(Protocol):
@@ -38,6 +40,10 @@ class _Repository(Protocol):
 
     def message_candidates_for_requests(
         self, user_id: str, request_ids: Sequence[str], limit: int
+    ) -> Sequence[_StoredCandidate]: ...
+
+    def related(
+        self, user_id: str, memory_ids: Sequence[UUID], limit: int
     ) -> Sequence[_StoredCandidate]: ...
 
 
@@ -142,6 +148,31 @@ def run_probe(
                 "stored_marker_count": stored_marker_count,
                 "expected_marker_count": len(storage_markers),
                 "passed": storage_passed,
+            },
+        )
+
+        context_by_run = {candidate.request_id: candidate for candidate in contexts}
+        isolated_context = context_by_run.get(run_ids[-1])
+        if isolated_context is None:
+            raise RuntimeError("Stored context contract")
+        relation_neighbors = repository.related(
+            user_id,
+            [isolated_context.memory_id],
+            32,
+        )
+        relation_text = " ".join(candidate.content for candidate in relation_neighbors)
+        relation_forbidden_count = sum(
+            marker in relation_text for marker in (root, bridge, leaf, terminal)
+        )
+        relation_isolation_passed = relation_forbidden_count == 0
+        all_passed &= relation_isolation_passed
+        _print_row(
+            output,
+            {
+                "case": "relation_isolation",
+                "neighbor_count": len(relation_neighbors),
+                "forbidden_marker_count": relation_forbidden_count,
+                "passed": relation_isolation_passed,
             },
         )
 
