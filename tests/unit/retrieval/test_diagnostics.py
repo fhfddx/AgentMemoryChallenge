@@ -171,7 +171,8 @@ def test_selector_diagnostics_record_the_partial_evidence_state(caplog) -> None:
         def retrieve(self, user_id, query, limit):
             return [
                 MemoryCandidate(
-                    memory_id=uuid4(), user_id=user_id, content="private-content",
+                    memory_id=uuid4(), user_id=user_id,
+                    content="private-query private-content",
                     score=1.0, request_id="private-request",
                 )
             ]

@@ -1,6 +1,7 @@
 """Select only evidence that supports the original Search question."""
 
 import math
+import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -38,6 +39,12 @@ EvidenceState = Literal["sufficient", "partial", "insufficient"]
 ReportedEvidenceState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
 _SIGNAL_NAMES = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
+_EXPLICIT_ANCHOR_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:"
+    r"[A-Za-z0-9]+(?:[-_.:/@][A-Za-z0-9]+)+"
+    r"|[A-Za-z]*\d[A-Za-z0-9]*"
+    r")(?![A-Za-z0-9])"
+)
 _PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
     "evidence_state and selected_indices, in that order. Do not answer the question or choose "
@@ -177,6 +184,37 @@ def _usable_indices(indices: Sequence[int], pool_size: int, max_selected: int) -
         and len(indices) == len(set(indices))
         and all(0 <= index < pool_size for index in indices)
     )
+
+
+def _explicit_question_anchors(question: str) -> frozenset[str]:
+    """Return exact structured identifiers that selected evidence must ground."""
+    return frozenset(
+        match.group(0).casefold()
+        for match in _EXPLICIT_ANCHOR_PATTERN.finditer(question)
+    )
+
+
+def _evidence_text(evidence: RankedEvidence) -> str:
+    if isinstance(evidence.content, str):
+        return evidence.content
+    return " ".join(
+        part.text for part in evidence.content if isinstance(part, TextPart)
+    )
+
+
+def _covers_explicit_question_anchors(
+    question: str,
+    selected: Sequence[RankedEvidence],
+) -> bool:
+    anchors = _explicit_question_anchors(question)
+    if not anchors:
+        return True
+    selected_text = " ".join(_evidence_text(evidence) for evidence in selected)
+    selected_tokens = {
+        match.group(0).casefold()
+        for match in _EXPLICIT_ANCHOR_PATTERN.finditer(selected_text)
+    }
+    return anchors.issubset(selected_tokens)
 
 
 def _is_complete_selection(result: SelectionResult) -> bool:
@@ -343,6 +381,11 @@ class EvidenceSelector:
                     "insufficient",
                 )
             selected_partial = tuple(pool[index] for index in indices)
+            if not _covers_explicit_question_anchors(question, selected_partial):
+                return SelectionResult(
+                    (), len(pool), source_count, 0, False, True, "invalid_output",
+                    "insufficient",
+                )
             return SelectionResult(
                 selected_partial,
                 len(pool),
@@ -359,6 +402,11 @@ class EvidenceSelector:
                 ranked, strong_anchor_ids, len(pool), source_count, "invalid_output"
             )
         selected = tuple(pool[index] for index in indices)
+        if not _covers_explicit_question_anchors(question, selected):
+            return SelectionResult(
+                (), len(pool), source_count, 0, False, True, "invalid_output",
+                "insufficient",
+            )
         return SelectionResult(
             selected,
             len(pool),
