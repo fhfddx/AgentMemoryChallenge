@@ -158,6 +158,39 @@ def test_partial_without_usable_indices_abstains_instead_of_falling_back() -> No
     assert result.failure_category == "invalid_output"
 
 
+@pytest.mark.parametrize("state", ["partial", "sufficient"])
+def test_selection_without_explicit_question_anchor_abstains(
+    state: Literal["partial", "sufficient"],
+) -> None:
+    """选择结果缺少问题中的显式实体时，不能返回同主题的其他事实。"""
+    llm = FakeStructuredLLM(
+        [{"selected_indices": [0], "evidence_state": state}]
+    )
+    chain_fragment = _evidence(
+        1,
+        "chain",
+        "The terminal record associated with Leaf-case is Terminal-case.",
+    )
+    isolated = _evidence(
+        2,
+        "isolated",
+        "Unconnected-case belongs to a separate archive.",
+    )
+
+    result = EvidenceSelector(llm).select(
+        "What terminal record is linked to Unconnected-case?",
+        None,
+        [chain_fragment, isolated],
+        {chain_fragment.memory_id, isolated.memory_id},
+    )
+
+    assert result.evidence == ()
+    assert result.abstained is True
+    assert result.fallback is False
+    assert result.evidence_state == "insufficient"
+    assert result.failure_category == "invalid_output"
+
+
 def test_legacy_two_field_output_is_accepted_and_kept_on_the_safe_side() -> None:
     """旧 Provider 只有布尔位，无法表达 partial，因此矛盾输出保持拒答。"""
     llm = FakeStructuredLLM([{"selected_indices": [0], "sufficient_evidence": False}])
