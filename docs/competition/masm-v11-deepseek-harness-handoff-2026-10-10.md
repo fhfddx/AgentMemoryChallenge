@@ -12,7 +12,7 @@
 | 工作树 | `C:\Users\23952\.codex\worktrees\masm-v11-multihop\AgentMemoryChallenge` |
 | 分支 | `codex/masm-v11-multihop` |
 | 基线 | `65738a44b181`（`origin/codex/masm-v11-selector-probe`） |
-| 已完成提交 | `bdf92f7`、`3721b7e`、`f6049fa`、`263e29f`、`b71b637`、`2a3ee8c` |
+| 已完成提交 | `bdf92f7`、`3721b7e`、`f6049fa`、`263e29f`、`b71b637`、`2a3ee8c`、`d8390fd` |
 | 远端状态 | **本会话未推送**；本地没有该候选的 remote-tracking ref（实时 `ls-remote` 因连接重置未能复核） |
 | 云端状态 | **未构建、未部署、未运行官方 Smoke** |
 | 生产环境 | 仍为 `masm-v11-final-candidate:84926f6`；本次没有访问或修改云端数据库 |
@@ -27,6 +27,7 @@
 | `263e29f` | 在 `RelationExpander` 中加入有界第二跳，保留冲突优先级和总上限，处理环、菱形去重与拥挤候选 |
 | `b71b637` | 用真实 repository/Search 路径覆盖第二跳消息证据回填和不相连请求隔离 |
 | `2a3ee8c` | 新增安全的三会话路径探针及其单元测试 |
+| `d8390fd` | 修复审查发现的 conflict-bridge、零种子预算和 SQL 截断前排序边界；把探针负例升级为已存储的断开相似记录 |
 
 本候选没有修改 `src/masm/retrieval/evidence_selector.py`，相对基线执行
 `git diff --exit-code 65738a44b181 -- src/masm/retrieval/evidence_selector.py` 返回 `0`。
@@ -36,8 +37,10 @@
 
 - 原始种子仍最多 `8` 个，关系扩展后的总候选仍最多 `32` 个，并继续受调用方 `limit` 约束。
 - 先保留 conflict peer，再扩展一跳；只有一跳结果存在且预算允许时才查询第二跳。
+- conflict peer 若同时是直接邻居，仍可作为第二跳 bridge；去重只影响发射，不影响遍历资格。
 - 第二跳遍历种子和第二跳输出分别最多 `8` 个；拥挤时为第二跳保留最多 `8` 个位置，且至少保留一个一跳 bridge。
 - 环、重复边和 diamond 路径按 memory ID 去重；原始种子不会被重新加入。
+- `max_seeds=0` 直接返回且不查询 repository；`related()` 在 SQL `LIMIT` 前按 memory ID 排序，拥挤图成员选择可复现。
 - 所有查询继续经 `MemoryRepository.related()` 按 `user_id` 隔离，没有跨用户或全库扫描。
 - v7 selector 的 prompt、schema、三态语义、fallback 和候选池均保持冻结。
 
@@ -48,13 +51,13 @@
 
 | 门槛 | 结果 |
 | --- | --- |
-| 关系扩展器单测 | `18 passed` |
+| 关系扩展器单测 | `20 passed` |
 | 隔离与既有检索增强回归 | `24 passed` |
 | Search 第二跳回填集成测试 | `2 passed, 21 deselected` |
 | selector 回归 | `63 passed` |
-| 新旧路径探针单测 | `9 passed` |
-| 能力、隔离、selector、探针联合回归 | `123 passed` |
-| 全量 pytest | `788 passed, 1 skipped` |
+| 新旧路径探针单测 | `10 passed` |
+| 能力、隔离、selector、探针联合回归 | `133 passed` |
+| 全量 pytest | `792 passed, 1 skipped` |
 | Ruff | 全仓通过 |
 | mypy | `62 source files`，零问题 |
 | `git diff --check` | 通过 |
@@ -66,11 +69,12 @@ Starlette/httpx 与 `pytest-asyncio` 弃用警告。数据库相关测试使用�
 
 ### 新探针契约
 
-`scripts/multi_session_path_probe.py` 只创建完全合成、带随机 tag 的 3 个 run，形成
-`Root → Bridge → Leaf → Terminal` 链。它验证：
+`scripts/multi_session_path_probe.py` 只创建完全合成、带随机 tag 的 4 个 run：三个形成
+`Root → Bridge → Leaf → Terminal` 链，第四个保存同用户但无关系边的 `Unconnected` 相似记录。
+它验证：
 
-1. 三次 `/add` 后仅输出 context/message/marker 计数；
-2. connected query 必须找齐 4 个合成 marker；
+1. 四次 `/add` 后仅输出 context/message/marker 计数；
+2. connected query 必须找齐 4 个链 marker，且不得夹带已存储的 `Unconnected` marker；
 3. disconnected query 必须返回空结果；
 4. `finally` 中按预注册 run ID 精确清理，最多三轮，并验证 memories/sources 都为零残留；
 5. 输出只包含 allowlist 聚合字段，不打印 marker、正文、异常文本、凭据或数据库行；
@@ -578,12 +582,13 @@ wc -l "/tmp/smoke-$SHA-search-diagnostics.jsonl"
 | `src/masm/retrieval/evidence_selector.py` | selector 协议、模型调用、fallback 与 abstention |
 | `src/masm/retrieval/evidence_pool.py` | 候选池构建与排序 |
 | `src/masm/retrieval/relation_expander.py` | 有界一跳/两跳关系扩展、冲突优先级与去重预算 |
+| `src/masm/storage/repositories.py` | 用户隔离的关系读取及 SQL 截断前确定性排序 |
 | `src/masm/services/search_service.py` | Search 主路径及 selector 接入 |
 | `src/masm/retrieval/diagnostics.py` | Search 脱敏遥测 |
 | `scripts/selector_probe.py` | 基础合成 selector 探针 |
 | `scripts/selector_reasoning_probe.py` | strict / chain prompt 合成对照 |
 | `scripts/search_path_probe.py` | 基础存储、direct recall、两会话检索与同实体拒答探针 |
-| `scripts/multi_session_path_probe.py` | 三会话两跳连接/不连接对照及精确清理探针 |
+| `scripts/multi_session_path_probe.py` | 三段链加断开相似记录的四会话对照及精确清理探针 |
 | `scripts/compare_search_diagnostics.py` | 只比较安全字段的遥测工具 |
 | `scripts/cloud_smoke_recovery.py` | Smoke 数据只读审计和精确清理 |
 | `tests/unit/retrieval/test_relation_expander.py` | 两跳、环、diamond、预算与拥挤场景回归 |
