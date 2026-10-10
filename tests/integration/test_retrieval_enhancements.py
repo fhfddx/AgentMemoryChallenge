@@ -944,7 +944,7 @@ def test_anchor_grounded_selection_keeps_a_connected_chain_through_real_search(
     chain_indices = _indices_of(llm, _CHAIN_TEXTS[:3])
     assert len(chain_indices) == 3
 
-    llm.queue({"selected_indices": chain_indices, "evidence_state": "sufficient"})
+    llm.queue({"selected_indices": chain_indices, "evidence_state": "partial"})
     response = service.search(request)
 
     assert {item.content for item in response.data} == set(_CHAIN_TEXTS[:3])
@@ -1050,7 +1050,7 @@ def test_anchor_grounded_selection_keeps_a_connected_chain_without_relation_edge
             ]
 
     llm = FakeStructuredLLM(
-        [{"selected_indices": [0, 1, 2], "evidence_state": "sufficient"}]
+        [{"selected_indices": [0, 1, 2], "evidence_state": "partial"}]
     )
     response = SearchService(
         _ChainMessageRetriever(),

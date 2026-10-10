@@ -202,6 +202,23 @@ def _anchor_tokens(text: str) -> frozenset[str]:
     )
 
 
+def _covers_explicit_question_anchors(
+    question: str,
+    selected: Sequence[RankedEvidence],
+) -> bool:
+    """整组选中文本的并集是否至少提到了问题的全部显式锚点。
+
+    这是 `sufficient` 路径唯一保留的校验：它不裁剪证据，只拒绝完全没锚定的整组选择。
+    """
+    anchors = _anchor_tokens(question)
+    if not anchors:
+        return True
+    union: frozenset[str] = frozenset()
+    for evidence in selected:
+        union |= _anchor_tokens(_evidence_text(evidence))
+    return anchors <= union
+
+
 def _distinct_source_count(selected: Sequence[RankedEvidence]) -> int:
     return len({item.request_id or str(item.memory_id) for item in selected})
 
@@ -376,7 +393,9 @@ class EvidenceSelector:
                     "insufficient",
                 )
             selected_partial = tuple(pool[index] for index in indices)
-            grounded_partial = self._grounded_selection(question, selected_partial)
+            grounded_partial = self._narrow_to_anchor_component(
+                question, selected_partial
+            )
             if not grounded_partial:
                 return SelectionResult(
                     (), len(pool), source_count, 0, False, True, "invalid_output",
@@ -398,45 +417,44 @@ class EvidenceSelector:
                 ranked, strong_anchor_ids, len(pool), source_count, "invalid_output"
             )
         selected = tuple(pool[index] for index in indices)
-        grounded = self._grounded_selection(question, selected)
-        if not grounded:
+        # sufficient 是模型对「已覆盖全部被询问事实与连接」的断言：这里只拒绝整组完全
+        # 没有锚定问题的选择，绝不裁剪模型声明为完整的集合。
+        if not _covers_explicit_question_anchors(question, selected):
             return SelectionResult(
                 (), len(pool), source_count, 0, False, True, "invalid_output",
                 "insufficient",
             )
-        # 剔除过未接地证据后，模型「完整覆盖」的断言已不成立：只能降级为 partial。
-        state_after_grounding: ReportedEvidenceState = (
-            "sufficient" if len(grounded) == len(selected) else "partial"
-        )
         return SelectionResult(
-            grounded,
+            selected,
             len(pool),
             source_count,
-            _distinct_source_count(grounded),
+            _distinct_source_count(selected),
             False,
             False,
             "none",
-            state_after_grounding,
+            "sufficient",
         )
 
-    def _grounded_selection(
+    def _narrow_to_anchor_component(
         self,
         question: str,
         selected: Sequence[RankedEvidence],
     ) -> tuple[RankedEvidence, ...]:
-        """只保留以问题锚点为根的「允许证据路径」连通分量。
+        """把 **partial** 选择裁剪到以问题锚点为根的「允许证据路径」连通分量。
 
-        集合级并集校验只证明「选中文本里出现过锚点」，无法区分「正确锚点证据」与
-        「额外无关链证据」的混合选择。修复方式是逐条判定接地：两条证据只要满足下面任一
-        条件就算相连，然后保留与含锚点证据同分量的部分——
+        为什么只对 partial 生效：集合级并集校验只证明「选中文本里出现过锚点」，无法区分
+        「正确锚点证据」与「额外无关链证据」的混合选择；原始云端泄漏正是
+        `state=partial` + 混合选择。而 `sufficient` 路径上的裁剪已经两次被线上证据证伪——
+        c7eede8 的关系接地删掉了多跳合法链（模型输出不变，3 条只返回 1 条），cfe596e 的
+        标识符相邻删掉了 search_path_probe 双来源答案（`indices=[0,1]`、`sufficient`
+        只返回 1/2）。裁剪一个模型断言为完整、且确实覆盖全部事实的集合，是那两次回归的
+        共同根因。
+
+        两条证据只要满足下面任一条件就算相连，然后保留与含锚点证据同分量的部分：
 
         * **共享显式标识符**：合法下游链靠共享标识符串起来（`Bridge-*`、`Leaf-*`），
           不要求下游重复 Root 字符串。这一步纯文本，不需要数据库。
         * **持久化关系边**：注入 ``AnchorConnectivity`` 时，锚点关系闭包内的证据也算相连。
-
-        为什么必须同时保留文本相邻：线上的 `related()` 对这条链路找不回任何邻居
-        （c7eede8 的 round 1 里模型原始选择不变，但只返回 1/3 条），只按关系接地会把
-        合法下游链整条删掉。关系边是额外的、更宽松的边来源，不是唯一依据。
 
         返回空元组表示整组完全没有锚点接地；没有显式锚点时行为完全不变。
         """

@@ -224,9 +224,28 @@ The allowed path is therefore defined over **two** edge sources. Two selected me
 when they share an explicit structured identifier (matched per evidence pair, so a downstream link
 may share `Bridge-*`/`Leaf-*` instead of repeating `Root-*`), or when they are connected inside the
 bounded relation closure that `AnchorConnectivity` returns (message evidence is mapped to its
-same-request context parent first, because governance edges attach to context memories). The
-selector keeps the component rooted at the anchor-bearing evidence, drops the rest, and downgrades
-`sufficient` to `partial` when anything was dropped. `build_runtime` wires the relation oracle for
-the official profile; identifier adjacency needs no database and therefore applies even when no
-oracle is wired. The prompt, schema, three-state semantics, fallback anchors, pool construction,
-relation-expansion budgets, and public Add/Search contracts are unchanged.
+same-request context parent first, because governance edges attach to context memories).
+`build_runtime` wires the relation oracle for the official profile; identifier adjacency needs no
+database and therefore applies even when no oracle is wired.
+
+Applying that component to every selection was still wrong. The deployed `cfe596e` run failed
+`search_path_probe.py`: `multi_session` returned 1 of its 2 required markers. An in-process
+diagnostic (`scripts/anchor_grounding_diag.py`) evaluated the *same* synthetic pool and the *same*
+model output with both validation layers:
+
+| scenario | variant | pool | model output | returned | covered |
+| --- | --- | --- | --- | --- | --- |
+| search_path multi_session | deployed | both facts present | `[0,1]`, `sufficient` | 1 | 1 / 2 |
+| search_path multi_session | 015986a set-level | same | same | 2 | 2 / 2 |
+| multihop disconnected | deployed | 4 forbidden markers | `[0,1]`, `partial` | 1 | 0 forbidden |
+| multihop disconnected | 015986a set-level | same | same | 2 | 2 forbidden |
+
+So the discriminating signal is the model's own state, not the text. `sufficient` asserts "the
+selected memories state every requested fact and every link needed to connect them"; narrowing such
+a set with a text heuristic is what broke both `c7eede8` and `cfe596e`, and the original cloud leak
+was reported as `partial`.
+
+The component narrowing therefore applies **only when the model reports `partial`**. For
+`sufficient` the selector keeps the selection unchanged and only rejects a set whose union does not
+mention the query anchors at all. The prompt, schema, three-state semantics, fallback anchors, pool
+construction, relation-expansion budgets, and public Add/Search contracts are unchanged.

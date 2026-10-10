@@ -336,7 +336,7 @@ def test_identifier_linked_chain_is_kept_when_the_relation_graph_is_empty() -> N
     但接入关系可达性后只返回 1 条（2/4 标记），因为 `related()` 没有找回任何邻居。合法下游
     证据是靠共享标识符（Bridge-case、Leaf-case）串起来的，不能因为关系图为空就丢弃。
     """
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "sufficient"}])
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "partial"}])
     pool = _chain_pool()
 
     result = _connected_selector(llm, AnchorConnectivity(_NoRelations())).select(
@@ -347,7 +347,7 @@ def test_identifier_linked_chain_is_kept_when_the_relation_graph_is_empty() -> N
     )
 
     assert result.evidence == (pool[0], pool[1], pool[2])
-    assert result.evidence_state == "sufficient"
+    assert result.evidence_state == "partial"
     assert result.abstained is False
 
 
@@ -369,7 +369,7 @@ def test_mixed_selection_is_rejected_without_any_relation_oracle() -> None:
 
 def test_relation_edge_links_selected_evidence_without_shared_identifiers() -> None:
     """关系边是额外的边来源：两条证据没有共同标识符时仍可按关系连通保留。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "sufficient"}])
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "partial"}])
     anchor = _evidence(1, "run-a", "Root-case is recorded here.")
     unrelated_wording = _evidence(2, "run-b", "A separate archive note with no shared terms.")
 
@@ -383,12 +383,12 @@ def test_relation_edge_links_selected_evidence_without_shared_identifiers() -> N
     )
 
     assert result.evidence == (anchor, unrelated_wording)
-    assert result.evidence_state == "sufficient"
+    assert result.evidence_state == "partial"
 
 
 def test_identifier_linked_chain_beyond_the_relation_hops_is_kept() -> None:
     """链路比关系跳数上限更长时，标识符相邻仍必须让整条链留下。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "sufficient"}])
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "partial"}])
     pool = _chain_pool()
 
     result = _connected_selector(llm, AnchorConnectivity(_NoRelations())).select(
@@ -429,7 +429,7 @@ def test_mixed_selection_of_anchor_and_unrelated_chain_evidence_is_rejected() ->
 
 def test_connected_multi_hop_selection_keeps_every_downstream_link() -> None:
     """合法链的回归护栏：下游证据不重复 Root 字符串，也必须整链保留。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "sufficient"}])
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "partial"}])
     pool = _chain_pool()
     graph = _ChainGraph()
 
@@ -441,25 +441,38 @@ def test_connected_multi_hop_selection_keeps_every_downstream_link() -> None:
     )
 
     assert result.evidence == (pool[0], pool[1], pool[2])
-    assert result.evidence_state == "sufficient"
+    assert result.evidence_state == "partial"
     assert result.abstained is False
 
 
-def test_sufficient_selection_with_an_unrelated_extra_downgrades_to_partial() -> None:
-    """剔除未接地证据后，模型「完整覆盖」的断言不再成立，只能降级为 partial。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 3], "evidence_state": "sufficient"}])
-    pool = _chain_pool()
+def test_sufficient_selection_is_not_narrowed_when_the_model_claims_full_coverage() -> None:
+    """search_path_probe 的 multi_session 回归：sufficient 断言不得被裁剪。
 
-    result = _connected_selector(llm, AnchorConnectivity(_ChainGraph())).select(
-        "What terminal record is linked to Unconnected-case?",
-        None,
-        pool,
-        {item.memory_id for item in pool},
+    线上证据：候选池含全部两个事实（`pool_expected=2`），模型返回 `indices=[0,1]`、
+    `state=sufficient`；015986a 的集合级校验返回 2/2，而标识符相邻规则只返回 1/2 并把
+    状态降级为 partial，导致 `search_path_probe` 的 multi_session 免费门槛失败。
+    `sufficient` 是模型对「完整覆盖」的断言，裁剪它等于用文本启发式推翻完整答案。
+    """
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "sufficient"}])
+    anchor = _evidence(
+        1, "run-a", "The Atlas-case migration uses code name Cobalt-case."
+    )
+    review = _evidence(
+        2, "run-b", "The review for that migration is scheduled on November 14, 2026."
     )
 
-    assert result.evidence == (pool[3],)
-    assert result.evidence_state == "partial"
-    assert result.fallback is False
+    result = _connected_selector(
+        llm, AnchorConnectivity(_NoRelations())
+    ).select(
+        "What is the Atlas-case migration code name, and when is its review?",
+        None,
+        [anchor, review],
+        {anchor.memory_id, review.memory_id},
+    )
+
+    assert result.evidence == (anchor, review)
+    assert result.evidence_state == "sufficient"
+    assert result.abstained is False
 
 
 def test_unrelated_chain_evidence_alone_still_abstains() -> None:
@@ -482,8 +495,8 @@ def test_unrelated_chain_evidence_alone_still_abstains() -> None:
 
 
 def test_selection_without_explicit_anchors_skips_relation_reads() -> None:
-    """自然语言问题没有结构化锚点时不做任何关系读取，行为完全不变。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "sufficient"}])
+    """自然语言问题没有结构化锚点时不做任何关系读取，也不裁剪任何证据。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "partial"}])
     pool = _chain_pool()
     graph = _ChainGraph()
 
@@ -495,7 +508,7 @@ def test_selection_without_explicit_anchors_skips_relation_reads() -> None:
     )
 
     assert result.evidence == (pool[0], pool[1])
-    assert result.evidence_state == "sufficient"
+    assert result.evidence_state == "partial"
     assert graph.related_calls == []
     assert graph.context_calls == []
 
