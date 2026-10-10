@@ -179,6 +179,15 @@ def _usable_indices(indices: Sequence[int], pool_size: int, max_selected: int) -
     )
 
 
+def _is_complete_selection(result: SelectionResult) -> bool:
+    """深层重试的结果是否优于首轮 partial：必须是模型确认的完整 selection。"""
+    return (
+        result.evidence_state == "sufficient"
+        and not result.fallback
+        and not result.abstained
+    )
+
+
 class EvidenceSelector:
     """Bound one model request and validate its evidence-only response."""
 
@@ -226,25 +235,37 @@ class EvidenceSelector:
         result = self._select_pool(
             question, visual, options, ranked, strong_anchor_ids, pool
         )
-        if (
-            not result.fallback
-            and result.abstained
-            and self._max_candidates == DEFAULT_SELECTOR_CANDIDATES
-            and len(ranked) > len(pool)
-        ):
-            extended_pool = build_selector_pool(
-                ranked, max_candidates=MAX_SELECTOR_CANDIDATES
-            )
-            if len(extended_pool) > len(pool):
-                return self._select_pool(
-                    question,
-                    visual,
-                    options,
-                    ranked,
-                    strong_anchor_ids,
-                    extended_pool,
-                )
-        return result
+        extended_pool = self._deeper_pool(result, pool, ranked)
+        if extended_pool is None:
+            return result
+        extended = self._select_pool(
+            question, visual, options, ranked, strong_anchor_ids, extended_pool
+        )
+        if result.evidence_state == "partial":
+            # 深层重试只能改进结果：首轮的 partial 是安全证据，只有深层给出完整
+            # selection 时才允许替换它，否则必须原样保留首轮结果。
+            return extended if _is_complete_selection(extended) else result
+        return extended
+
+    def _deeper_pool(
+        self,
+        result: SelectionResult,
+        pool: Sequence[RankedEvidence],
+        ranked: Sequence[RankedEvidence],
+    ) -> list[RankedEvidence] | None:
+        """首轮没给出完整证据时，用更深的候选池再试一次；否则返回 None。"""
+        if result.fallback or self._max_candidates != DEFAULT_SELECTOR_CANDIDATES:
+            return None
+        # abstained 表示首轮完全拒答；partial 表示首轮只覆盖了一部分事实。两种都可能
+        # 因为缺少 32 名之外的候选而误判，所以都要重试。
+        if not (result.abstained or result.evidence_state == "partial"):
+            return None
+        if len(ranked) <= len(pool):
+            return None
+        extended_pool = build_selector_pool(
+            ranked, max_candidates=MAX_SELECTOR_CANDIDATES
+        )
+        return extended_pool if len(extended_pool) > len(pool) else None
 
     def _select_pool(
         self,

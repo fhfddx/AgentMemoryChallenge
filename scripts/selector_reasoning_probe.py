@@ -1,5 +1,6 @@
 """Compare strict and chain-aware selector prompts on synthetic evidence."""
 
+import argparse
 import json
 import logging
 import sys
@@ -18,6 +19,8 @@ from masm.providers.llm import (
 )
 from masm.retrieval.evidence_selector import _PROMPT, EvidenceSelection
 
+# 仅供对照的基线：chain 变体永远不是部署候选。生产 prompt（_PROMPT）的达标由
+# production_eligible / --strict-only 判定，见 run_probe。
 _CHAIN_PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
     "selected_indices and evidence_state. Do not answer the question or choose an option. "
@@ -217,15 +220,34 @@ def _evaluate(
         }
 
 
-def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
-    """Run both prompt variants and print only aggregate synthetic outcomes."""
+def run_probe(
+    llm: StructuredLLM,
+    settings: Settings,
+    output: TextIO,
+    *,
+    strict_only: bool = False,
+) -> int:
+    """Run the prompt variants and print only aggregate synthetic outcomes.
+
+    The production prompt (``strict``) is the only deployment candidate; ``chain`` stays as a
+    comparison baseline and must never be promoted by this probe. ``strict_only`` skips the
+    baseline so the production prompt can be gated on its own.
+
+    The exit code reports ``production_eligible``: the production prompt passed every
+    pre-registered synthetic case. ``candidate_eligible`` is kept for the record and means
+    "chain still beats the production prompt"; once the production prompt covers those cases
+    it is expected to be ``False`` and it is not a deployment gate.
+    """
     cases = _cases()
     rows: list[dict[str, object]] = []
+    variants: tuple[tuple[str, str], ...] = (("strict", _PROMPT),)
+    if not strict_only:
+        variants = (("strict", _PROMPT), ("chain", _CHAIN_PROMPT))
     provider_logger = logging.getLogger("masm.provider")
     was_disabled = provider_logger.disabled
     provider_logger.disabled = True
     try:
-        for variant, prompt in (("strict", _PROMPT), ("chain", _CHAIN_PROMPT)):
+        for variant, prompt in variants:
             for case in cases:
                 row = _evaluate(
                     llm, settings, variant=variant, prompt=prompt, case=case
@@ -242,6 +264,7 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
         row["passed"] is True for row in rows if row["variant"] == "chain"
     )
     candidate_eligible = chain_passed == len(cases) and chain_passed > strict_passed
+    production_eligible = strict_passed == len(cases)
     print(
         json.dumps(
             {
@@ -250,12 +273,13 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
                 "strict_passed": strict_passed,
                 "chain_passed": chain_passed,
                 "candidate_eligible": candidate_eligible,
+                "production_eligible": production_eligible,
             },
             sort_keys=True,
         ),
         file=output,
     )
-    return 0 if candidate_eligible else 1
+    return 0 if production_eligible else 1
 
 
 def _report_failure(case: str, category: str) -> None:
@@ -266,6 +290,7 @@ def _report_failure(case: str, category: str) -> None:
                 "case": case,
                 "failure_category": category,
                 "evidence_state": "unknown",
+                "production_eligible": False,
                 "passed": False,
             },
             sort_keys=True,
@@ -275,7 +300,15 @@ def _report_failure(case: str, category: str) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run only against an enabled official selector configuration."""
-    del argv
+    parser = argparse.ArgumentParser(
+        description="Gate the production selector prompt on synthetic cases"
+    )
+    parser.add_argument(
+        "--strict-only",
+        action="store_true",
+        help="run only the production prompt, skipping the chain baseline",
+    )
+    args = parser.parse_args([] if argv is None else list(argv))
     try:
         settings = Settings.from_env()
         if (
@@ -297,7 +330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_attempts=settings.model_max_attempts,
         )
         try:
-            return run_probe(llm, settings, sys.stdout)
+            return run_probe(llm, settings, sys.stdout, strict_only=args.strict_only)
         finally:
             llm.close()
     except Exception:

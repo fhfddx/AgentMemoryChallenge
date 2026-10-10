@@ -322,6 +322,75 @@ def test_incomplete_first_pass_retries_with_deeper_candidates() -> None:
     assert len(llm.requests[1].payload["candidates"]) == 48
 
 
+def test_partial_first_pass_retries_deeper_and_returns_the_complete_selection() -> None:
+    """首轮只看到 32 个候选时给出的 partial，必须用更深候选池再试一次。
+
+    partial 的含义就是「有直接事实但缺一部分」；缺的那部分可能落在 32 名之外。
+    深层轮如果给出 sufficient，就必须采用它，而不是停在首轮的 partial。
+    """
+    ranked = [
+        _evidence(number, f"source-{number}", f"fact {number}")
+        for number in range(1, 49)
+    ]
+    llm = FakeStructuredLLM(
+        [
+            {"evidence_state": "partial", "selected_indices": [0]},
+            {"evidence_state": "sufficient", "selected_indices": [0, 47]},
+        ]
+    )
+
+    result = EvidenceSelector(llm).select(
+        "Which two facts complete the answer?", None, ranked, set()
+    )
+
+    assert result.evidence == (ranked[0], ranked[47])
+    assert result.evidence_state == "sufficient"
+    assert result.candidate_count == 48
+    assert result.selected_source_count == 2
+    assert result.fallback is False
+    assert result.abstained is False
+    assert len(llm.requests) == 2
+    assert len(llm.requests[0].payload["candidates"]) == 32
+    assert len(llm.requests[1].payload["candidates"]) == 48
+
+
+@pytest.mark.parametrize(
+    "deeper_output",
+    [
+        {"evidence_state": "insufficient", "selected_indices": []},
+        {"evidence_state": "sufficient", "selected_indices": [99]},
+        TimeoutError("private provider body"),
+    ],
+    ids=["insufficient", "invalid_output", "unavailable"],
+)
+def test_partial_first_pass_survives_a_worse_deeper_round(deeper_output) -> None:
+    """深层重试只能改进结果，绝不能丢掉首轮已经安全的 partial 证据。"""
+    ranked = [
+        _evidence(number, f"source-{number}", f"fact {number}")
+        for number in range(1, 49)
+    ]
+    llm = FakeStructuredLLM(
+        [
+            {"evidence_state": "partial", "selected_indices": [0]},
+            deeper_output,
+        ]
+    )
+
+    result = EvidenceSelector(llm).select(
+        "Which facts complete the answer?",
+        None,
+        ranked,
+        {item.memory_id for item in ranked},
+    )
+
+    assert result.evidence == (ranked[0],)
+    assert result.evidence_state == "partial"
+    assert result.abstained is False
+    assert result.fallback is False
+    assert result.failure_category == "none"
+    assert len(llm.requests) == 2
+
+
 def test_sufficient_first_pass_does_not_retry_deeper_candidates() -> None:
     ranked = [
         _evidence(number, f"source-{number}", f"fact {number}")

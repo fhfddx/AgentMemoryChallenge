@@ -28,7 +28,7 @@ def test_probe_compares_strict_and_chain_prompts_without_printing_content() -> N
     exit_code = probe.run_probe(llm, Settings(database_url=""), output)
 
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert exit_code == 0
+    assert exit_code == 1
     assert [(row["variant"], row["case"]) for row in rows[:-1]] == [
         ("strict", "chain_complete"),
         ("strict", "chain_missing_link"),
@@ -53,6 +53,7 @@ def test_probe_compares_strict_and_chain_prompts_without_printing_content() -> N
         "case": "summary",
         "candidate_eligible": True,
         "chain_passed": 4,
+        "production_eligible": False,
         "strict_passed": 2,
         "variant": "comparison",
     }
@@ -93,7 +94,7 @@ def test_probe_rejects_out_of_range_indices_as_sanitized_invalid_output() -> Non
     exit_code = probe.run_probe(llm, Settings(database_url=""), output)
 
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert exit_code == 0
+    assert exit_code == 1
     assert rows[0] == {
         "abstained": False,
         "candidate_count": 3,
@@ -135,13 +136,13 @@ def test_probe_reports_safe_invalid_output_subtypes() -> None:
     assert "unsafe provider detail" not in output.getvalue()
 
 
-def test_probe_requires_chain_prompt_to_improve_on_strict_prompt() -> None:
+def test_summary_reports_chain_as_no_longer_improving_on_the_production_prompt() -> None:
     probe = importlib.import_module("scripts.selector_reasoning_probe")
     all_cases_pass = [
-        {"selected_indices": [0, 1], "sufficient_evidence": True},
-        {"selected_indices": [], "sufficient_evidence": False},
-        {"selected_indices": [0, 1], "sufficient_evidence": True},
-        {"selected_indices": [14, 15], "sufficient_evidence": True},
+        {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+        {"selected_indices": [], "evidence_state": "insufficient"},
+        {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+        {"selected_indices": [14, 15], "evidence_state": "sufficient"},
     ]
     llm = FakeStructuredLLM([*all_cases_pass, *all_cases_pass])
     output = StringIO()
@@ -149,11 +150,12 @@ def test_probe_requires_chain_prompt_to_improve_on_strict_prompt() -> None:
     exit_code = probe.run_probe(llm, Settings(database_url=""), output)
 
     summary = json.loads(output.getvalue().splitlines()[-1])
-    assert exit_code == 1
+    assert exit_code == 0
     assert summary == {
         "case": "summary",
         "candidate_eligible": False,
         "chain_passed": 4,
+        "production_eligible": True,
         "strict_passed": 4,
         "variant": "comparison",
     }
@@ -197,6 +199,120 @@ def test_probe_distinguishes_partial_from_invalid_missing_link_output() -> None:
     assert "Nora" not in output.getvalue()
 
 
+def test_probe_gates_the_production_prompt_independently_of_the_chain_variant() -> None:
+    """生产 strict v7 全部通过时必须有明确的成功退出码，即使 chain 已不再更优。"""
+    probe = importlib.import_module("scripts.selector_reasoning_probe")
+    strict_all_pass = [
+        {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+        {"selected_indices": [], "evidence_state": "insufficient"},
+        {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+        {"selected_indices": [14, 15], "evidence_state": "sufficient"},
+    ]
+    chain_one_fails = [
+        {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+        {"selected_indices": [0], "evidence_state": "partial"},
+        {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+        {"selected_indices": [14, 15], "evidence_state": "sufficient"},
+    ]
+    output = StringIO()
+
+    exit_code = probe.run_probe(
+        FakeStructuredLLM([*strict_all_pass, *chain_one_fails]),
+        Settings(database_url=""),
+        output,
+    )
+
+    assert exit_code == 0
+    assert json.loads(output.getvalue().splitlines()[-1]) == {
+        "case": "summary",
+        "candidate_eligible": False,
+        "chain_passed": 3,
+        "production_eligible": True,
+        "strict_passed": 4,
+        "variant": "comparison",
+    }
+
+
+def test_strict_only_runs_only_the_production_prompt() -> None:
+    """--strict-only 只跑生产 prompt：4 次调用，无 chain 行，生产门槛决定退出码。"""
+    probe = importlib.import_module("scripts.selector_reasoning_probe")
+    llm = FakeStructuredLLM(
+        [
+            {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+            {"selected_indices": [], "evidence_state": "insufficient"},
+            {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+            {"selected_indices": [14, 15], "evidence_state": "sufficient"},
+        ]
+    )
+    output = StringIO()
+
+    exit_code = probe.run_probe(llm, Settings(database_url=""), output, strict_only=True)
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert exit_code == 0
+    assert [row["variant"] for row in rows[:-1]] == ["strict"] * 4
+    assert len(llm.requests) == 4
+    assert {request.prompt_version for request in llm.requests} == {"reasoning-probe-strict-v1"}
+    assert rows[-1] == {
+        "case": "summary",
+        "candidate_eligible": False,
+        "chain_passed": 0,
+        "production_eligible": True,
+        "strict_passed": 4,
+        "variant": "comparison",
+    }
+
+
+def test_strict_only_still_fails_the_gate_when_the_production_prompt_misses_a_case() -> None:
+    probe = importlib.import_module("scripts.selector_reasoning_probe")
+    llm = FakeStructuredLLM(
+        [
+            {"selected_indices": [0], "evidence_state": "partial"},
+            {"selected_indices": [], "evidence_state": "insufficient"},
+            {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+            {"selected_indices": [14, 15], "evidence_state": "sufficient"},
+        ]
+    )
+    output = StringIO()
+
+    exit_code = probe.run_probe(llm, Settings(database_url=""), output, strict_only=True)
+
+    assert exit_code == 1
+    assert json.loads(output.getvalue().splitlines()[-1]) == {
+        "case": "summary",
+        "candidate_eligible": False,
+        "chain_passed": 0,
+        "production_eligible": False,
+        "strict_passed": 3,
+        "variant": "comparison",
+    }
+
+
+def test_main_passes_strict_only_through_to_the_probe(monkeypatch) -> None:
+    probe = importlib.import_module("scripts.selector_reasoning_probe")
+    monkeypatch.setenv("MASM_RUNTIME_PROFILE", "official-masm")
+    monkeypatch.setenv("MASM_EVIDENCE_SELECTOR_ENABLED", "1")
+    monkeypatch.setenv("MASM_LLM_BASE_URL", "https://synthetic.example/v1")
+    monkeypatch.setenv("MASM_LLM_API_KEY", "private-reasoning-probe-key")
+    monkeypatch.setenv("MASM_EMBEDDING_BASE_URL", "https://synthetic.example/v1")
+    monkeypatch.setenv("MASM_EMBEDDING_API_KEY", "private-embedding-key")
+    llm = FakeStructuredLLM()
+    monkeypatch.setattr(llm, "close", lambda: None, raising=False)
+    seen: dict[str, object] = {}
+
+    def fake_run(llm_, settings_, output_, *, strict_only=False):
+        seen["strict_only"] = strict_only
+        return 0
+
+    monkeypatch.setattr(probe, "OpenAICompatibleLLM", lambda **kwargs: llm, raising=False)
+    monkeypatch.setattr(probe, "run_probe", fake_run, raising=False)
+
+    assert probe.main(["--strict-only"]) == 0
+    assert seen["strict_only"] is True
+    assert probe.main() == 0
+    assert seen["strict_only"] is False
+
+
 def test_main_rejects_disabled_selector_without_printing_credentials(
     monkeypatch, capsys
 ) -> None:
@@ -213,6 +329,7 @@ def test_main_rejects_disabled_selector_without_printing_credentials(
         "case": "preflight",
         "failure_category": "configuration",
         "evidence_state": "unknown",
+        "production_eligible": False,
         "passed": False,
         "variant": "comparison",
     }
