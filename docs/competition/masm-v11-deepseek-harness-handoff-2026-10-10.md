@@ -12,13 +12,19 @@
 | --- | --- |
 | 工作树 | `E:\Competitions\AgentMemoryChallenge\.worktrees\masm-v11` |
 | 分支 | `codex/masm-v11-selector-probe` |
-| 最新提交 | `acc5b8a`（**尚未推送**，`b8c1920` 之后共 4 个提交） |
+| 交接实现基线 | `1fb43fc`（本次元数据修订前的交接快照） |
+| 最新代码提交 | `acc5b8a`（最后一个改动 `src/` 或 `scripts/` 的提交） |
+| 远端基线 | `origin/codex/masm-v11-selector-probe` = `b8c1920`（**尚未推送**） |
+| 未推送提交 | 共 6 个；用 `git rev-list --count origin/codex/masm-v11-selector-probe..HEAD` 实时复核 |
 | selector prompt version | `evidence-selector-v7` |
 | selector 决策协议 | 三态 `evidence_state ∈ {sufficient, partial, insufficient}` |
 | 线上镜像 / 提交 | `masm-v11-final-candidate:0fc322d`（**未改动**） |
 | 新版本的官方 Smoke | **尚未运行** |
 
-四个提交的内容：
+`b8c1920` 之后共有 6 个未推送提交：`1fb43fc`（文档）、`acc5b8a`、`eb33e6e`、
+`0e783f1`、`0292f3b`，以及承载本段元数据修正的文档提交。其中 4 个改动代码，
+2 个只改文档。承载本段修正的提交 SHA 不写入本文，以免提交内容与其自身 SHA 形成自引用；
+需要时用 `git rev-parse --short HEAD` 查询当前分支顶端。
 
 | 提交 | 作用 |
 | --- | --- |
@@ -26,14 +32,23 @@
 | `0e783f1` | v6 收窄 `partial`：必须能指名一条被选记忆逐字陈述的被询问事实，不得因「不确定」或「看起来相关」而报 partial；关系型问题在其记忆覆盖全部事实与链路时允许 `sufficient` |
 | `eb33e6e` | v7 把 `evidence_state` 放到 schema 属性首位。严格解码按属性顺序生成，原先 `selected_indices` 在前，模型在判定「不足」之前就已写好索引；调序后 `insufficient` + 非空 indices 的矛盾消失 |
 | `acc5b8a` | 首轮 `partial` 也用更深候选池（32→48）重试；深层轮只在给出模型确认的完整 selection 时才替换首轮，否则原样保留首轮 partial。`selector_reasoning_probe.py` 增加 `production_eligible` 与 `--strict-only` 生产门槛，`candidate_eligible` 降为记录项 |
+| `1fb43fc` | 只更新本文档，不改源码或测试 |
+| 本段元数据修订提交（SHA 不在本文内固定） | 修正交接元数据与审计证据，只改本文档 |
 
-本地门槛（`acc5b8a`）：`pytest -q` → `773 passed, 1 skipped`；Ruff 通过；mypy 通过
-（60 个源文件）；`git diff --check` 通过。
+本地门槛在最新代码提交 `acc5b8a` 上测得：`pytest -q` → `773 passed, 1 skipped`；
+Ruff 通过；mypy 通过（60 个源文件）；`git diff --check` 通过。
 
 ### 0.2 合成探针结果（脱敏，仅枚举与计数）
 
-门槛在开跑之前写死，且两个探针的期望表自 `0292f3b` 起未再改动
-（`git diff --stat 0292f3b..HEAD -- scripts/selector_probe.py scripts/selector_reasoning_probe.py` 为空）：
+门槛在开跑之前写死。预注册的是**各案例的期望值**，它们自 `0292f3b` 起没有被改动：
+
+- `scripts/selector_probe.py` 自 `0292f3b` 起没有任何差异；
+- `scripts/selector_reasoning_probe.py` 在 `acc5b8a` 中被修改过（`run_probe` 的生产门槛、
+  `main` / `--strict-only` CLI、`_report_failure` 输出，以及 `argparse` 导入），
+  但 `_cases()` 里每个案例的 `expected` 索引集合与 `expected_state` 均未改动。
+
+因此不要再用「整个脚本无差异」来证明门槛未被移动；能被证明的只是**期望值未变**。
+判据本身是：
 
 - Gate 1 `selector_probe.py` 默认 4 用例：4/4 × 连续 3 轮；
 - Gate 2 `selector_probe.py --crowded-only` 3 用例：3/3 × 5 轮；
