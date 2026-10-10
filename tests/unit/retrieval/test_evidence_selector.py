@@ -68,7 +68,7 @@ def test_partial_direct_evidence_for_a_multi_part_question_abstains() -> None:
     assert result.abstained is True
 
 
-def test_inconsistent_direct_evidence_flag_uses_validated_fallback() -> None:
+def test_inconsistent_insufficient_decision_normalizes_to_safe_abstention() -> None:
     llm = FakeStructuredLLM(
         [{"selected_indices": [0], "sufficient_evidence": False}]
     )
@@ -78,8 +78,9 @@ def test_inconsistent_direct_evidence_flag_uses_validated_fallback() -> None:
         "What did Alice buy?", None, [anchor], {anchor.memory_id}
     )
 
-    assert result.evidence == (anchor,)
-    assert result.fallback is True
+    assert result.evidence == ()
+    assert result.fallback is False
+    assert result.abstained is True
     assert result.failure_category == "invalid_output"
 
 

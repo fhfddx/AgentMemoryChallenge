@@ -237,11 +237,12 @@ class EvidenceSelector:
             return self._fallback(ranked, strong_anchor_ids, len(pool), source_count, category)
         indices = output.selected_indices
         if not output.sufficient_evidence:
-            if indices:
-                return self._fallback(
-                    ranked, strong_anchor_ids, len(pool), source_count, "invalid_output"
-                )
-            return SelectionResult((), len(pool), source_count, 0, False, True)
+            insufficient_category: Literal["none", "invalid_output"] = (
+                "invalid_output" if indices else "none"
+            )
+            return SelectionResult(
+                (), len(pool), source_count, 0, False, True, insufficient_category
+            )
 
         if (
             not indices
