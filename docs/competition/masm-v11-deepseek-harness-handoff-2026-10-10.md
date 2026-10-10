@@ -1,9 +1,9 @@
 # MASM v1.1 DeepSeek Harness 交接（2026-10-10）
 
-## 最新更新：有界两跳 multi-session 候选（本地完成，未推送、未部署）
+## 最新更新：有界两跳 multi-session 候选（已部署，免费探针复测中）
 
-> **本节取代后文关于“下一步调查 multi-session”的待办描述。** 后文的线上状态仍然有效：
-> 生产环境继续运行 `masm-v11-final-candidate:84926f6`，本节候选只存在于新的本地工作树。
+> **本节取代后文所有旧的“当前状态”和 multi-session 待办描述。** API 已切换到
+> `masm-v11-final-candidate:d74ad1c`；官方 Smoke 尚未启动。
 
 ### 候选状态
 
@@ -12,10 +12,10 @@
 | 工作树 | `C:\Users\23952\.codex\worktrees\masm-v11-multihop\AgentMemoryChallenge` |
 | 分支 | `codex/masm-v11-multihop` |
 | 基线 | `65738a44b181`（`origin/codex/masm-v11-selector-probe`） |
-| 已完成提交 | `bdf92f7`、`3721b7e`、`f6049fa`、`263e29f`、`b71b637`、`2a3ee8c`、`d8390fd` |
-| 远端状态 | **本会话未推送**；本地没有该候选的 remote-tracking ref（实时 `ls-remote` 因连接重置未能复核） |
-| 云端状态 | **未构建、未部署、未运行官方 Smoke** |
-| 生产环境 | 仍为 `masm-v11-final-candidate:84926f6`；本次没有访问或修改云端数据库 |
+| 已完成提交 | `bdf92f7`、`3721b7e`、`f6049fa`、`263e29f`、`b71b637`、`2a3ee8c`、`d8390fd`、`e3a7312` |
+| 远端状态 | 分支已推送；GitHub PR `#1` 以 `codex/masm-v11-selector-probe` 为 base，保持 Open、未合并 |
+| 云端状态 | 镜像 `d74ad1c` 已构建并 API-only 部署；尚未运行官方 Smoke |
+| 生产环境 | API 为 `masm-v11-final-candidate:d74ad1c`、`healthy`、`restarts=0`；部署前后 DB 容器 ID 相同 |
 
 提交作用：
 
@@ -28,6 +28,7 @@
 | `b71b637` | 用真实 repository/Search 路径覆盖第二跳消息证据回填和不相连请求隔离 |
 | `2a3ee8c` | 新增安全的三会话路径探针及其单元测试 |
 | `d8390fd` | 修复审查发现的 conflict-bridge、零种子预算和 SQL 截断前排序边界；把探针负例升级为已存储的断开相似记录 |
+| `e3a7312` | 修正免费探针的负例判据：区分“只返回断开记录自身的否定证据”和“误返回主链证据” |
 
 本候选没有修改 `src/masm/retrieval/evidence_selector.py`，相对基线执行
 `git diff --exit-code 65738a44b181 -- src/masm/retrieval/evidence_selector.py` 返回 `0`。
@@ -55,9 +56,9 @@
 | 隔离与既有检索增强回归 | `24 passed` |
 | Search 第二跳回填集成测试 | `2 passed, 21 deselected` |
 | selector 回归 | `63 passed` |
-| 新旧路径探针单测 | `10 passed` |
+| 新旧路径探针单测 | `11 passed` |
 | 能力、隔离、selector、探针联合回归 | `133 passed` |
-| 全量 pytest | `792 passed, 1 skipped` |
+| 全量 pytest | `793 passed, 1 skipped` |
 | Ruff | 全仓通过 |
 | mypy | `62 source files`，零问题 |
 | `git diff --check` | 通过 |
@@ -75,7 +76,7 @@ Starlette/httpx 与 `pytest-asyncio` 弃用警告。数据库相关测试使用�
 
 1. 四次 `/add` 后仅输出 context/message/marker 计数；
 2. connected query 必须找齐 4 个链 marker，且不得夹带已存储的 `Unconnected` marker；
-3. disconnected query 必须返回空结果；
+3. disconnected query 可返回空结果或仅返回 `Unconnected` 自身；只要出现任一主链 marker 就失败；
 4. `finally` 中按预注册 run ID 精确清理，最多三轮，并验证 memories/sources 都为零残留；
 5. 输出只包含 allowlist 聚合字段，不打印 marker、正文、异常文本、凭据或数据库行；
 6. 只接受 loopback API URL，设置/请求失败分别以固定类别和非零退出码报告。
@@ -84,15 +85,15 @@ Starlette/httpx 与 `pytest-asyncio` 弃用警告。数据库相关测试使用�
 
 ### 后续服务器门槛（必须按顺序）
 
-1. 用户明确允许后，才把 `codex/masm-v11-multihop` 推送到远端；推送前记录最终 SHA。
-2. 服务器只做 fast-forward pull，以该 SHA 构建新的唯一镜像标签；不得覆盖 `84926f6`。
-3. 部署前记录 API/DB 容器 ID；只 `--no-deps --force-recreate api`，不得重建 PostgreSQL。
-4. 等 API `healthy` 后确认 `API_REPLACED`、`DB_UNCHANGED`、`restarts=0`，并再次确认
-   `PROMPT_VERSION=evidence-selector-v7`。
-5. 把 `scripts/multi_session_path_probe.py` 复制进 API 容器并运行；要求每行 `passed=true`、
-   cleanup `complete=true` 且进程退出码为 `0`。失败时直接回滚，不启动付费 Smoke。
-6. 再联跑既有 selector 四轮门槛和 `search_path_probe.py`；任何回归都停止。
-7. 只有全部免费门槛通过且用户再次明确确认，才启动一次官方 Smoke；不得启动 Full。
+1. **已完成：** 分支推送并创建 PR；服务器检出、镜像构建均固定在 `d74ad1c`。
+2. **已完成：** 仅替换 API；已确认 `API_REPLACED`、`DB_UNCHANGED`、`healthy`、
+   `restarts=0`、`PROMPT_VERSION=evidence-selector-v7`、`MAX_SECOND_HOP=8`。
+3. **已完成但判据需修正：** 首次四会话探针的 storage、connected、cleanup 均通过；
+   disconnected 返回 1 条证据，因此旧判据退出 `1`。cleanup 删除 8 memories、4 sources，
+   最终 memories/sources 零残留。
+4. **待执行：** 从 `e3a7312` 复制更新后的探针到当前 API 容器复测；运行时代码与镜像无需替换。
+5. **待执行：** 联跑既有 selector 四轮门槛和 `search_path_probe.py`；任何回归都停止。
+6. 只有全部免费门槛通过且用户再次明确确认，才启动一次官方 Smoke；不得启动 Full。
 
 旧的第 10 节部署模板仍展示上一分支名，不能原样用于本候选。实际部署时必须把
 `BRANCH` 改为 `codex/masm-v11-multihop`，并以最终远端 SHA 生成镜像和 override 路径。
