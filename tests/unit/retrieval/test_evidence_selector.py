@@ -1,13 +1,18 @@
 """Structured selection returns original evidence or a safe empty/fallback result."""
 
 import json
+from typing import Literal
 from uuid import UUID
 
 import pytest
 
 from masm.providers.fakes import FakeStructuredLLM
 from masm.providers.llm import ModelUnavailableError, StructuredOutputError
-from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
+from masm.retrieval.evidence_selector import (
+    DeterministicEvidenceSelector,
+    EvidenceSelection,
+    EvidenceSelector,
+)
 from masm.retrieval.reranker import RankedEvidence
 from masm.schemas.content import ImageURLPart, TextPart
 
@@ -46,12 +51,12 @@ def test_direct_fact_selection_returns_the_original_evidence_object() -> None:
     assert result.abstained is False
     assert len(llm.requests) == 1
     assert llm.requests[0].max_attempts == 1
-    assert llm.requests[0].prompt_version == "evidence-selector-v4"
+    assert llm.requests[0].prompt_version == "evidence-selector-v5"
     assert llm.requests[0].payload["question"] == "What did Alice buy?"
     assert llm.requests[0].payload["options"] == ["Notebook", "Paris"]
 
 
-def test_partial_direct_evidence_for_a_multi_part_question_abstains() -> None:
+def test_insufficient_decision_without_indices_abstains_without_fallback() -> None:
     llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
     purchase = _evidence(1, "source-a", "Alice bought a blue notebook")
     unrelated = _evidence(2, "source-b", "Bob visited Paris")
@@ -66,6 +71,7 @@ def test_partial_direct_evidence_for_a_multi_part_question_abstains() -> None:
     assert result.evidence == ()
     assert result.fallback is False
     assert result.abstained is True
+    assert result.evidence_state == "insufficient"
 
 
 def test_inconsistent_insufficient_decision_normalizes_to_safe_abstention() -> None:
@@ -82,10 +88,111 @@ def test_inconsistent_insufficient_decision_normalizes_to_safe_abstention() -> N
     assert result.fallback is False
     assert result.abstained is True
     assert result.failure_category == "invalid_output"
+    assert result.evidence_state == "insufficient"
 
 
-def test_selector_requests_deterministic_complete_coverage_decision() -> None:
-    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
+def test_partial_direct_evidence_is_retained_instead_of_being_discarded() -> None:
+    """成对用例 A：模型声明 partial 并给出直接事实，不得丢弃全部召回。
+
+    `partial` 表示「选中的记忆直接陈述了某个被询问的事实，但不足以覆盖全部询问」。
+    这是二态协议无法表达的边界：既不能无条件拒答，也不能回落到旧式全量强锚点。
+    """
+    llm = FakeStructuredLLM([{"selected_indices": [0], "evidence_state": "partial"}])
+    purchase = _evidence(1, "source-a", "Alice bought a blue notebook")
+    unrelated = _evidence(2, "source-b", "Bob visited Paris")
+
+    result = EvidenceSelector(llm).select(
+        "What did Alice buy and where did she store it?",
+        None,
+        [purchase, unrelated],
+        {purchase.memory_id, unrelated.memory_id},
+    )
+
+    assert result.evidence == (purchase,)
+    assert result.abstained is False
+    assert result.fallback is False
+    assert result.evidence_state == "partial"
+    assert result.failure_category == "none"
+
+
+def test_missing_link_evidence_still_abstains_without_unconditional_fallback() -> None:
+    """成对用例 B：候选只是局部推理链，必须拒答，不得恢复旧式无条件回退。
+
+    模型明确声明 `insufficient` 时，即使 indices 非空也必须拒答；旧行为会把这类
+    矛盾输出回落到全量 question-admitted 强锚点，从而在证据不足时仍然作答。
+    """
+    llm = FakeStructuredLLM(
+        [{"selected_indices": [0], "evidence_state": "insufficient"}]
+    )
+    local_link = _evidence(1, "source-a", "Nora plans to attend the Zephyr workshop")
+    receipt = _evidence(2, "source-b", "Nora filed a travel receipt on Tuesday")
+    unrelated = _evidence(3, "source-c", "The training room has a blue clock")
+
+    result = EvidenceSelector(llm).select(
+        "In which city is the workshop that Nora plans to attend?",
+        None,
+        [local_link, receipt, unrelated],
+        {item.memory_id for item in (local_link, receipt, unrelated)},
+    )
+
+    assert result.evidence == ()
+    assert result.abstained is True
+    assert result.fallback is False
+    assert result.evidence_state == "insufficient"
+    assert result.failure_category == "invalid_output"
+
+
+def test_partial_without_usable_indices_abstains_instead_of_falling_back() -> None:
+    """partial 但没有可用索引时没有可引用事实，按拒答处理而不是强锚点回退。"""
+    llm = FakeStructuredLLM([{"selected_indices": [], "evidence_state": "partial"}])
+    anchor = _evidence(1, "source-a", "the needed fact")
+
+    result = EvidenceSelector(llm).select(
+        "the needed fact", None, [anchor], {anchor.memory_id}
+    )
+
+    assert result.evidence == ()
+    assert result.abstained is True
+    assert result.fallback is False
+    assert result.evidence_state == "insufficient"
+    assert result.failure_category == "invalid_output"
+
+
+def test_legacy_two_field_output_is_accepted_and_kept_on_the_safe_side() -> None:
+    """旧 Provider 只有布尔位，无法表达 partial，因此矛盾输出保持拒答。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0], "sufficient_evidence": False}])
+    direct = _evidence(1, "source-a", "Alice bought a blue notebook")
+    unrelated = _evidence(2, "source-b", "Bob visited Paris")
+
+    result = EvidenceSelector(llm).select(
+        "What did Alice buy and where did she store it?", None,
+        [direct, unrelated], {direct.memory_id, unrelated.memory_id},
+    )
+
+    assert result.evidence == ()
+    assert result.abstained is True
+    assert result.fallback is False
+    assert result.evidence_state == "insufficient"
+    assert result.failure_category == "invalid_output"
+
+
+def test_legacy_two_field_sufficient_output_still_selects_evidence() -> None:
+    """旧 Provider 的 sufficient_evidence=true 仍映射为 sufficient，行为不变。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0], "sufficient_evidence": True}])
+    direct = _evidence(1, "source-a", "Alice bought a blue notebook")
+
+    result = EvidenceSelector(llm).select(
+        "What did Alice buy?", None, [direct], {direct.memory_id}
+    )
+
+    assert result.evidence == (direct,)
+    assert result.abstained is False
+    assert result.fallback is False
+    assert result.evidence_state == "sufficient"
+
+
+def test_selector_requests_deterministic_three_state_decision() -> None:
+    llm = FakeStructuredLLM([{"selected_indices": [], "evidence_state": "insufficient"}])
     entity_only = _evidence(1, "source-a", "Alice stored a notebook in cabinet seven")
 
     EvidenceSelector(llm).select(
@@ -95,11 +202,26 @@ def test_selector_requests_deterministic_complete_coverage_decision() -> None:
 
     request = llm.requests[0]
     assert request.temperature == 0.0
-    assert request.prompt_version == "evidence-selector-v4"
+    assert request.prompt_version == "evidence-selector-v5"
     assert "smallest set of memories" in request.prompt
     assert "every attribute, relation, value, or event asked for" in request.prompt
-    assert "If any requested fact is absent" in request.prompt
     assert "distinct source_group" in request.prompt
+    assert "evidence_state=partial" in request.prompt
+    assert "evidence_state=insufficient" in request.prompt
+    assert "local fragment of a longer reasoning chain" in request.prompt
+
+
+def test_selection_schema_accepts_only_the_two_protocol_fields() -> None:
+    llm = FakeStructuredLLM([{"selected_indices": [], "evidence_state": "insufficient"}])
+    candidate = _evidence(1, "source-a", "fact")
+
+    EvidenceSelector(llm).select("fact", None, [candidate], {candidate.memory_id})
+
+    assert EvidenceSelection.model_config["extra"] == "forbid"
+    assert set(EvidenceSelection.model_fields) == {"selected_indices", "evidence_state"}
+    assert EvidenceSelection.model_fields["evidence_state"].annotation == Literal[
+        "sufficient", "partial", "insufficient"
+    ]
 
 
 def test_no_direct_evidence_decision_abstains_without_fallback() -> None:

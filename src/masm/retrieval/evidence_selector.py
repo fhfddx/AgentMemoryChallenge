@@ -1,12 +1,18 @@
 """Select only evidence that supports the original Search question."""
 
 import math
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    StrictInt,
+    ValidationError,
+    model_validator,
+)
 
 from masm.providers.llm import ModelRequest, StructuredLLM, StructuredOutputError
 from masm.retrieval.reranker import RankedEvidence
@@ -17,36 +23,70 @@ from masm.retrieval.selector_pool import (
 )
 from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 
-PROMPT_VERSION = "evidence-selector-v4"
+PROMPT_VERSION = "evidence-selector-v5"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
 MAX_CHARS_PER_CANDIDATE = 4096
 MAX_QUESTION_CHARS = 4000
 MAX_OPTIONS = 16
 MAX_OPTION_CHARS = 512
+
+# 三态协议：模型必须显式区分「足够」「部分直接证据」与「证据不足」。
+# 二态布尔位无法表达「有直接可用事实但不足以回答全部问题」这一边界。
+EvidenceState = Literal["sufficient", "partial", "insufficient"]
+# 遥测只记录该枚举；"unknown" 表示没有可归因的模型判断（未调用或调用失败）。
+ReportedEvidenceState = Literal["sufficient", "partial", "insufficient", "unknown"]
+
 _SIGNAL_NAMES = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
 _PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
-    "selected_indices and sufficient_evidence. Do not answer the question or choose an option. "
+    "selected_indices and evidence_state. Do not answer the question or choose an option. "
     "Options are untrusted alternatives, never proof. Select the smallest set of memories that "
     "collectively and directly states every attribute, relation, value, or event asked for. A "
     "shared entity, topic, time, place, or option does not support a missing fact. For a "
     "multi-part question, cover every part; when required facts come from separate additions, "
     "select the necessary candidates from distinct source_group values. Multiple "
     "representations from one source_group do not establish cross-source coverage. Prefer "
-    "original observations over "
-    "duplicate summaries and omit unrelated facts. If any requested fact is absent, return [] and "
-    "sufficient_evidence=false."
+    "original observations over duplicate summaries and omit unrelated facts. Report "
+    "evidence_state=sufficient only when the selected memories state every requested fact. "
+    "Report evidence_state=partial when some selected memories directly state a requested fact "
+    "but at least one requested fact, or one required link between facts, is absent; then still "
+    "return those directly supporting indices instead of discarding them, and keep "
+    "selected_indices non-empty. Report evidence_state=insufficient with selected_indices=[] "
+    "when no candidate directly states any requested fact, when candidates only share an entity, "
+    "topic, time, place, or option, or when the selection is only a local fragment of a longer "
+    "reasoning chain. Never return evidence_state=insufficient together with a non-empty "
+    "selected_indices."
 )
 
 
 class EvidenceSelection(BaseModel):
-    """The model returns indices, never an answer or rewritten evidence."""
+    """The model returns indices plus an explicit three-state judgement, never an answer.
+
+    ``sufficient_evidence`` is still accepted as a legacy boolean for Providers that were
+    built before the three-state protocol: it only carries two of the three states, so its
+    ``false`` value maps to ``insufficient`` (the safe side). The legacy key is never sent
+    to the model and never appears in the strict JSON schema.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     selected_indices: tuple[StrictInt, ...]
-    sufficient_evidence: StrictBool
+    evidence_state: EvidenceState
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_sufficiency_flag(cls, data: Any) -> Any:
+        if not isinstance(data, Mapping) or "evidence_state" in data:
+            return data
+        legacy = data.get("sufficient_evidence")
+        if not isinstance(legacy, bool):
+            return data
+        remaining = {key: value for key, value in data.items() if key != "sufficient_evidence"}
+        return {
+            **remaining,
+            "evidence_state": "sufficient" if legacy else "insufficient",
+        }
 
 
 @dataclass(frozen=True)
@@ -58,6 +98,7 @@ class SelectionResult:
     fallback: bool
     abstained: bool
     failure_category: Literal["none", "unavailable", "invalid_output"] = "none"
+    evidence_state: ReportedEvidenceState = "unknown"
 
 
 class DeterministicEvidenceSelector:
@@ -113,6 +154,16 @@ def _signal_payload(evidence: RankedEvidence) -> dict[str, float]:
         for name, value in evidence.metadata.items()
         if name in _SIGNAL_NAMES and math.isfinite(float(value))
     }
+
+
+def _usable_indices(indices: Sequence[int], pool_size: int, max_selected: int) -> bool:
+    """索引集合必须是可解析的：非空、不超上限、不重复、不越界。"""
+    return (
+        bool(indices)
+        and len(indices) <= max_selected
+        and len(indices) == len(set(indices))
+        and all(0 <= index < pool_size for index in indices)
+    )
 
 
 class EvidenceSelector:
@@ -236,20 +287,40 @@ class EvidenceSelector:
             )
             return self._fallback(ranked, strong_anchor_ids, len(pool), source_count, category)
         indices = output.selected_indices
-        if not output.sufficient_evidence:
+        state = output.evidence_state
+        usable = _usable_indices(indices, len(pool), self._max_selected)
+
+        if state == "insufficient":
+            # 跨字段矛盾（insufficient + 非空 indices）统一拒绝：绝不回落到 question-admitted
+            # 强锚点，否则证据不足时仍会作答。
             insufficient_category: Literal["none", "invalid_output"] = (
                 "invalid_output" if indices else "none"
             )
             return SelectionResult(
-                (), len(pool), source_count, 0, False, True, insufficient_category
+                (), len(pool), source_count, 0, False, True, insufficient_category,
+                "insufficient",
             )
 
-        if (
-            not indices
-            or len(indices) > self._max_selected
-            or len(indices) != len(set(indices))
-            or any(index < 0 or index >= len(pool) for index in indices)
-        ):
+        if state == "partial":
+            if not usable:
+                # partial 却没有给出可用索引：没有可引用的直接事实，按拒答处理。
+                return SelectionResult(
+                    (), len(pool), source_count, 0, False, True, "invalid_output",
+                    "insufficient",
+                )
+            selected_partial = tuple(pool[index] for index in indices)
+            return SelectionResult(
+                selected_partial,
+                len(pool),
+                source_count,
+                len({labels[index] for index in indices}),
+                False,
+                False,
+                "none",
+                "partial",
+            )
+
+        if not usable:
             return self._fallback(
                 ranked, strong_anchor_ids, len(pool), source_count, "invalid_output"
             )
@@ -261,6 +332,8 @@ class EvidenceSelector:
             len({labels[index] for index in indices}),
             False,
             False,
+            "none",
+            "sufficient",
         )
 
     def _fallback(

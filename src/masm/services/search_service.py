@@ -119,6 +119,7 @@ class SearchService:
                 selector_fallback=selection.fallback if selection else False,
                 selector_abstained=selection.abstained if selection else False,
                 selector_failure_category=(selection.failure_category if selection else "none"),
+                selector_evidence_state=(selection.evidence_state if selection else "unknown"),
                 selector_latency_ms=selector_latency_ms,
             )
         )

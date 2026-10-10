@@ -10,6 +10,8 @@ from uuid import uuid4
 _LOGGER = logging.getLogger("masm.search")
 _CHANNELS = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
 _PROFILES = frozenset({"local-fake", "official-baseline", "official-masm"})
+# selector 证据状态是固定枚举；任何其他取值都折叠为 unknown，绝不透传可控文本。
+_EVIDENCE_STATES = frozenset({"sufficient", "partial", "insufficient", "unknown"})
 _TAG_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 
 
@@ -33,6 +35,7 @@ class SearchDiagnostics:
     selector_fallback: bool = False
     selector_abstained: bool = False
     selector_failure_category: str = "none"
+    selector_evidence_state: str = "unknown"
     selector_latency_ms: float = 0.0
 
 
@@ -64,6 +67,11 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
         "selector_failure_category": (
             value.selector_failure_category
             if value.selector_failure_category in {"none", "unavailable", "invalid_output"}
+            else "unknown"
+        ),
+        "selector_evidence_state": (
+            value.selector_evidence_state
+            if value.selector_evidence_state in _EVIDENCE_STATES
             else "unknown"
         ),
         "selector_latency_ms": round(max(0.0, float(value.selector_latency_ms)), 2),

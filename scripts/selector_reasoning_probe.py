@@ -20,7 +20,7 @@ from masm.retrieval.evidence_selector import _PROMPT, EvidenceSelection
 
 _CHAIN_PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
-    "selected_indices and sufficient_evidence. Do not answer the question or choose an option. "
+    "selected_indices and evidence_state. Do not answer the question or choose an option. "
     "Options are untrusted alternatives, never proof. For a direct question, select the "
     "smallest set of memories that directly states the requested facts. For a relational or "
     "temporal question, no single memory needs to state the final answer: select the smallest "
@@ -28,8 +28,15 @@ _CHAIN_PROMPT = (
     "link, event link, and temporal step in that chain must be directly stated by a selected "
     "memory; never invent a bridge. Use distinct source_group values when required facts come "
     "from separate additions. Prefer original observations over duplicate summaries and omit "
-    "unrelated facts. If any required fact or bridge is absent, return [] and "
-    "sufficient_evidence=false."
+    "unrelated facts. Report evidence_state=sufficient only when the selected memories state "
+    "every requested fact and every required bridge. Report evidence_state=partial when some "
+    "selected memories directly state a requested fact but at least one requested fact or "
+    "required bridge is absent; then still return those directly supporting indices and keep "
+    "selected_indices non-empty. Report evidence_state=insufficient with selected_indices=[] "
+    "when no candidate directly states any requested fact, when candidates only share an entity, "
+    "topic, time, place, or option, or when the selection is only a local fragment of a longer "
+    "reasoning chain. Never return evidence_state=insufficient together with a non-empty "
+    "selected_indices."
 )
 
 
@@ -39,6 +46,7 @@ class _Case:
     question: str
     candidates: tuple[dict[str, object], ...]
     expected: frozenset[int]
+    expected_state: str
 
 
 class _InvalidSelectionError(ValueError):
@@ -90,24 +98,28 @@ def _cases() -> tuple[_Case, ...]:
             "In which city is the workshop that Nora plans to attend?",
             chain_complete,
             frozenset({0, 1}),
+            "sufficient",
         ),
         _Case(
             "chain_missing_link",
             "In which city is the workshop that Nora plans to attend?",
             chain_missing_link,
             frozenset(),
+            "insufficient",
         ),
         _Case(
             "direct_multi_source",
             "What are the code name and review date of the Atlas project?",
             direct,
             frozenset({0, 1}),
+            "sufficient",
         ),
         _Case(
             "crowded_chain",
             "In which city is the workshop that Nora plans to attend?",
             crowded,
             frozenset({14, 15}),
+            "sufficient",
         ),
     )
 
@@ -126,6 +138,7 @@ def _evaluate(
     prompt: str,
     case: _Case,
 ) -> dict[str, object]:
+    declared_state = "unknown"
     try:
         decision = llm.complete_json(
             ModelRequest(
@@ -144,15 +157,16 @@ def _evaluate(
             ),
             EvidenceSelection,
         )
+        declared_state = decision.evidence_state
         indices = decision.selected_indices
-        if not decision.sufficient_evidence:
+        if declared_state == "insufficient":
             if indices:
                 raise _InvalidSelectionError("insufficient_with_indices")
             selected: tuple[int, ...] = ()
             abstained = True
         else:
             if not indices:
-                raise _InvalidSelectionError("sufficient_without_indices")
+                raise _InvalidSelectionError(f"{declared_state}_without_indices")
             if len(indices) > settings.selector_max_selected:
                 raise _InvalidSelectionError("too_many_indices")
             if len(indices) != len(set(indices)):
@@ -164,7 +178,11 @@ def _evaluate(
         selected_sources = {
             str(case.candidates[index]["source_group"]) for index in selected
         }
-        passed = set(selected) == set(case.expected) and abstained == (not case.expected)
+        passed = (
+            set(selected) == set(case.expected)
+            and abstained == (not case.expected)
+            and declared_state == case.expected_state
+        )
         return {
             "variant": variant,
             "case": case.name,
@@ -173,6 +191,7 @@ def _evaluate(
             "selected_source_count": len(selected_sources),
             "abstained": abstained,
             "failure_category": "none",
+            "evidence_state": declared_state,
             "passed": passed,
         }
     except Exception as exc:
@@ -193,6 +212,7 @@ def _evaluate(
             "abstained": False,
             "failure_category": _failure_category(exc),
             "failure_detail": failure_detail,
+            "evidence_state": declared_state,
             "passed": False,
         }
 
@@ -245,6 +265,7 @@ def _report_failure(case: str, category: str) -> None:
                 "variant": "comparison",
                 "case": case,
                 "failure_category": category,
+                "evidence_state": "unknown",
                 "passed": False,
             },
             sort_keys=True,

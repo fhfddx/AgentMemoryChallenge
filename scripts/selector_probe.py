@@ -142,16 +142,39 @@ def run_probe(
         timeout_seconds=settings.selector_timeout_seconds,
     )
     checks: tuple[
-        tuple[str, str, list[str] | None, tuple[RankedEvidence, ...], set[UUID]], ...
+        tuple[
+            str,
+            str,
+            list[str] | None,
+            tuple[RankedEvidence, ...],
+            set[UUID],
+            str,
+        ],
+        ...,
     ] = (
-        ("positive", "Where did Nora store the amber key?", None, direct_ranked, {known_id}),
-        ("unrelated", "What is Nora's passport number?", None, direct_ranked, set()),
+        (
+            "positive",
+            "Where did Nora store the amber key?",
+            None,
+            direct_ranked,
+            {known_id},
+            "sufficient",
+        ),
+        (
+            "unrelated",
+            "What is Nora's passport number?",
+            None,
+            direct_ranked,
+            set(),
+            "insufficient",
+        ),
         (
             "option_overlap_abstention",
             "What is Nora's passport number?",
             ["drawer three", "P-4821"],
             direct_ranked,
             set(),
+            "insufficient",
         ),
         (
             "multi_source",
@@ -159,10 +182,19 @@ def run_probe(
             None,
             multi_source_ranked,
             {project_id, review_id},
+            "sufficient",
         ),
     )
     crowded_checks: tuple[
-        tuple[str, str, list[str] | None, tuple[RankedEvidence, ...], set[UUID]], ...
+        tuple[
+            str,
+            str,
+            list[str] | None,
+            tuple[RankedEvidence, ...],
+            set[UUID],
+            str,
+        ],
+        ...,
     ] = (
         (
             "crowded_abstention",
@@ -170,6 +202,7 @@ def run_probe(
             ["cabinet 3", "P-4821"],
             crowded_ranked,
             set(),
+            "insufficient",
         ),
         (
             "crowded_multi_source",
@@ -177,6 +210,7 @@ def run_probe(
             None,
             crowded_ranked,
             {project_id, review_id},
+            "sufficient",
         ),
         (
             "deep_crowded_multi_source",
@@ -184,6 +218,7 @@ def run_probe(
             None,
             deep_crowded_ranked,
             {project_id, review_id},
+            "sufficient",
         ),
     )
     if crowded_only:
@@ -195,7 +230,7 @@ def run_probe(
     was_disabled = provider_logger.disabled
     provider_logger.disabled = True
     try:
-        for name, question, options, ranked, expected_ids in checks:
+        for name, question, options, ranked, expected_ids, expected_state in checks:
             result = selector.select(
                 question,
                 options,
@@ -207,6 +242,7 @@ def run_probe(
                 selected_ids == expected_ids
                 and not result.fallback
                 and result.abstained == (not expected_ids)
+                and result.evidence_state == expected_state
             )
             all_passed &= passed
             print(
@@ -219,6 +255,7 @@ def run_probe(
                         "fallback": result.fallback,
                         "abstained": result.abstained,
                         "failure_category": result.failure_category,
+                        "evidence_state": result.evidence_state,
                         "passed": passed,
                     },
                     sort_keys=True,
@@ -241,6 +278,7 @@ def _report_failure(case: str, category: str) -> None:
                 "fallback": False,
                 "abstained": False,
                 "failure_category": category,
+                "evidence_state": "unknown",
                 "passed": False,
             },
             sort_keys=True,

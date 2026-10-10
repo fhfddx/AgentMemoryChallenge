@@ -42,6 +42,7 @@ ALLOWED_LOG_FIELDS = frozenset(
         "selector_fallback",
         "selector_abstained",
         "selector_failure_category",
+        "selector_evidence_state",
         "selector_latency_ms",
         "channel",
         "model_name",

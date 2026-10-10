@@ -18,6 +18,7 @@ SAFE_FIELDS = (
     "selector_abstained",
     "selector_fallback",
     "selector_failure_category",
+    "selector_evidence_state",
 )
 
 
@@ -41,12 +42,16 @@ def _print_run(label: str, rows: list[dict[str, Any]]) -> None:
             f"abs={row.get('selector_abstained')}",
             f"fb={row.get('selector_fallback')}",
             f"fail={row.get('selector_failure_category')}",
+            f"state={row.get('selector_evidence_state')}",
         )
     returned_dist = dict(sorted(Counter(row.get("returned_count") for row in rows).items()))
     selected_sources_dist = dict(
         sorted(Counter(row.get("selector_selected_source_count") for row in rows).items())
     )
     failures = dict(Counter(row.get("selector_failure_category", "missing") for row in rows))
+    evidence_states = dict(
+        sorted(Counter(row.get("selector_evidence_state", "missing") for row in rows).items())
+    )
     print(
         f"{label} SUMMARY",
         f"candidate_zero={sum(row.get('candidate_count', 0) == 0 for row in rows)}",
@@ -56,6 +61,7 @@ def _print_run(label: str, rows: list[dict[str, Any]]) -> None:
         f"returned_dist={returned_dist}",
         f"selected_sources_dist={selected_sources_dist}",
         f"failures={failures}",
+        f"evidence_states={evidence_states}",
     )
 
 

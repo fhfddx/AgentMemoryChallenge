@@ -135,3 +135,50 @@ def test_cli_defaults_to_server_smoke_diagnostics_paths() -> None:
 
     assert args.old_path == Path("/tmp/smoke-search-diagnostics.jsonl")
     assert args.new_path == Path("/tmp/smoke-v2-search-diagnostics.jsonl")
+
+
+def test_cli_reports_selector_evidence_state_distribution_only(tmp_path: Path) -> None:
+    old_path = tmp_path / "old.jsonl"
+    new_path = tmp_path / "new.jsonl"
+    common = {
+        "candidate_count": 3,
+        "dedup_count": 3,
+        "returned_count": 1,
+        "selector_candidate_count": 3,
+        "selector_selected_count": 1,
+        "selector_source_count": 3,
+        "selector_selected_source_count": 1,
+        "selector_abstained": False,
+        "selector_fallback": False,
+        "selector_failure_category": "none",
+        "content": "private answer material",
+    }
+    _write_jsonl(
+        old_path,
+        [{**common, "selector_evidence_state": "insufficient"}],
+    )
+    _write_jsonl(
+        new_path,
+        [{**common, "selector_evidence_state": "partial"}],
+    )
+
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "compare_search_diagnostics.py"),
+            str(old_path),
+            str(new_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "state=insufficient" in result.stdout
+    assert "state=partial" in result.stdout
+    assert "evidence_states={'insufficient': 1}" in result.stdout
+    assert "evidence_states={'partial': 1}" in result.stdout
+    assert "CHANGED_ROWS [1]" in result.stdout
+    assert "private answer material" not in result.stdout

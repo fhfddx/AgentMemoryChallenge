@@ -100,6 +100,7 @@ def test_probe_rejects_out_of_range_indices_as_sanitized_invalid_output() -> Non
         "case": "chain_complete",
         "failure_category": "invalid_output",
         "failure_detail": "out_of_range_indices",
+        "evidence_state": "sufficient",
         "passed": False,
         "selected_count": 0,
         "selected_source_count": 0,
@@ -128,7 +129,9 @@ def test_probe_reports_safe_invalid_output_subtypes() -> None:
 
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert rows[0]["failure_detail"] == "insufficient_with_indices"
+    assert rows[0]["evidence_state"] == "insufficient"
     assert rows[4]["failure_detail"] == "schema_validation"
+    assert rows[4]["evidence_state"] == "unknown"
     assert "unsafe provider detail" not in output.getvalue()
 
 
@@ -156,6 +159,44 @@ def test_probe_requires_chain_prompt_to_improve_on_strict_prompt() -> None:
     }
 
 
+def test_probe_distinguishes_partial_from_invalid_missing_link_output() -> None:
+    """三态探针必须把 partial 与 insufficient+indices 分开归类。
+
+    `partial` 是合法输出（有直接事实但链路不完整），只是不满足该用例的期望；
+    `insufficient+indices` 是跨字段矛盾，必须归入 invalid_output。
+    """
+    probe = importlib.import_module("scripts.selector_reasoning_probe")
+    llm = FakeStructuredLLM(
+        [
+            {"selected_indices": [0], "evidence_state": "partial"},
+            {"selected_indices": [], "evidence_state": "insufficient"},
+            {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+            {"selected_indices": [14, 15], "evidence_state": "sufficient"},
+            {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+            {"selected_indices": [0], "evidence_state": "insufficient"},
+            {"selected_indices": [0, 1], "evidence_state": "sufficient"},
+            {"selected_indices": [14, 15], "evidence_state": "sufficient"},
+        ]
+    )
+    output = StringIO()
+
+    probe.run_probe(llm, Settings(database_url=""), output)
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert rows[0]["failure_category"] == "none"
+    assert rows[0]["evidence_state"] == "partial"
+    assert rows[0]["selected_count"] == 1
+    assert rows[0]["abstained"] is False
+    assert rows[0]["passed"] is False
+    assert rows[1]["failure_category"] == "none"
+    assert rows[1]["evidence_state"] == "insufficient"
+    assert rows[1]["passed"] is True
+    assert rows[5]["failure_detail"] == "insufficient_with_indices"
+    assert rows[5]["failure_category"] == "invalid_output"
+    assert rows[5]["passed"] is False
+    assert "Nora" not in output.getvalue()
+
+
 def test_main_rejects_disabled_selector_without_printing_credentials(
     monkeypatch, capsys
 ) -> None:
@@ -171,6 +212,7 @@ def test_main_rejects_disabled_selector_without_printing_credentials(
     assert json.loads(output.out) == {
         "case": "preflight",
         "failure_category": "configuration",
+        "evidence_state": "unknown",
         "passed": False,
         "variant": "comparison",
     }

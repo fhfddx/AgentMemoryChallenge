@@ -40,6 +40,7 @@ def test_probe_reports_all_four_selection_boundaries() -> None:
             "fallback": False,
             "abstained": False,
             "failure_category": "none",
+            "evidence_state": "sufficient",
             "passed": True,
         },
         {
@@ -50,6 +51,7 @@ def test_probe_reports_all_four_selection_boundaries() -> None:
             "fallback": False,
             "abstained": True,
             "failure_category": "none",
+            "evidence_state": "insufficient",
             "passed": True,
         },
         {
@@ -60,6 +62,7 @@ def test_probe_reports_all_four_selection_boundaries() -> None:
             "fallback": False,
             "abstained": True,
             "failure_category": "none",
+            "evidence_state": "insufficient",
             "passed": True,
         },
         {
@@ -70,6 +73,7 @@ def test_probe_reports_all_four_selection_boundaries() -> None:
             "fallback": False,
             "abstained": False,
             "failure_category": "none",
+            "evidence_state": "sufficient",
             "passed": True,
         },
     ]
@@ -158,6 +162,7 @@ def test_main_rejects_disabled_selector_without_printing_credentials(
         "fallback": False,
         "abstained": False,
         "failure_category": "configuration",
+        "evidence_state": "unknown",
         "passed": False,
     }
 
@@ -180,6 +185,7 @@ def test_main_sanitizes_invalid_environment_before_provider_construction(
         "fallback": False,
         "abstained": False,
         "failure_category": "configuration",
+        "evidence_state": "unknown",
         "passed": False,
     }
     assert "private-probe-key" not in output.out + output.err
@@ -252,6 +258,7 @@ def test_script_entrypoint_exits_without_model_call_when_selector_disabled() -> 
         "fallback": False,
         "abstained": False,
         "failure_category": "configuration",
+        "evidence_state": "unknown",
         "passed": False,
     }
     assert completed.stderr == ""
