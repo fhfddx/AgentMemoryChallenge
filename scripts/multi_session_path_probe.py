@@ -11,7 +11,11 @@ from uuid import UUID, uuid4
 import httpx
 
 from masm.config import RuntimeProfile, Settings
+from masm.retrieval.selector_pool import build_selector_pool
+from masm.runtime import build_runtime
+from masm.schemas.api import SearchRequest
 from masm.services.deletion_service import DeletionReport, DeletionService
+from masm.services.search_service import SearchService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 from masm.storage.repositories import MemoryRepository
@@ -48,6 +52,10 @@ class _Repository(Protocol):
 
 
 DeleteRun = Callable[..., DeletionReport]
+DiagnoseSearch = Callable[
+    [str, str, tuple[str, ...], tuple[str, ...]],
+    Sequence[dict[str, Any]],
+]
 
 
 def _post(client: _Client, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -78,6 +86,139 @@ def _print_row(output: TextIO, row: dict[str, Any]) -> None:
     print(json.dumps(row, sort_keys=True), file=output)
 
 
+def _marker_counts(
+    candidates: Sequence[Any],
+    expected_markers: Sequence[str],
+    forbidden_markers: Sequence[str],
+) -> tuple[int, int]:
+    text = " ".join(_content_text(candidate.content) for candidate in candidates)
+    return (
+        sum(marker in text for marker in expected_markers),
+        sum(marker in text for marker in forbidden_markers),
+    )
+
+
+def _stage_row(
+    case: str,
+    candidates: Sequence[Any],
+    expected_markers: Sequence[str],
+    forbidden_markers: Sequence[str],
+) -> dict[str, Any]:
+    matched, forbidden = _marker_counts(
+        candidates,
+        expected_markers,
+        forbidden_markers,
+    )
+    return {
+        "case": case,
+        "candidate_count": len(candidates),
+        "matched_marker_count": matched,
+        "forbidden_marker_count": forbidden,
+    }
+
+
+def _diagnose_search_stages(
+    service: SearchService,
+    user_id: str,
+    query: str,
+    expected_markers: tuple[str, ...],
+    forbidden_markers: tuple[str, ...],
+    *,
+    selector_max_candidates: int,
+) -> list[dict[str, Any]]:
+    """Return content-free aggregate counts at each deployed Search stage."""
+    request = SearchRequest(query=query, user_id=user_id, top_k=10)
+    parsed = service._analyze(request)  # noqa: SLF001
+    recalled, _channel_counts = service._retriever.retrieve_with_stats(  # noqa: SLF001
+        user_id,
+        parsed,
+        30,
+    )
+    candidates = [candidate for candidate in recalled if candidate.user_id == user_id]
+    if service._relevance_gate is not None:  # noqa: SLF001
+        candidates = service._relevance_gate.filter(candidates)  # noqa: SLF001
+    strong_anchor_ids = {candidate.memory_id for candidate in candidates}
+    rows = [
+        _stage_row(
+            "stage_recall",
+            candidates,
+            expected_markers,
+            forbidden_markers,
+        )
+    ]
+
+    if service._expander is not None and candidates:  # noqa: SLF001
+        candidates = service._with_expansion(user_id, candidates, 10)  # noqa: SLF001
+    if service._expander is not None or service._reranker is not None:  # noqa: SLF001
+        candidates = service._deduplicate(candidates)  # noqa: SLF001
+    rows.append(
+        _stage_row(
+            "stage_expanded",
+            candidates,
+            expected_markers,
+            forbidden_markers,
+        )
+    )
+
+    ranked = service._rank(parsed, candidates)  # noqa: SLF001
+    selector_pool = build_selector_pool(
+        ranked,
+        max_candidates=selector_max_candidates,
+    )
+    rows.append(
+        _stage_row(
+            "stage_selector_pool",
+            selector_pool,
+            expected_markers,
+            forbidden_markers,
+        )
+    )
+
+    if service._selector is None:  # noqa: SLF001
+        selected = selector_pool
+        candidate_count = len(selector_pool)
+        evidence_state = "unknown"
+        fallback = False
+        abstained = not selected
+    else:
+        selection = service._selector.select(  # noqa: SLF001
+            query,
+            None,
+            ranked,
+            strong_anchor_ids,
+        )
+        selected = list(selection.evidence)
+        candidate_count = selection.candidate_count
+        evidence_state = selection.evidence_state
+        fallback = selection.fallback
+        abstained = selection.abstained
+    matched, forbidden = _marker_counts(
+        selected,
+        expected_markers,
+        forbidden_markers,
+    )
+    rows.append(
+        {
+            "case": "stage_selected",
+            "candidate_count": candidate_count,
+            "selected_count": len(selected),
+            "matched_marker_count": matched,
+            "forbidden_marker_count": forbidden,
+            "evidence_state": evidence_state,
+            "fallback": fallback,
+            "abstained": abstained,
+            "passed": (
+                not selected
+                or (
+                    matched == len(expected_markers)
+                    and forbidden == 0
+                )
+            ),
+        }
+    )
+    return rows
+
+
 def run_probe(
     client: _Client,
     repository: MemoryRepository | _Repository,
@@ -85,6 +226,7 @@ def run_probe(
     output: TextIO,
     *,
     run_tag: str,
+    diagnose_search: DiagnoseSearch | None = None,
 ) -> int:
     """Run connected/disconnected chain cases and clean every registered Add."""
     user_id = f"multi-session-path-probe-{run_tag}"
@@ -176,6 +318,20 @@ def run_probe(
             },
         )
 
+        disconnected_query = f"What terminal record is linked to {missing}?"
+        disconnected_expected = (missing,)
+        disconnected_forbidden = (root, bridge, leaf, terminal)
+        if diagnose_search is not None:
+            for row in diagnose_search(
+                user_id,
+                disconnected_query,
+                disconnected_expected,
+                disconnected_forbidden,
+            ):
+                _print_row(output, row)
+                if row.get("case") == "stage_selected":
+                    all_passed &= row.get("passed") is True
+
         searches = (
             (
                 "connected_chain",
@@ -186,9 +342,9 @@ def run_probe(
             ),
             (
                 "disconnected_chain",
-                f"What terminal record is linked to {missing}?",
-                (missing,),
-                (root, bridge, leaf, terminal),
+                disconnected_query,
+                disconnected_expected,
+                disconnected_forbidden,
                 True,
             ),
         )
@@ -344,10 +500,38 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     database: Database | None = None
+    runtime = None
     try:
         database = Database.create(settings.database_url)
         repository = MemoryRepository(database)
         deletion = DeletionService(repository, AssetStore(settings.asset_dir))
+        runtime = build_runtime(settings, repository)
+        stage_service = SearchService(
+            runtime.retriever,
+            max_image_bytes=settings.max_image_bytes,
+            analyzer=runtime.query_analyzer,
+            expander=runtime.relation_expander,
+            reranker=runtime.reranker,
+            relevance_gate=runtime.relevance_gate,
+            selector=runtime.evidence_selector,
+            runtime_profile=settings.runtime_profile.value,
+        )
+
+        def diagnose_search(
+            user_id: str,
+            query: str,
+            expected_markers: tuple[str, ...],
+            forbidden_markers: tuple[str, ...],
+        ) -> Sequence[dict[str, Any]]:
+            return _diagnose_search_stages(
+                stage_service,
+                user_id,
+                query,
+                expected_markers,
+                forbidden_markers,
+                selector_max_candidates=settings.selector_max_candidates,
+            )
+
         with httpx.Client(
             base_url=base_url,
             headers={"X-Api-Key": settings.api_keys[0]},
@@ -359,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
                 deletion.delete_run,
                 sys.stdout,
                 run_tag=uuid4().hex[:12],
+                diagnose_search=diagnose_search,
             )
     except Exception:
         _print_row(
@@ -371,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     finally:
+        if runtime is not None:
+            runtime.close()
         if database is not None:
             database.engine.dispose()
 

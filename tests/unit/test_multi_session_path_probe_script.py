@@ -11,7 +11,12 @@ from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
+from masm.retrieval.evidence_selector import DeterministicEvidenceSelector
+from masm.retrieval.relevance import RelevanceGate
+from masm.retrieval.reranker import EvidenceReranker
 from masm.services.deletion_service import DeletionReport
+from masm.services.search_service import SearchService
+from masm.storage.types import MemoryCandidate
 
 
 @dataclass(frozen=True)
@@ -363,6 +368,167 @@ def test_probe_reports_a_disconnected_relation_to_the_main_chain() -> None:
     }
     assert backend.runs == {}
     assert "Root-graph-leak" not in output.getvalue()
+
+
+def test_probe_emits_supplied_search_stage_diagnostics() -> None:
+    probe = importlib.import_module("scripts.multi_session_path_probe")
+    backend = _InMemoryBackend(run_tag="stages")
+    output = StringIO()
+    calls: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = []
+
+    def diagnose(
+        user_id: str,
+        query: str,
+        expected_markers: tuple[str, ...],
+        forbidden_markers: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        calls.append((user_id, query, expected_markers, forbidden_markers))
+        return [
+            {
+                "case": "stage_selected",
+                "candidate_count": 1,
+                "selected_count": 1,
+                "matched_marker_count": 1,
+                "forbidden_marker_count": 0,
+                "evidence_state": "sufficient",
+                "fallback": False,
+                "abstained": False,
+                "passed": True,
+            }
+        ]
+
+    assert probe.run_probe(
+        backend,
+        backend,
+        backend.delete_run,
+        output,
+        run_tag="stages",
+        diagnose_search=diagnose,
+    ) == 0
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [row["case"] for row in rows] == [
+        "storage",
+        "relation_isolation",
+        "stage_selected",
+        "connected_chain",
+        "disconnected_chain",
+        "cleanup",
+    ]
+    assert calls == [
+        (
+            "multi-session-path-probe-stages",
+            "What terminal record is linked to Unconnected-stages?",
+            ("Unconnected-stages",),
+            (
+                "Root-stages",
+                "Bridge-stages",
+                "Leaf-stages",
+                "Terminal-stages",
+            ),
+        )
+    ]
+
+
+def test_search_stage_diagnostics_report_safe_marker_counts() -> None:
+    probe = importlib.import_module("scripts.multi_session_path_probe")
+    user_id = "stage-user"
+    expected = "Unconnected-stage"
+    leaf = "Leaf-stage"
+    terminal = "Terminal-stage"
+    candidates = [
+        MemoryCandidate(
+            memory_id=uuid5(NAMESPACE_URL, "expected"),
+            user_id=user_id,
+            content=f"{expected} belongs to a separate archive.",
+            score=0.9,
+            request_id="expected-run",
+            retrieval_signals={"lexical": 1.0},
+        ),
+        MemoryCandidate(
+            memory_id=uuid5(NAMESPACE_URL, "forbidden"),
+            user_id=user_id,
+            content=f"{leaf} ends at {terminal}.",
+            score=0.8,
+            request_id="forbidden-run",
+            retrieval_signals={"lexical": 1.0},
+        ),
+    ]
+
+    class _Retriever:
+        def retrieve_with_stats(
+            self, requested_user: str, parsed: Any, limit: int
+        ) -> tuple[list[MemoryCandidate], dict[str, int]]:
+            del parsed, limit
+            return (
+                list(candidates) if requested_user == user_id else [],
+                {"lexical": len(candidates)},
+            )
+
+    service = SearchService(
+        _Retriever(),  # type: ignore[arg-type]
+        max_image_bytes=1024,
+        relevance_gate=RelevanceGate(),
+        reranker=EvidenceReranker(),
+        selector=DeterministicEvidenceSelector(),
+    )
+
+    rows = probe._diagnose_search_stages(  # noqa: SLF001
+        service,
+        user_id,
+        f"What terminal record is linked to {expected}?",
+        (expected,),
+        ("Root-stage", "Bridge-stage", leaf, terminal),
+        selector_max_candidates=32,
+    )
+
+    assert rows == [
+        {
+            "case": "stage_recall",
+            "candidate_count": 2,
+            "matched_marker_count": 1,
+            "forbidden_marker_count": 2,
+        },
+        {
+            "case": "stage_expanded",
+            "candidate_count": 2,
+            "matched_marker_count": 1,
+            "forbidden_marker_count": 2,
+        },
+        {
+            "case": "stage_selector_pool",
+            "candidate_count": 2,
+            "matched_marker_count": 1,
+            "forbidden_marker_count": 2,
+        },
+        {
+            "case": "stage_selected",
+            "candidate_count": 2,
+            "selected_count": 2,
+            "matched_marker_count": 1,
+            "forbidden_marker_count": 2,
+            "evidence_state": "unknown",
+            "fallback": False,
+            "abstained": False,
+            "passed": False,
+        },
+    ]
+    assert all(
+        set(row).issubset(
+            {
+                "case",
+                "candidate_count",
+                "selected_count",
+                "matched_marker_count",
+                "forbidden_marker_count",
+                "evidence_state",
+                "fallback",
+                "abstained",
+                "passed",
+            }
+        )
+        for row in rows
+    )
 
 
 def test_probe_output_uses_only_safe_aggregate_fields() -> None:
