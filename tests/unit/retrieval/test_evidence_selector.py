@@ -51,7 +51,7 @@ def test_direct_fact_selection_returns_the_original_evidence_object() -> None:
     assert result.abstained is False
     assert len(llm.requests) == 1
     assert llm.requests[0].max_attempts == 1
-    assert llm.requests[0].prompt_version == "evidence-selector-v6"
+    assert llm.requests[0].prompt_version == "evidence-selector-v7"
     assert llm.requests[0].payload["question"] == "What did Alice buy?"
     assert llm.requests[0].payload["options"] == ["Notebook", "Paris"]
 
@@ -202,7 +202,7 @@ def test_selector_requests_deterministic_three_state_decision() -> None:
 
     request = llm.requests[0]
     assert request.temperature == 0.0
-    assert request.prompt_version == "evidence-selector-v6"
+    assert request.prompt_version == "evidence-selector-v7"
     assert "smallest set of memories" in request.prompt
     assert "every attribute, relation, value, or event asked for" in request.prompt
     assert "distinct source_group" in request.prompt
@@ -223,11 +223,37 @@ def test_selector_prompt_requires_naming_a_stated_requested_fact() -> None:
     EvidenceSelector(llm).select("fact", None, [candidate], {candidate.memory_id})
 
     request = llm.requests[0]
-    assert request.prompt_version == "evidence-selector-v6"
+    assert request.prompt_version == "evidence-selector-v7"
     assert "Name the requested fact" in request.prompt
     assert "Never report partial merely because" in request.prompt
     assert "does not state the attribute the question asks for" in request.prompt
     assert "every link needed to connect them" in request.prompt
+
+
+def test_selection_schema_asks_for_the_state_before_the_indices() -> None:
+    """v7 契约：模型必须先决定 evidence_state，再生成 selected_indices。
+
+    v6 探针在两轮里稳定出现 `insufficient` + 非空 indices。严格 JSON schema 的属性顺序
+    是 selected_indices -> evidence_state，约束解码按属性顺序生成，所以模型在得出结论
+    之前就已经写好了索引。把 evidence_state 提到第一位，等于让解码器先定状态。
+    """
+    assert list(EvidenceSelection.model_fields) == [
+        "evidence_state",
+        "selected_indices",
+    ]
+    assert list(EvidenceSelection.model_json_schema()["properties"]) == [
+        "evidence_state",
+        "selected_indices",
+    ]
+
+    llm = FakeStructuredLLM([{"selected_indices": [], "evidence_state": "insufficient"}])
+    candidate = _evidence(1, "source-a", "fact")
+
+    EvidenceSelector(llm).select("fact", None, [candidate], {candidate.memory_id})
+
+    request = llm.requests[0]
+    assert request.prompt_version == "evidence-selector-v7"
+    assert "Decide evidence_state before you choose selected_indices" in request.prompt
 
 
 def test_selection_schema_accepts_only_the_two_protocol_fields() -> None:

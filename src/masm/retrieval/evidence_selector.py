@@ -23,7 +23,7 @@ from masm.retrieval.selector_pool import (
 )
 from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 
-PROMPT_VERSION = "evidence-selector-v6"
+PROMPT_VERSION = "evidence-selector-v7"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
 MAX_CHARS_PER_CANDIDATE = 4096
@@ -40,21 +40,22 @@ ReportedEvidenceState = Literal["sufficient", "partial", "insufficient", "unknow
 _SIGNAL_NAMES = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
 _PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
-    "selected_indices and evidence_state. Do not answer the question or choose an option. "
-    "Options are untrusted alternatives, never proof. Select the smallest set of memories that "
-    "directly states every attribute, relation, value, or event asked for. A candidate supports "
-    "a requested fact only when its own text gives that attribute, relation, value, or event: a "
-    "shared entity, topic, time, place, or option does not support a missing fact, and a "
-    "candidate that is only one link of a longer reasoning chain does not state the attribute "
-    "the question asks for. For a multi-part question, cover every part; when required facts "
-    "come from separate additions, select the necessary candidates from distinct source_group "
-    "values. Multiple representations from one source_group do not establish cross-source "
-    "coverage. For a relational or temporal question the selected memories must also directly "
-    "state every link needed to connect them; never invent a bridge. Prefer original "
-    "observations over duplicate summaries and omit unrelated facts. Name the requested fact "
-    "that a selected memory states before choosing partial or sufficient; if no selected memory "
-    "states one, choose insufficient. Report evidence_state=sufficient when the selected "
-    "memories state every requested fact and every link needed to connect them. Report "
+    "evidence_state and selected_indices, in that order. Do not answer the question or choose "
+    "an option. Options are untrusted alternatives, never proof. Decide evidence_state before "
+    "you choose selected_indices, and let the state constrain the indices. Select the smallest "
+    "set of memories that directly states every attribute, relation, value, or event asked for. "
+    "A candidate supports a requested fact only when its own text gives that attribute, "
+    "relation, value, or event: a shared entity, topic, time, place, or option does not support "
+    "a missing fact, and a candidate that is only one link of a longer reasoning chain does not "
+    "state the attribute the question asks for. For a multi-part question, cover every part; "
+    "when required facts come from separate additions, select the necessary candidates from "
+    "distinct source_group values. Multiple representations from one source_group do not "
+    "establish cross-source coverage. For a relational or temporal question the selected "
+    "memories must also directly state every link needed to connect them; never invent a bridge. "
+    "Prefer original observations over duplicate summaries and omit unrelated facts. Name the "
+    "requested fact that a selected memory states before choosing partial or sufficient; if no "
+    "selected memory states one, choose insufficient. Report evidence_state=sufficient when the "
+    "selected memories state every requested fact and every link needed to connect them. Report "
     "evidence_state=partial when at least one selected memory directly states a requested fact "
     "but at least one other requested fact or needed link is absent; then still return those "
     "directly supporting indices and keep selected_indices non-empty. Never report partial "
@@ -67,7 +68,13 @@ _PROMPT = (
 
 
 class EvidenceSelection(BaseModel):
-    """The model returns indices plus an explicit three-state judgement, never an answer.
+    """The model returns a three-state judgement plus indices, never an answer.
+
+    ``evidence_state`` is declared first on purpose. Strict structured decoding emits JSON
+    properties in schema order, so putting the state first makes the model commit to a state
+    before it can write ``selected_indices``. Without that ordering the model decides the state
+    while already holding indices it generated first, which is what produced the observed
+    ``insufficient`` + non-empty ``selected_indices`` contradiction.
 
     ``sufficient_evidence`` is still accepted as a legacy boolean for Providers that were
     built before the three-state protocol: it only carries two of the three states, so its
@@ -77,8 +84,8 @@ class EvidenceSelection(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    selected_indices: tuple[StrictInt, ...]
     evidence_state: EvidenceState
+    selected_indices: tuple[StrictInt, ...]
 
     @model_validator(mode="before")
     @classmethod
