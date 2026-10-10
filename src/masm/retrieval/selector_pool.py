@@ -5,11 +5,12 @@ from uuid import UUID
 
 from masm.retrieval.reranker import RankedEvidence
 
-MAX_SELECTOR_CANDIDATES = 32
+DEFAULT_SELECTOR_CANDIDATES = 32
+MAX_SELECTOR_CANDIDATES = 48
 
 
 def build_selector_pool(
-    ranked: Sequence[RankedEvidence], *, max_candidates: int = MAX_SELECTOR_CANDIDATES
+    ranked: Sequence[RankedEvidence], *, max_candidates: int = DEFAULT_SELECTOR_CANDIDATES
 ) -> list[RankedEvidence]:
     """Reserve half the budget for distinct sources, then fill by overall rank."""
     if max_candidates < 0:

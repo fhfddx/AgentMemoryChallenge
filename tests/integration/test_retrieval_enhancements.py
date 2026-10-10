@@ -663,7 +663,7 @@ def test_selector_can_return_original_facts_from_two_add_requests(
     _seed(database, asset_store, settings, embeddings, user_id, "Alice adopted Nimbus")
     _seed(database, asset_store, settings, embeddings, user_id, "Nimbus sleeps greenhouse")
     repository = MemoryRepository(database)
-    llm = FakeStructuredLLM([{"selected_indices": [], "has_direct_evidence": False}])
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
     service = SearchService(
         BaselineRetriever(repository, embeddings, DEFAULT_CHANNEL_WEIGHTS),
         max_image_bytes=settings.max_image_bytes,
@@ -687,7 +687,7 @@ def test_selector_can_return_original_facts_from_two_add_requests(
         and candidate["text"] in {"Alice adopted Nimbus", "Nimbus sleeps greenhouse"}
     ]
     assert len(chosen) == 2
-    llm.queue({"selected_indices": chosen, "has_direct_evidence": True})
+    llm.queue({"selected_indices": chosen, "sufficient_evidence": True})
 
     response = service.search(request)
 
@@ -717,7 +717,7 @@ def test_selector_restores_original_multimodal_message_after_selection(
             }],
         )
     )
-    llm = FakeStructuredLLM([{"selected_indices": [], "has_direct_evidence": False}])
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
     app.state.search_service._selector = EvidenceSelector(llm)  # noqa: SLF001
     request = SearchRequest(query="visual needle", user_id=user_id, top_k=10)
 
@@ -727,7 +727,7 @@ def test_selector_restores_original_multimodal_message_after_selection(
         item["index"] for item in candidates if item["granularity"] == "message"
     ]
     assert len(message_indices) == 1
-    llm.queue({"selected_indices": message_indices, "has_direct_evidence": True})
+    llm.queue({"selected_indices": message_indices, "sufficient_evidence": True})
 
     response = app.state.search_service.search(request)
 

@@ -51,12 +51,12 @@ def test_pool_ignores_blank_source_during_reservation_and_deduplicates_ids() -> 
 
 
 def test_pool_respects_zero_small_and_global_maximum() -> None:
-    ranked = [_evidence(number, f"source-{number}") for number in range(1, 41)]
+    ranked = [_evidence(number, f"source-{number}") for number in range(1, 61)]
 
     assert build_selector_pool([]) == []
     assert build_selector_pool(ranked, max_candidates=0) == []
     assert len(build_selector_pool(ranked, max_candidates=2)) == 2
-    assert len(build_selector_pool(ranked, max_candidates=100)) == 32
+    assert len(build_selector_pool(ranked, max_candidates=100)) == 48
 
 
 def test_pool_rejects_negative_limit() -> None:

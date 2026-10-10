@@ -20,10 +20,10 @@ def test_probe_reports_all_four_selection_boundaries() -> None:
     probe = importlib.import_module("scripts.selector_probe")
     llm = FakeStructuredLLM(
         [
-            {"selected_indices": [0], "has_direct_evidence": True},
-            {"selected_indices": [], "has_direct_evidence": False},
-            {"selected_indices": [], "has_direct_evidence": False},
-            {"selected_indices": [0, 1], "has_direct_evidence": True},
+            {"selected_indices": [0], "sufficient_evidence": True},
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [0, 1], "sufficient_evidence": True},
         ]
     )
     output = StringIO()
@@ -84,8 +84,8 @@ def test_extended_only_probe_makes_exactly_two_new_model_calls() -> None:
     probe = importlib.import_module("scripts.selector_probe")
     llm = FakeStructuredLLM(
         [
-            {"selected_indices": [], "has_direct_evidence": False},
-            {"selected_indices": [0, 1], "has_direct_evidence": True},
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [0, 1], "sufficient_evidence": True},
         ]
     )
     output = StringIO()
@@ -103,12 +103,14 @@ def test_extended_only_probe_makes_exactly_two_new_model_calls() -> None:
     assert len(llm.requests) == 2
 
 
-def test_crowded_only_probe_sends_two_pools_of_exactly_32_candidates() -> None:
+def test_crowded_only_probe_retries_deep_complete_evidence_with_48_candidates() -> None:
     probe = importlib.import_module("scripts.selector_probe")
     llm = FakeStructuredLLM(
         [
-            {"selected_indices": [], "has_direct_evidence": False},
-            {"selected_indices": [30, 31], "has_direct_evidence": True},
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [30, 31], "sufficient_evidence": True},
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [46, 47], "sufficient_evidence": True},
         ]
     )
     output = StringIO()
@@ -122,11 +124,14 @@ def test_crowded_only_probe_sends_two_pools_of_exactly_32_candidates() -> None:
     assert [row["case"] for row in rows] == [
         "crowded_abstention",
         "crowded_multi_source",
+        "deep_crowded_multi_source",
     ]
-    assert [row["candidate_source_count"] for row in rows] == [32, 32]
-    assert [row["selected_count"] for row in rows] == [0, 2]
-    assert len(llm.requests) == 2
-    assert [len(request.payload["candidates"]) for request in llm.requests] == [32, 32]
+    assert [row["candidate_source_count"] for row in rows] == [32, 32, 48]
+    assert [row["selected_count"] for row in rows] == [0, 2, 2]
+    assert len(llm.requests) == 4
+    assert [len(request.payload["candidates"]) for request in llm.requests] == [
+        32, 32, 32, 48,
+    ]
     assert "Atlas project" in llm.requests[0].payload["question"]
     assert all(
         "Atlas project" in candidate["text"]
@@ -192,8 +197,10 @@ def test_main_uses_existing_provider_config_and_prints_only_safe_counts(
     monkeypatch.setenv("MASM_EMBEDDING_API_KEY", "private-embedding-key")
     llm = FakeStructuredLLM(
         [
-            {"selected_indices": [], "has_direct_evidence": False},
-            {"selected_indices": [30, 31], "has_direct_evidence": True},
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [30, 31], "sufficient_evidence": True},
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [46, 47], "sufficient_evidence": True},
         ]
     )
 
@@ -210,9 +217,11 @@ def test_main_uses_existing_provider_config_and_prints_only_safe_counts(
     output = capsys.readouterr().out
     assert exit_code == 0
     assert [row["passed"] for row in map(json.loads, output.splitlines())] == [
-        True, True,
+        True, True, True,
     ]
-    assert [len(request.payload["candidates"]) for request in llm.requests] == [32, 32]
+    assert [len(request.payload["candidates"]) for request in llm.requests] == [
+        32, 32, 32, 48,
+    ]
     assert "private-probe-key" not in output
     assert "private-embedding-key" not in output
     assert "Nora" not in output

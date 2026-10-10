@@ -28,7 +28,7 @@ def _evidence(number: int, source: str, content: str) -> RankedEvidence:
 
 def test_direct_fact_selection_returns_the_original_evidence_object() -> None:
     llm = FakeStructuredLLM(
-        [{"selected_indices": [0], "has_direct_evidence": True}], model="gpt-4o-mini"
+        [{"selected_indices": [0], "sufficient_evidence": True}], model="gpt-4o-mini"
     )
     direct = _evidence(1, "source-a", "Alice bought a blue notebook")
     irrelevant = _evidence(2, "source-b", "Alice visited Paris")
@@ -46,15 +46,13 @@ def test_direct_fact_selection_returns_the_original_evidence_object() -> None:
     assert result.abstained is False
     assert len(llm.requests) == 1
     assert llm.requests[0].max_attempts == 1
-    assert llm.requests[0].prompt_version == "evidence-selector-v3"
+    assert llm.requests[0].prompt_version == "evidence-selector-v4"
     assert llm.requests[0].payload["question"] == "What did Alice buy?"
     assert llm.requests[0].payload["options"] == ["Notebook", "Paris"]
 
 
-def test_partial_direct_evidence_is_retained_for_a_multi_part_question() -> None:
-    llm = FakeStructuredLLM(
-        [{"selected_indices": [0], "has_direct_evidence": True}]
-    )
+def test_partial_direct_evidence_for_a_multi_part_question_abstains() -> None:
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
     purchase = _evidence(1, "source-a", "Alice bought a blue notebook")
     unrelated = _evidence(2, "source-b", "Bob visited Paris")
 
@@ -65,14 +63,14 @@ def test_partial_direct_evidence_is_retained_for_a_multi_part_question() -> None
         set(),
     )
 
-    assert result.evidence == (purchase,)
+    assert result.evidence == ()
     assert result.fallback is False
-    assert result.abstained is False
+    assert result.abstained is True
 
 
 def test_inconsistent_direct_evidence_flag_uses_validated_fallback() -> None:
     llm = FakeStructuredLLM(
-        [{"selected_indices": [0], "has_direct_evidence": False}]
+        [{"selected_indices": [0], "sufficient_evidence": False}]
     )
     anchor = _evidence(1, "source-a", "Alice bought a blue notebook")
 
@@ -85,10 +83,8 @@ def test_inconsistent_direct_evidence_flag_uses_validated_fallback() -> None:
     assert result.failure_category == "invalid_output"
 
 
-def test_selector_requests_deterministic_partial_evidence_decision() -> None:
-    llm = FakeStructuredLLM(
-        [{"selected_indices": [], "has_direct_evidence": False}]
-    )
+def test_selector_requests_deterministic_complete_coverage_decision() -> None:
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
     entity_only = _evidence(1, "source-a", "Alice stored a notebook in cabinet seven")
 
     EvidenceSelector(llm).select(
@@ -98,15 +94,15 @@ def test_selector_requests_deterministic_partial_evidence_decision() -> None:
 
     request = llm.requests[0]
     assert request.temperature == 0.0
-    assert request.prompt_version == "evidence-selector-v3"
-    assert "at least one requested fact" in request.prompt
-    assert "Partial coverage is useful" in request.prompt
-    assert "none of the candidates directly supports any requested fact" in request.prompt
+    assert request.prompt_version == "evidence-selector-v4"
+    assert "smallest set of memories" in request.prompt
+    assert "every attribute, relation, value, or event asked for" in request.prompt
+    assert "If any requested fact is absent" in request.prompt
     assert "distinct source_group" in request.prompt
 
 
 def test_no_direct_evidence_decision_abstains_without_fallback() -> None:
-    llm = FakeStructuredLLM([{"selected_indices": [], "has_direct_evidence": False}])
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
     unrelated = _evidence(1, "source-a", "Alice visited Paris")
 
     result = EvidenceSelector(llm).select(
@@ -119,7 +115,7 @@ def test_no_direct_evidence_decision_abstains_without_fallback() -> None:
 
 
 def test_multi_source_question_keeps_both_selected_original_facts() -> None:
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "has_direct_evidence": True}])
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "sufficient_evidence": True}])
     first = _evidence(1, "session-add-1", "Alice purchased a notebook")
     second = _evidence(2, "session-add-2", "Alice gave the notebook to Bob")
 
@@ -132,9 +128,55 @@ def test_multi_source_question_keeps_both_selected_original_facts() -> None:
     assert result.selected_source_count == 2
 
 
+def test_incomplete_first_pass_retries_with_deeper_candidates() -> None:
+    ranked = [
+        _evidence(number, f"source-{number}", f"fact {number}")
+        for number in range(1, 49)
+    ]
+    llm = FakeStructuredLLM(
+        [
+            {"selected_indices": [], "sufficient_evidence": False},
+            {"selected_indices": [0, 47], "sufficient_evidence": True},
+        ]
+    )
+
+    result = EvidenceSelector(llm).select(
+        "Which two facts complete the answer?", None, ranked, set()
+    )
+
+    assert result.evidence == (ranked[0], ranked[47])
+    assert result.candidate_count == 48
+    assert result.selected_source_count == 2
+    assert result.fallback is False
+    assert result.abstained is False
+    assert len(llm.requests) == 2
+    assert len(llm.requests[0].payload["candidates"]) == 32
+    assert len(llm.requests[1].payload["candidates"]) == 48
+
+
+def test_sufficient_first_pass_does_not_retry_deeper_candidates() -> None:
+    ranked = [
+        _evidence(number, f"source-{number}", f"fact {number}")
+        for number in range(1, 49)
+    ]
+    llm = FakeStructuredLLM(
+        [{"selected_indices": [0], "sufficient_evidence": True}]
+    )
+
+    result = EvidenceSelector(llm).select(
+        "Which fact completes the answer?", None, ranked, set()
+    )
+
+    assert result.evidence == (ranked[0],)
+    assert result.candidate_count == 32
+    assert result.fallback is False
+    assert result.abstained is False
+    assert len(llm.requests) == 1
+
+
 def test_atomic_fact_survives_even_when_its_rank_exceeds_response_cap() -> None:
     ranked = [_evidence(number, f"source-{number}", f"fact {number}") for number in range(1, 15)]
-    llm = FakeStructuredLLM([{"selected_indices": [12], "has_direct_evidence": True}])
+    llm = FakeStructuredLLM([{"selected_indices": [12], "sufficient_evidence": True}])
 
     result = EvidenceSelector(llm, max_candidates=14).select(
         "Which exact fact is needed?", None, ranked, {item.memory_id for item in ranked}
@@ -155,7 +197,7 @@ def test_atomic_fact_survives_even_when_its_rank_exceeds_response_cap() -> None:
 def test_option_only_or_entity_only_memory_abstains(
     question: str, options: list[str] | None, content: str
 ) -> None:
-    llm = FakeStructuredLLM([{"selected_indices": [], "has_direct_evidence": False}])
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
     candidate = _evidence(1, "source-a", content)
 
     result = EvidenceSelector(llm).select(question, options, [candidate], {candidate.memory_id})
@@ -172,7 +214,7 @@ def test_candidate_text_limit_cannot_be_configured_above_hard_cap() -> None:
 
 
 def test_selector_payload_is_bounded_text_and_never_contains_image_bytes() -> None:
-    llm = FakeStructuredLLM([{"selected_indices": [0], "has_direct_evidence": True}])
+    llm = FakeStructuredLLM([{"selected_indices": [0], "sufficient_evidence": True}])
     candidate = _evidence(1, "private-request-id", "X" * 1300)
     visual = ImageURLPart(image_url={"url": "data:image/png;base64,cHJpdmF0ZS1ieXRlcw=="})
 
@@ -193,7 +235,7 @@ def test_selector_payload_is_bounded_text_and_never_contains_image_bytes() -> No
 
 def test_pure_visual_query_preserves_image_recall_without_uninformed_model_call() -> None:
     visual = ImageURLPart(image_url={"url": "data:image/png;base64,cHJpdmF0ZS1ieXRlcw=="})
-    llm = FakeStructuredLLM([{"selected_indices": [], "has_direct_evidence": False}])
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
     anchor = _evidence(1, "image-request", "a blue bicycle beside a tree")
     relation_only = _evidence(2, "related-request", "unverified related context")
 
@@ -224,12 +266,12 @@ def test_empty_pool_abstains_without_model_request() -> None:
         (ModelUnavailableError("private response"), "unavailable"),
         (TimeoutError("private response"), "unavailable"),
         (StructuredOutputError("private response"), "invalid_output"),
-        ({"selected_indices": [True], "has_direct_evidence": True}, "invalid_output"),
-        ({"selected_indices": ["bad"], "has_direct_evidence": True}, "invalid_output"),
-        ({"selected_indices": [-1], "has_direct_evidence": True}, "invalid_output"),
-        ({"selected_indices": [2], "has_direct_evidence": True}, "invalid_output"),
-        ({"selected_indices": [0, 0], "has_direct_evidence": True}, "invalid_output"),
-        ({"selected_indices": [], "has_direct_evidence": True}, "invalid_output"),
+        ({"selected_indices": [True], "sufficient_evidence": True}, "invalid_output"),
+        ({"selected_indices": ["bad"], "sufficient_evidence": True}, "invalid_output"),
+        ({"selected_indices": [-1], "sufficient_evidence": True}, "invalid_output"),
+        ({"selected_indices": [2], "sufficient_evidence": True}, "invalid_output"),
+        ({"selected_indices": [0, 0], "sufficient_evidence": True}, "invalid_output"),
+        ({"selected_indices": [], "sufficient_evidence": True}, "invalid_output"),
     ],
 )
 def test_invalid_selection_falls_back_to_question_admitted_anchor(failure, category) -> None:
@@ -262,7 +304,7 @@ def test_failed_selection_with_no_strong_anchor_abstains() -> None:
 def test_over_limit_selection_falls_back_to_at_most_twelve_anchors() -> None:
     ranked = [_evidence(number, f"source-{number}", f"fact {number}") for number in range(1, 15)]
     llm = FakeStructuredLLM(
-        [{"selected_indices": list(range(13)), "has_direct_evidence": True}]
+        [{"selected_indices": list(range(13)), "sufficient_evidence": True}]
     )
 
     result = EvidenceSelector(llm).select(
@@ -293,7 +335,7 @@ def test_fallback_diversifies_sources_and_preserves_rank_order() -> None:
 
 
 def test_selector_limits_question_and_option_text_in_provider_payload() -> None:
-    llm = FakeStructuredLLM([{"selected_indices": [], "has_direct_evidence": False}])
+    llm = FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
     candidate = _evidence(1, "source-a", "fact")
 
     EvidenceSelector(llm).select("Q" * 5000, ["O" * 800] * 30, [candidate], set())

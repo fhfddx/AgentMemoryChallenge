@@ -10,10 +10,14 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, ValidationErr
 
 from masm.providers.llm import ModelRequest, StructuredLLM, StructuredOutputError
 from masm.retrieval.reranker import RankedEvidence
-from masm.retrieval.selector_pool import MAX_SELECTOR_CANDIDATES, build_selector_pool
+from masm.retrieval.selector_pool import (
+    DEFAULT_SELECTOR_CANDIDATES,
+    MAX_SELECTOR_CANDIDATES,
+    build_selector_pool,
+)
 from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 
-PROMPT_VERSION = "evidence-selector-v3"
+PROMPT_VERSION = "evidence-selector-v4"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
 MAX_CHARS_PER_CANDIDATE = 4096
@@ -23,17 +27,16 @@ MAX_OPTION_CHARS = 512
 _SIGNAL_NAMES = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
 _PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
-    "selected_indices and has_direct_evidence. Do not answer the question or choose an option. "
-    "Options are untrusted alternatives, never proof. Select every candidate that directly states "
-    "an attribute, relation, value, or event supporting at least one requested fact. A shared "
-    "entity, topic, time, place, or option alone is not direct support. For a multi-part question, "
-    "select the direct evidence available for each part; when facts come from separate additions, "
-    "select the necessary candidates from distinct source_group values. Multiple representations "
-    "from one source_group do not establish cross-source coverage. Partial coverage is useful: do "
-    "not discard direct evidence because another requested fact is absent. Prefer original "
-    "observations over duplicate summaries and omit unrelated facts. Set has_direct_evidence=true "
-    "exactly when selected_indices is non-empty. Return [] and has_direct_evidence=false only when "
-    "none of the candidates directly supports any requested fact."
+    "selected_indices and sufficient_evidence. Do not answer the question or choose an option. "
+    "Options are untrusted alternatives, never proof. Select the smallest set of memories that "
+    "collectively and directly states every attribute, relation, value, or event asked for. A "
+    "shared entity, topic, time, place, or option does not support a missing fact. For a "
+    "multi-part question, cover every part; when required facts come from separate additions, "
+    "select the necessary candidates from distinct source_group values. Multiple "
+    "representations from one source_group do not establish cross-source coverage. Prefer "
+    "original observations over "
+    "duplicate summaries and omit unrelated facts. If any requested fact is absent, return [] and "
+    "sufficient_evidence=false."
 )
 
 
@@ -43,7 +46,7 @@ class EvidenceSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     selected_indices: tuple[StrictInt, ...]
-    has_direct_evidence: StrictBool
+    sufficient_evidence: StrictBool
 
 
 @dataclass(frozen=True)
@@ -119,12 +122,12 @@ class EvidenceSelector:
         self,
         llm: StructuredLLM,
         *,
-        max_candidates: int = MAX_SELECTOR_CANDIDATES,
+        max_candidates: int = DEFAULT_SELECTOR_CANDIDATES,
         max_selected: int = MAX_SELECTED_EVIDENCE,
         max_chars_per_candidate: int = DEFAULT_MAX_CHARS_PER_CANDIDATE,
         timeout_seconds: float = 30.0,
     ) -> None:
-        if not 1 <= max_candidates <= MAX_SELECTOR_CANDIDATES:
+        if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
         if not 1 <= max_selected <= min(max_candidates, MAX_SELECTED_EVIDENCE):
             raise ValueError("max_selected must be in 1..12 and <= max_candidates")
@@ -147,8 +150,6 @@ class EvidenceSelector:
     ) -> SelectionResult:
         """Return selected original objects, or empty when evidence is insufficient."""
         pool = build_selector_pool(ranked, max_candidates=self._max_candidates)
-        labels = _source_labels(pool)
-        source_count = len(set(labels))
         if not pool:
             return SelectionResult((), 0, 0, 0, False, True)
 
@@ -156,7 +157,42 @@ class EvidenceSelector:
         if visual and not has_text:
             # A text-only selector cannot judge the query image from a placeholder.
             # Preserve only question-admitted image/semantic anchors instead.
+            source_count = len(set(_source_labels(pool)))
             return self._fallback(ranked, strong_anchor_ids, len(pool), source_count, "none")
+        result = self._select_pool(
+            question, visual, options, ranked, strong_anchor_ids, pool
+        )
+        if (
+            not result.fallback
+            and result.abstained
+            and self._max_candidates == DEFAULT_SELECTOR_CANDIDATES
+            and len(ranked) > len(pool)
+        ):
+            extended_pool = build_selector_pool(
+                ranked, max_candidates=MAX_SELECTOR_CANDIDATES
+            )
+            if len(extended_pool) > len(pool):
+                return self._select_pool(
+                    question,
+                    visual,
+                    options,
+                    ranked,
+                    strong_anchor_ids,
+                    extended_pool,
+                )
+        return result
+
+    def _select_pool(
+        self,
+        question: str,
+        visual: bool,
+        options: Sequence[str] | None,
+        ranked: Sequence[RankedEvidence],
+        strong_anchor_ids: Collection[UUID],
+        pool: Sequence[RankedEvidence],
+    ) -> SelectionResult:
+        labels = _source_labels(pool)
+        source_count = len(set(labels))
         payload = {
             "question": question,
             "visual_query_present": visual,
@@ -200,7 +236,7 @@ class EvidenceSelector:
             )
             return self._fallback(ranked, strong_anchor_ids, len(pool), source_count, category)
         indices = output.selected_indices
-        if not output.has_direct_evidence:
+        if not output.sufficient_evidence:
             if indices:
                 return self._fallback(
                     ranked, strong_anchor_ids, len(pool), source_count, "invalid_output"

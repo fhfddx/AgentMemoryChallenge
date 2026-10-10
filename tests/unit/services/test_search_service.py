@@ -66,7 +66,7 @@ def test_selection_precedes_rendering_and_preserves_selected_order() -> None:
             return [replace(item, content=f"original {item.content}") for item in ranked]
 
     renderer = Renderer()
-    llm = FakeStructuredLLM([{"selected_indices": [1, 0], "has_direct_evidence": True}])
+    llm = FakeStructuredLLM([{"selected_indices": [1, 0], "sufficient_evidence": True}])
     service = SearchService(
         Retriever(), max_image_bytes=1024, selector=EvidenceSelector(llm),
         renderer=renderer, packer=ResponsePacker(),
@@ -84,7 +84,7 @@ def test_insufficient_selection_is_successful_empty_response() -> None:
             return [MemoryCandidate(UUID(int=1), user_id, "Alice visited Paris", 0.9)]
 
     selector = EvidenceSelector(
-        FakeStructuredLLM([{"selected_indices": [], "has_direct_evidence": False}])
+        FakeStructuredLLM([{"selected_indices": [], "sufficient_evidence": False}])
     )
     service = SearchService(Retriever(), max_image_bytes=1024, selector=selector)
 

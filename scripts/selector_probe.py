@@ -99,6 +99,41 @@ def run_probe(
             request_id="synthetic-crowded-source-31",
         ),
     )
+    deep_crowded_ranked = (
+        *(
+            RankedEvidence(
+                memory_id=UUID(int=200 + index),
+                user_id="synthetic-selector-probe",
+                content=(
+                    f"The Atlas project archived report {index} "
+                    f"in cabinet {index % 10}."
+                ),
+                score=1.0 - (index * 0.01),
+                rank=index + 1,
+                granularity="message",
+                request_id=f"synthetic-deep-source-{index}",
+            )
+            for index in range(46)
+        ),
+        RankedEvidence(
+            memory_id=project_id,
+            user_id="synthetic-selector-probe",
+            content="The Atlas project uses code name Zephyr.",
+            score=0.54,
+            rank=47,
+            granularity="message",
+            request_id="synthetic-deep-source-46",
+        ),
+        RankedEvidence(
+            memory_id=review_id,
+            user_id="synthetic-selector-probe",
+            content="The review for the Atlas project is scheduled on April 18.",
+            score=0.53,
+            rank=48,
+            granularity="message",
+            request_id="synthetic-deep-source-47",
+        ),
+    )
     selector = EvidenceSelector(
         llm,
         max_candidates=settings.selector_max_candidates,
@@ -141,6 +176,13 @@ def run_probe(
             "What are the code name and review date of the Atlas project?",
             None,
             crowded_ranked,
+            {project_id, review_id},
+        ),
+        (
+            "deep_crowded_multi_source",
+            "What are the code name and review date of the Atlas project?",
+            None,
+            deep_crowded_ranked,
             {project_id, review_id},
         ),
     )
