@@ -1,5 +1,69 @@
 # MASM v1.1 DeepSeek Harness 交接（2026-10-10）
 
+## 0. 更新：DeepSeek Harness 第二轮（v5 → v7）
+
+> **本节取代第 3、4、5、6、7 节的状态描述。** 那些小节记录的是 `0fc322d` 快照；
+> 代码、协议与 prompt 版本都已前进，线上服务未变。第 2 节的边界与第 8 节的安全比较
+> 要求仍然有效。
+
+### 0.1 当前代码状态
+
+| 项目 | 当前值 |
+| --- | --- |
+| 工作树 | `E:\Competitions\AgentMemoryChallenge\.worktrees\masm-v11` |
+| 分支 | `codex/masm-v11-selector-probe` |
+| 最新提交 | `acc5b8a`（**尚未推送**，`b8c1920` 之后共 4 个提交） |
+| selector prompt version | `evidence-selector-v7` |
+| selector 决策协议 | 三态 `evidence_state ∈ {sufficient, partial, insufficient}` |
+| 线上镜像 / 提交 | `masm-v11-final-candidate:0fc322d`（**未改动**） |
+| 新版本的官方 Smoke | **尚未运行** |
+
+四个提交的内容：
+
+| 提交 | 作用 |
+| --- | --- |
+| `0292f3b` | 二态 `sufficient_evidence` 换成三态 `evidence_state`：`partial` 返回已验证索引且不回落强锚点，`insufficient` 一律拒答；旧二态 Provider 输出经 `model_validator(mode="before")` 映射（`false → insufficient`），旧字段既不进 schema 也不发给模型；遥测新增固定枚举 `selector_evidence_state` |
+| `0e783f1` | v6 收窄 `partial`：必须能指名一条被选记忆逐字陈述的被询问事实，不得因「不确定」或「看起来相关」而报 partial；关系型问题在其记忆覆盖全部事实与链路时允许 `sufficient` |
+| `eb33e6e` | v7 把 `evidence_state` 放到 schema 属性首位。严格解码按属性顺序生成，原先 `selected_indices` 在前，模型在判定「不足」之前就已写好索引；调序后 `insufficient` + 非空 indices 的矛盾消失 |
+| `acc5b8a` | 首轮 `partial` 也用更深候选池（32→48）重试；深层轮只在给出模型确认的完整 selection 时才替换首轮，否则原样保留首轮 partial。`selector_reasoning_probe.py` 增加 `production_eligible` 与 `--strict-only` 生产门槛，`candidate_eligible` 降为记录项 |
+
+本地门槛（`acc5b8a`）：`pytest -q` → `773 passed, 1 skipped`；Ruff 通过；mypy 通过
+（60 个源文件）；`git diff --check` 通过。
+
+### 0.2 合成探针结果（脱敏，仅枚举与计数）
+
+门槛在开跑之前写死，且两个探针的期望表自 `0292f3b` 起未再改动
+（`git diff --stat 0292f3b..HEAD -- scripts/selector_probe.py scripts/selector_reasoning_probe.py` 为空）：
+
+- Gate 1 `selector_probe.py` 默认 4 用例：4/4 × 连续 3 轮；
+- Gate 2 `selector_probe.py --crowded-only` 3 用例：3/3 × 5 轮；
+- Gate 3 `selector_reasoning_probe.py` 生产 prompt：4/4 × 连续 2 轮。
+
+| 版本 | Gate 1 | Gate 2 | Gate 3 |
+| --- | --- | --- | --- |
+| v5 | 4/4 | **`crowded_abstention` 误报 partial，5/5 轮失败** | **strict 2/4**（`chain_missing_link` 与 `chain_complete` 均报 partial） |
+| v6 | 4/4（第 1 轮 1 次 provider `unavailable`） | 15/15 通过 | **strict 3/4**（`insufficient` + 非空 indices） |
+| v7 | **连续 5 轮 4/4 通过** | **15/15 通过** | **连续 3 轮 4/4 通过** |
+
+v7 三条门槛均按字面达成。`candidate_eligible` 仍为 `False`，因为生产 prompt 已覆盖
+chain 变体的用例；它表示「chain 优于 strict」，**不是**部署门槛。`chain` prompt 只作对照
+基线，永远不是部署候选。
+
+### 0.3 仍未闭环的风险
+
+**Provider `unavailable` 会退回全量 question-admitted 强锚点。** 约 220 次合成调用中观察到
+3 次 `selector_failure_category=unavailable`，每次结果都是 `selector_evidence_state=unknown`、
+`selector_fallback=true`、返回最多 12 条强锚点。这是 `0fc322d` 已有的 v4 行为，与三态改动
+无关，但会让一个本该拒答的问题带着未经模型确认的证据被作答，直接影响 abstention 分项。
+本轮刻意没有一并修改，以保持「一次只改一个变量」；它应作为下一个独立候选并自带预登记门槛。
+
+### 0.4 部署前仍缺的步骤
+
+1. 尚未对新版本运行任何官方 Smoke；最新公开总分仍是 `30.77` 的旧记录。
+2. 尚未在服务器构建镜像、替换 `masm-v11-api-1`，也未生成新的脱敏遥测。
+3. 第 8 节那两个 14 行诊断文件的安全比较**仍未闭环**，不要写成已解决。
+4. 仓库与 `known_hosts` 都没有可用的 v11 服务器 SSH 目标，部署命令需要在服务器控制台执行。
+
 ## 1. 文档用途与当前结论
 
 本文是给后续 DeepSeek Harness 会话的独立交接快照。它聚焦 2026-10-10
