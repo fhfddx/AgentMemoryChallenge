@@ -29,10 +29,12 @@ class _InMemoryBackend:
         run_tag: str,
         fail_on_search: int | None = None,
         leak_disconnected: bool = False,
+        return_disconnected_evidence: bool = False,
     ) -> None:
         self.run_tag = run_tag
         self.fail_on_search = fail_on_search
         self.leak_disconnected = leak_disconnected
+        self.return_disconnected_evidence = return_disconnected_evidence
         self.runs: dict[str, dict[str, Any]] = {}
         self.requests: list[tuple[str, dict[str, Any]]] = []
         self._search_index = 0
@@ -71,11 +73,21 @@ class _InMemoryBackend:
                     "content": f"Unconnected-{self.run_tag} is only a lookalike.",
                 }
             )
+        disconnected = (
+            [
+                {
+                    "id": "disconnected",
+                    "content": f"Unconnected-{self.run_tag} is only a lookalike.",
+                }
+            ]
+            if self.return_disconnected_evidence
+            else []
+        )
         searches: tuple[dict[str, Any], ...] = (
             {
                 "data": connected
             },
-            {"data": []},
+            {"data": disconnected},
         )
         payload = searches[self._search_index]
         self._search_index += 1
@@ -155,7 +167,7 @@ def test_probe_exercises_connected_and_disconnected_paths_then_cleans() -> None:
         },
         {
             "case": "disconnected_chain",
-            "expected_marker_count": 0,
+            "expected_marker_count": 1,
             "forbidden_marker_count": 0,
             "matched_marker_count": 0,
             "passed": True,
@@ -261,6 +273,37 @@ def test_probe_rejects_a_stored_disconnected_lookalike_in_chain_results() -> Non
     assert exit_code == 1
     assert connected["forbidden_marker_count"] == 1
     assert connected["passed"] is False
+    assert backend.runs == {}
+
+
+def test_probe_allows_only_the_disconnected_record_for_its_own_query() -> None:
+    """断开查询可返回其否定证据，但不能因此被判成主链泄漏。"""
+    probe = importlib.import_module("scripts.multi_session_path_probe")
+    backend = _InMemoryBackend(
+        run_tag="isolated",
+        return_disconnected_evidence=True,
+    )
+    output = StringIO()
+
+    exit_code = probe.run_probe(
+        backend,
+        backend,
+        backend.delete_run,
+        output,
+        run_tag="isolated",
+    )
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    disconnected = next(row for row in rows if row["case"] == "disconnected_chain")
+    assert exit_code == 0
+    assert disconnected == {
+        "case": "disconnected_chain",
+        "expected_marker_count": 1,
+        "forbidden_marker_count": 0,
+        "matched_marker_count": 1,
+        "passed": True,
+        "returned_count": 1,
+    }
     assert backend.runs == {}
 
 

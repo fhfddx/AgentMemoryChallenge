@@ -151,15 +151,17 @@ def run_probe(
                 f"Follow the registered chain from {root} and identify its terminal record.",
                 (root, bridge, leaf, terminal),
                 (missing,),
+                False,
             ),
             (
                 "disconnected_chain",
                 f"What terminal record is linked to {missing}?",
-                (),
-                (),
+                (missing,),
+                (root, bridge, leaf, terminal),
+                True,
             ),
         )
-        for name, query, expected_markers, forbidden_markers in searches:
+        for name, query, expected_markers, forbidden_markers, allow_empty in searches:
             body = _post(
                 client,
                 "/search",
@@ -176,10 +178,11 @@ def run_probe(
                 marker in returned_text for marker in forbidden_markers
             )
             passed = (
-                len(data) == 0
-                if not expected_markers
-                else matched_marker_count == len(expected_markers)
-                and forbidden_marker_count == 0
+                (allow_empty and len(data) == 0)
+                or (
+                    matched_marker_count == len(expected_markers)
+                    and forbidden_marker_count == 0
+                )
             )
             all_passed &= passed
             _print_row(
