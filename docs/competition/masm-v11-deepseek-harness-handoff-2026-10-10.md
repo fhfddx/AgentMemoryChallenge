@@ -1,10 +1,9 @@
 # MASM v1.1 DeepSeek Harness 交接（2026-10-10）
 
-## 0. 更新：DeepSeek Harness 第二轮（v5 → v7）
+## 0. 更新：v7 部署与官方 Smoke（`84926f6`）
 
-> **本节取代第 3、4、5、6、7 节的状态描述。** 那些小节记录的是 `0fc322d` 快照；
-> 代码、协议与 prompt 版本都已前进，线上服务未变。第 2 节的边界与第 8 节的安全比较
-> 要求仍然有效。
+> **本节取代后文所有旧的“当前状态”描述。** `84926f6` 已部署到 v1.1，官方 Smoke 和
+> 脱敏遥测比较均已完成；历史章节仍保留实验过程。第 2 节的边界继续有效。
 
 ### 0.1 当前代码状态
 
@@ -12,19 +11,17 @@
 | --- | --- |
 | 工作树 | `E:\Competitions\AgentMemoryChallenge\.worktrees\masm-v11` |
 | 分支 | `codex/masm-v11-selector-probe` |
-| 交接实现基线 | `1fb43fc`（本次元数据修订前的交接快照） |
+| 部署来源提交 | `84926f6`（部署时远端分支顶端；该提交只改文档） |
 | 最新代码提交 | `acc5b8a`（最后一个改动 `src/` 或 `scripts/` 的提交） |
-| 远端基线 | `origin/codex/masm-v11-selector-probe` = `b8c1920`（**尚未推送**） |
-| 未推送提交 | 共 6 个；用 `git rev-list --count origin/codex/masm-v11-selector-probe..HEAD` 实时复核 |
+| 部署时远端 | `origin/codex/masm-v11-selector-probe` = `84926f6` |
+| 本次文档更新 | 提交 SHA 不在本文内固定；提交后需由用户手动推送 |
 | selector prompt version | `evidence-selector-v7` |
 | selector 决策协议 | 三态 `evidence_state ∈ {sufficient, partial, insufficient}` |
-| 线上镜像 / 提交 | `masm-v11-final-candidate:0fc322d`（**未改动**） |
-| 新版本的官方 Smoke | **尚未运行** |
+| 线上镜像 / 提交 | `masm-v11-final-candidate:84926f6` |
+| 官方 Smoke | `teval_9ec9bed551755c3c`，成功，总分 `30.77` |
 
-`b8c1920` 之后共有 6 个未推送提交：`1fb43fc`（文档）、`acc5b8a`、`eb33e6e`、
-`0e783f1`、`0292f3b`，以及承载本段元数据修正的文档提交。其中 4 个改动代码，
-2 个只改文档。承载本段修正的提交 SHA 不写入本文，以免提交内容与其自身 SHA 形成自引用；
-需要时用 `git rev-parse --short HEAD` 查询当前分支顶端。
+`b8c1920..84926f6` 共有 6 个提交。其中 4 个改动代码，2 个只改文档；本次追加的
+Smoke 结果记录是另一个文档提交，其 SHA 不写入本文，以免形成自引用。
 
 | 提交 | 作用 |
 | --- | --- |
@@ -33,7 +30,7 @@
 | `eb33e6e` | v7 把 `evidence_state` 放到 schema 属性首位。严格解码按属性顺序生成，原先 `selected_indices` 在前，模型在判定「不足」之前就已写好索引；调序后 `insufficient` + 非空 indices 的矛盾消失 |
 | `acc5b8a` | 首轮 `partial` 也用更深候选池（32→48）重试；深层轮只在给出模型确认的完整 selection 时才替换首轮，否则原样保留首轮 partial。`selector_reasoning_probe.py` 增加 `production_eligible` 与 `--strict-only` 生产门槛，`candidate_eligible` 降为记录项 |
 | `1fb43fc` | 只更新本文档，不改源码或测试 |
-| 本段元数据修订提交（SHA 不在本文内固定） | 修正交接元数据与审计证据，只改本文档 |
+| `84926f6` | 修正交接元数据与审计证据，只改本文档；随后用于服务器构建镜像标签 |
 
 本地门槛在最新代码提交 `acc5b8a` 上测得：`pytest -q` → `773 passed, 1 skipped`；
 Ruff 通过；mypy 通过（60 个源文件）；`git diff --check` 通过。
@@ -59,6 +56,7 @@ Ruff 通过；mypy 通过（60 个源文件）；`git diff --check` 通过。
 | v5 | 4/4 | **`crowded_abstention` 误报 partial，5/5 轮失败** | **strict 2/4**（`chain_missing_link` 与 `chain_complete` 均报 partial） |
 | v6 | 4/4（第 1 轮 1 次 provider `unavailable`） | 15/15 通过 | **strict 3/4**（`insufficient` + 非空 indices） |
 | v7 | **连续 5 轮 4/4 通过** | **15/15 通过** | **连续 3 轮 4/4 通过** |
+| v7 部署后（`84926f6`） | **3 轮共 12/12 通过** | **5 轮共 15/15 通过** | **2 轮共 8/8 通过，`production_eligible=true`** |
 
 v7 三条门槛均按字面达成。`candidate_eligible` 仍为 `False`，因为生产 prompt 已覆盖
 chain 变体的用例；它表示「chain 优于 strict」，**不是**部署门槛。`chain` prompt 只作对照
@@ -66,18 +64,22 @@ chain 变体的用例；它表示「chain 优于 strict」，**不是**部署门
 
 ### 0.3 仍未闭环的风险
 
-**Provider `unavailable` 会退回全量 question-admitted 强锚点。** 约 220 次合成调用中观察到
+**Provider `unavailable` 会退回全量 question-admitted 强锚点。** 约 220 次部署前合成调用中观察到
 3 次 `selector_failure_category=unavailable`，每次结果都是 `selector_evidence_state=unknown`、
 `selector_fallback=true`、返回最多 12 条强锚点。这是 `0fc322d` 已有的 v4 行为，与三态改动
 无关，但会让一个本该拒答的问题带着未经模型确认的证据被作答，直接影响 abstention 分项。
-本轮刻意没有一并修改，以保持「一次只改一个变量」；它应作为下一个独立候选并自带预登记门槛。
+`84926f6` 的 14 行官方 Smoke 遥测中 `fallback=0` 且失败类别全为 `none`，所以该风险没有在
+本次官方运行中触发，也不能解释本次总分。风险仍存在，但不应与 multi-session 修复混在同一候选。
 
-### 0.4 部署前仍缺的步骤
+### 0.4 当前结论与未完成项
 
-1. 尚未对新版本运行任何官方 Smoke；最新公开总分仍是 `30.77` 的旧记录。
-2. 尚未在服务器构建镜像、替换 `masm-v11-api-1`，也未生成新的脱敏遥测。
-3. 第 8 节那两个 14 行诊断文件的安全比较**仍未闭环**，不要写成已解决。
-4. 仓库与 `known_hosts` 都没有可用的 v11 服务器 SSH 目标，部署命令需要在服务器控制台执行。
+1. API-only 部署已完成：API 容器已替换，DB 容器 ID 未变，API 为 `running/healthy`、
+   `restarts=0`，容器内 prompt 为 `evidence-selector-v7`。
+2. 官方 Smoke 总分仍为 `30.77`：direct recall 恢复到 `100`，abstention 从 `22.22`
+   回落到 `11.11`，属于能力交换而不是总分提升。
+3. 线上暂时保留 `84926f6`；它比 `0fc322d` 更均衡，但不是已确认的最终最优版。
+4. 不再为 selector 运行第二次付费 Smoke。下一独立候选应冻结 selector，聚焦始终为 `0` 的
+   multi-session reasoning。
 
 ## 1. 文档用途与当前结论
 
@@ -85,16 +87,16 @@ chain 变体的用例；它表示「chain 优于 strict」，**不是**部署门
 围绕 evidence selector 的实验、云端部署和官方 Smoke 结果，不替代仓库中更早的
 总交接、发布清单和云端恢复报告。
 
-当前线上候选为 `0fc322d`，服务健康且数据库容器未被替换，但它不是已确认的最终最优版：
+当前线上候选为 `84926f6`，服务健康且数据库容器未被替换，但它不是已确认的最终最优版：
 
 - 官方 Smoke 总分仍为 `30.77`；
-- abstention 从此前的 `11.11` 提升到 `22.22`；
-- direct recall 同时从 `100.00` 降到 `0.00`；
+- direct recall 从 `0.00` 恢复到 `100.00`；
+- abstention 从 `22.22` 回落到 `11.11`，但没有归零；
 - multi-session reasoning 仍为 `0.00`。
 
-因此，下一步的核心不是继续扩大 selector 候选池，也不是直接部署 chain-aware prompt，
-而是先区分“有可用但不完整的直接证据”和“确实应该拒答的证据不足”。当前二元协议
-`sufficient_evidence + selected_indices` 无法稳定表达这个边界。
+因此，三态 selector 实验到此冻结。下一步的核心不是继续扩大候选池或微调 selector prompt，
+而是用独立候选调查 multi-session reasoning 的数据流、检索链路和回答阶段；不得把 selector
+改动混入同一实验。
 
 ## 2. 必须遵守的边界
 
@@ -118,8 +120,9 @@ chain 变体的用例；它表示「chain 优于 strict」，**不是**部署门
 | Windows 主仓库 | `E:\Competitions\AgentMemoryChallenge` |
 | 当前工作树 | `E:\Competitions\AgentMemoryChallenge\.worktrees\masm-v11` |
 | 分支 | `codex/masm-v11-selector-probe` |
-| 当前代码提交 | `0fc322d` |
-| 远端状态（写本文前） | 本地与 `origin/codex/masm-v11-selector-probe` 同步 |
+| 部署来源提交 | `84926f6` |
+| 最新代码提交 | `acc5b8a` |
+| 远端状态（本次更新前） | `origin/codex/masm-v11-selector-probe` = `84926f6`；本次文档提交待用户手动推送 |
 | 服务器检出目录 | `/opt/probe-29a3a13` |
 
 服务器目录名保留了旧提交号，但目录内 Git HEAD 已前进到当前提交。不要根据目录名判断
@@ -129,6 +132,12 @@ chain 变体的用例；它表示「chain 优于 strict」，**不是**部署门
 
 | 提交 | 作用 |
 | --- | --- |
+| `84926f6` | 修正交接元数据；服务器以此提交构建当前镜像 |
+| `1fb43fc` | 记录 v5–v7 selector 实验和部署前状态 |
+| `acc5b8a` | partial 深层重试与 production prompt 门禁 |
+| `eb33e6e` | v7 调整严格 schema 字段顺序 |
+| `0e783f1` | v6 收窄 partial 的直接事实判据 |
+| `0292f3b` | 引入三态 evidence protocol |
 | `0fc322d` | 对 `sufficient_evidence=false` 且 indices 非空的矛盾输出执行安全拒答 |
 | `a814349` | 在合成 reasoning probe 中细分安全的失败原因 |
 | `29a3a13` | 新增 strict 与 chain-aware selector prompt 对照探针 |
@@ -157,18 +166,18 @@ git diff --check
 | Compose project | `masm-v11` |
 | API 容器 | `masm-v11-api-1` |
 | PostgreSQL 容器 | `masm-v11-postgres-1` |
-| 当前镜像 | `masm-v11-final-candidate:0fc322d` |
-| 当前 override | `/opt/masm-v11/config/image.override.0fc322d.yml` |
+| 当前镜像 | `masm-v11-final-candidate:84926f6` |
+| 当前 override | `/opt/masm-v11/config/image.override.84926f6.yml` |
 | 环境文件 | `/opt/masm-v11/config/v11.env` |
 | Compose 文件 | `/opt/probe-29a3a13/deployments/docker-compose.v11.yml` |
-| selector prompt version | `evidence-selector-v4` |
+| selector prompt version | `evidence-selector-v7` |
 
 最近一次部署后的已验证状态：
 
 - API 容器 ID 已变化，说明 API 被替换；
 - PostgreSQL 容器 ID 未变化；
 - API 为 `running`、`healthy`、`restarts=0`；
-- 容器内 `PROMPT_VERSION` 为 `evidence-selector-v4`。
+- 容器内 `PROMPT_VERSION` 为 `evidence-selector-v7`。
 
 Compose 曾先提示无法从远端拉取本地镜像名，随后按 `build` 配置在服务器本地成功构建，
 最终显示镜像 `Built`、API `Started`。单独的 pull 警告不是失败；必须以最终容器镜像、
@@ -183,15 +192,16 @@ Compose 曾先提示无法从远端拉取本地镜像名，随后按 `build` 配
 | `dda1222` | `teval_972233aa176a075d` | 23.08 | 66.67 | 0.00 | 100.00 | 0.00 | 11.11 |
 | `76c7595` 阶段 | `teval_da8097e4c5702139` | 30.77 | 100.00 | 100.00 | 100.00 | 0.00 | 11.11 |
 | `0fc322d` | `teval_9a04b8a94e48a212` | 30.77 | 66.67 | 0.00 | 100.00 | 0.00 | 22.22 |
+| `84926f6` | `teval_9ec9bed551755c3c` | 30.77 | 100.00 | 100.00 | 100.00 | 0.00 | 11.11 |
 
-最新 `0fc322d` Smoke 的页面状态为成功，耗时 `6m32s`，完成时间为
-`2026-10-10 13:19:38`。
+最新 `84926f6` Smoke 的页面状态为成功，耗时 `7m46s`，完成时间为
+`2026-10-10 17:57:46`。只运行了这一轮，没有启动第二次 Smoke。
 
 可以从聚合分数得出的结论：
 
-- 矛盾输出统一拒答确实提高了 abstention；
-- 同一改动也损失了 direct recall；
-- 总分没有提高；
+- `0fc322d` 的保守规范化提高 abstention，但损失 direct recall；
+- `84926f6` 的三态协议恢复 direct recall，同时把 abstention 换回 `11.11`；
+- `84926f6` 与 `76c7595` 的公开聚合分项完全相同，总分没有提高；
 - atomic retrieval 保持为 100；
 - multi-session reasoning 尚未取得得分。
 
@@ -209,15 +219,17 @@ Compose 曾先提示无法从远端拉取本地镜像名，随后按 `build` 配
 
 1. Provider 或结构化解析异常：按异常类型标记 `unavailable` 或
    `invalid_output`，再走 strong-anchor fallback。
-2. `sufficient_evidence=false`：无论 indices 是否为空都返回空证据并
-   `abstained=true`；如果 indices 非空，同时标记 `invalid_output`。
-3. `sufficient_evidence=true`：再检查 indices 是否为空、越界、重复或超过上限；
-   非法时走 strong-anchor fallback。
-4. 合法时返回所选候选。
+2. `evidence_state=insufficient`：始终返回空证据并拒答；若 indices 非空，同时标记
+   `invalid_output`，但不回落到强锚点。
+3. `evidence_state=partial`：只有 indices 合法且非空时返回这部分直接证据；否则安全拒答并
+   标记 `invalid_output`。
+4. `evidence_state=sufficient`：合法时返回完整 selection；indices 非法时走强锚点 fallback。
+5. 首轮为 `partial` 或拒答且存在更多排名候选时，从 32 扩到 48 重试；首轮 partial 只有在
+   深层轮得到模型确认的完整 selection 时才被替换，否则保留首轮 partial。
 
-`0fc322d` 改的是第 2 步。此前矛盾输出会走 strong-anchor fallback，可能在模型明确给出
-`sufficient_evidence=false` 时仍返回证据；现在统一为空。这一规范化更安全，但官方 Smoke
-表明它对 direct recall 过于激进。
+旧 Provider 的 `sufficient_evidence` 布尔字段仍由输入 validator 兼容：`true → sufficient`、
+`false → insufficient`；旧字段不会进入发给模型的严格 schema。当前 prompt 版本为
+`evidence-selector-v7`，并要求模型先生成 `evidence_state` 再生成 indices。
 
 对应失败先行回归测试位于：
 
@@ -226,11 +238,11 @@ tests/unit/retrieval/test_evidence_selector.py
 test_inconsistent_insufficient_decision_normalizes_to_safe_abstention
 ```
 
-写本文前，`0fc322d` 已完成以下验证：
+最新代码提交 `acc5b8a` 已完成以下验证：
 
-- 完整测试：`753 passed, 1 skipped, 1 warning in 47.31s`；
+- 完整测试：`773 passed, 1 skipped`；
 - Ruff 通过；
-- mypy 通过，共检查 56 个源文件；
+- mypy 通过，共检查 60 个源文件；
 - `git diff --check` 通过。
 
 这些结果证明当前断言和静态检查通过，不证明官方效果最优。
@@ -278,90 +290,67 @@ test_inconsistent_insufficient_decision_normalizes_to_safe_abstention
 这证明 v4 在这些合成边界上可工作，不代表它覆盖了 official direct recall 与 abstention
 之间的冲突。
 
-## 8. 尚未解决的安全遥测比较问题
+## 8. `84926f6` 安全遥测比较
 
-最新 Smoke 的文件约定如下：
+本次 Smoke 生成并比较了以下文件：
 
 ```text
-/tmp/smoke-0fc322d-started-at.txt
-/tmp/smoke-0fc322d-all.log
-/tmp/smoke-0fc322d-search-diagnostics.jsonl
+/tmp/smoke-84926f6-all.log
+/tmp/smoke-84926f6-search-diagnostics.jsonl
 /tmp/smoke-v2-search-diagnostics.jsonl
-/tmp/smoke-v2-0fc322d-compare.txt
+/tmp/smoke-v2-84926f6-compare.txt
 ```
 
-已看到 `wc -l` 对两个 JSONL 文件都返回 14 行，但随后比较脚本却输出：
+启动前的时间标记文件没有落地，因此没有伪造新的 marker；而是根据用户可见的完成时间
+`2026-10-10 17:57:46`（Asia/Shanghai）和耗时 `7m46s`，使用保守 UTC 窗口
+`2026-10-10T09:49:00Z..09:59:00Z` 提取日志。最终 `search.completed` 文件恰为 14 行。
 
-```text
-v2 MISSING /tmp/smoke-0fc322d-search-diagnostics.jsonl
-```
+只读取了 `scripts/compare_search_diagnostics.py` 的安全输出，没有把原始日志或 JSONL 内容复制
+到 Harness 对话。聚合结果如下：
 
-`scripts/compare_search_diagnostics.py` 只在 `Path.exists()` 为 false 时输出 `MISSING`，
-因此当前最可能是 VNC 手工输入时的路径、续行或不可见字符问题，而不是脚本解析失败。
-这个矛盾尚未闭环，不要在交接后把它写成已比较成功。
+| 指标 | v2 baseline | `84926f6` |
+| --- | ---: | ---: |
+| rows | 14 | 14 |
+| candidate_zero | 3 | 3 |
+| returned_zero | 9 | 7 |
+| abstained | 8 | 6 |
+| fallback | 0 | 0 |
+| failures | `none: 14` | `none: 14` |
 
-先在服务器运行以下两个单行命令：
+`84926f6` 的三态分布为 `insufficient=4`、`partial=1`、`sufficient=6`、`unknown=3`；
+baseline 不含该字段，显示为 `missing=14`。比较脚本报告 `CHANGED_ROWS` 为 1–14 全部行。
 
-```bash
-ls -lb /tmp/smoke-v2-search-diagnostics.jsonl /tmp/smoke-0fc322d-search-diagnostics.jsonl
-python3 /opt/probe-29a3a13/scripts/compare_search_diagnostics.py /tmp/smoke-v2-search-diagnostics.jsonl /tmp/smoke-0fc322d-search-diagnostics.jsonl | tee /tmp/smoke-v2-0fc322d-compare.txt
-```
-
-只分析比较脚本输出的安全字段。不要把 `/tmp/smoke-0fc322d-all.log` 的原文或 JSONL
-中的额外字段复制到 Harness 对话。
-
-现有可用 baseline 文件的安全汇总曾显示：14 行中 `candidate_zero=3`、
-`returned_zero=9`、`abstained=8`、`fallback=0`、失败类别均为 `none`。这只是可用基线文件的
-聚合状态；在成功完成上述比较前，不要声称它与最新 `0fc322d` 的逐行差异已经确定。
+这些数据只说明新版本少了 2 个空返回和 2 次拒答，且本轮没有 fallback 或 Provider/解析失败；
+它与官方页面中 direct recall 恢复、abstention 回落的方向一致。不能据此把某行映射到具体隐藏题，
+也不能因为 14 行全部变化而推断 14 个隐藏题的语义都改变。
 
 ## 9. 推荐给 DeepSeek Harness 的下一步
 
 ### 阶段 A：只读复核，不改代码
 
 1. 核对 Git 分支、HEAD 和工作树是否干净。
-2. 阅读本文及下列关键文件，不要先改 prompt：
-   - `src/masm/retrieval/evidence_selector.py`
-   - `src/masm/retrieval/evidence_pool.py`
-   - `src/masm/services/search_service.py`
-   - `src/masm/retrieval/diagnostics.py`
-   - `tests/unit/retrieval/test_evidence_selector.py`
-   - `scripts/selector_reasoning_probe.py`
-   - `scripts/compare_search_diagnostics.py`
-3. 在服务器用第 8 节的单行命令闭环安全遥测比较。
-4. 明确列出哪些判断是代码事实、合成测试事实、官方聚合事实或推断。
+2. 把 `84926f6` 视为 selector 冻结基线；不要同时修改 selector prompt、候选池大小或 fallback。
+3. 追踪 multi-session 数据从写入、检索、关联到回答生成的完整路径，优先阅读
+   `search_service.py`、memory/retrieval 相关模块及其现有测试。
+4. 明确列出哪些判断是代码事实、公开合成测试事实、官方聚合事实或推断；不得反推隐藏题。
 
 ### 阶段 B：先建立新的合成失败用例
 
-在实现前，至少增加两个彼此对照的合成场景：
+在实现前，至少增加两个完全公开、彼此对照的 multi-session 场景：
 
-1. **部分直接证据**：模型认为不足，但返回的 index 含有明确、直接、可引用的事实；目标是
-   不因布尔值矛盾而无条件丢弃全部召回。
-2. **缺失链路证据**：模型认为不足且 index 只是局部链路；目标是维持拒答，不能恢复成
-   旧式无条件 fallback。
+1. **跨会话可连接**：事实分别位于不同会话，但包含明确、确定性的共同实体或链路；目标是
+   证明系统能够检索并组合必要证据。
+2. **跨会话不可连接**：表面主题相似但缺少关键实体或关系；目标是防止为了提高 reasoning
+   而错误拼接无关记忆。
 
-测试必须先在当前 `0fc322d` 上至少有一个失败，再实现。不要使用或仿造隐藏题。
+测试必须先在冻结的 `84926f6` 代码上至少有一个失败，再实现。不要使用或仿造隐藏题。
 
-### 阶段 C：评估三态协议，而不是继续堆提示词
+### 阶段 C：一次只修改 multi-session 链路
 
-优先评估把 selector 决策从二态改为三态：
-
-```text
-sufficient   -> 可以返回完整证据
-partial      -> 有直接支持，但不足以完成全部推理
-insufficient -> 应拒答
-```
-
-这只是待验证的架构方向，不是已批准方案。设计时需要回答：
-
-- `partial` 是否允许返回证据，返回多少；
-- Search API 当前是否能表达“部分证据”而不越权替用户作答；
-- 哪些确定性信号能防止 missing-link 被误判成 partial；
-- 如何兼容 Provider 的旧二字段输出；
-- 遥测如何只记录枚举和计数，不记录内容；
-- prompt version、Pydantic schema、回退逻辑和测试怎样同步迁移。
-
-若三态会扩大 API 语义或数据泄漏风险，则退回到更窄的确定性仲裁器方案，但同样必须用
-“部分直接证据 / 缺失链路”成对测试证明，而不是凭阈值猜测。
+先定位失败发生在候选生成、跨会话关联、证据选择还是最终回答阶段，再选择最小修改点。
+新候选不得改动 v7 selector 的 prompt/schema/三态语义，除非独立证据证明 selector 正是
+multi-session 的阻断点；即使如此，也应拆成后续单独实验。新增遥测只能记录枚举、计数和
+布尔值，不能记录查询、记忆或回答内容。
 
 ### 阶段 D：本地门槛
 
@@ -514,11 +503,11 @@ wc -l "/tmp/smoke-$SHA-search-diagnostics.jsonl"
 可把下面这段作为新会话的第一条任务：
 
 > 先阅读 `docs/competition/masm-v11-deepseek-harness-handoff-2026-10-10.md`，只读核对
-> 当前分支、`0fc322d` 的 selector 行为、相关测试和安全遥测比较脚本。不要读取隐藏评测
-> 内容、原始日志或 `.env`，不要修改云端数据库，也不要先改 prompt。先闭环第 8 节中
-> 两个 14 行诊断文件的安全比较，再用公开合成数据为“部分直接证据”和“缺失链路证据”
-> 各写一个成对失败测试，评估二态协议是否需要改成三态。任何实现都必须先红后绿、跑完
-> 全量 pytest/Ruff/mypy/diff check；未满足本地门槛前不要构建镜像或启动官方评测。
+> 当前分支、`84926f6` 部署状态、`acc5b8a` 代码行为和现有测试。不要读取隐藏评测内容、
+> 原始日志或 `.env`，不要修改云端数据库，也不要先改 selector prompt。把 v7 selector 冻结为
+> 基线，追踪 multi-session 数据从写入、检索、关联到回答生成的完整路径；先用完全公开的
+> “跨会话可连接 / 不可连接”成对场景建立失败测试，再做最小实现。任何实现都必须先红后绿、
+> 跑完全量 pytest/Ruff/mypy/diff check；未满足本地门槛前不要构建镜像或启动官方评测。
 
 接手者应把本文当成“需要重新核对的状态快照”，而不是无需验证的指令集合。若 Git、容器、
 镜像或评分页面与本文不一致，以新的只读证据为准，并在修改前记录差异。
