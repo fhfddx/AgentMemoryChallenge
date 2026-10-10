@@ -17,6 +17,7 @@ from masm.providers.embeddings import EmbeddingProvider
 from masm.providers.fakes import DeterministicFakeEmbeddingProvider, FakeStructuredLLM
 from masm.providers.llm import OpenAICompatibleLLM
 from masm.providers.multimodal_embeddings import GroundedMultimodalEmbeddingProvider
+from masm.retrieval.anchor_connectivity import AnchorConnectivity
 from masm.retrieval.evidence_renderer import EvidenceRenderer
 from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
@@ -207,6 +208,20 @@ def test_official_masm_builds_three_agents_and_all_search_components() -> None:
     assert runtime.relevance_gate.min_image_similarity == 0.42
     assert runtime.relevance_gate.min_lexical_rank == 0.001
     assert runtime.retriever._text_queries_search_images is True  # noqa: SLF001
+
+
+def test_official_masm_wires_anchor_connectivity_into_the_selector() -> None:
+    """锚点接地校验必须拿到同用户关系图；忘接线会让断开链过选静默复发。"""
+    runtime = build_runtime(
+        _settings(RuntimeProfile.OFFICIAL_MASM),
+        _repository(),
+        embeddings=OfficialTestEmbeddings(),
+        llm=FakeStructuredLLM(),
+    )
+
+    assert isinstance(runtime.evidence_selector, EvidenceSelector)
+    connectivity = runtime.evidence_selector._anchor_connectivity  # noqa: SLF001
+    assert isinstance(connectivity, AnchorConnectivity)
 
 
 def test_official_masm_can_disable_selection_without_disabling_recall() -> None:

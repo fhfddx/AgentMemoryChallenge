@@ -1,6 +1,7 @@
 """Structured selection returns original evidence or a safe empty/fallback result."""
 
 import json
+from collections.abc import Sequence
 from typing import Literal
 from uuid import UUID
 
@@ -8,6 +9,7 @@ import pytest
 
 from masm.providers.fakes import FakeStructuredLLM
 from masm.providers.llm import ModelUnavailableError, StructuredOutputError
+from masm.retrieval.anchor_connectivity import AnchorConnectivity
 from masm.retrieval.evidence_selector import (
     DeterministicEvidenceSelector,
     EvidenceSelection,
@@ -15,6 +17,7 @@ from masm.retrieval.evidence_selector import (
 )
 from masm.retrieval.reranker import RankedEvidence
 from masm.schemas.content import ImageURLPart, TextPart
+from masm.storage.types import MemoryCandidate
 
 
 def _evidence(number: int, source: str, content: str) -> RankedEvidence:
@@ -189,6 +192,195 @@ def test_selection_without_explicit_question_anchor_abstains(
     assert result.fallback is False
     assert result.evidence_state == "insufficient"
     assert result.failure_category == "invalid_output"
+
+
+def _chain_pool() -> list[RankedEvidence]:
+    """云端探针的四个 run：三条链记录 + 一条同主题但无关系边的隔离记录。"""
+    return [
+        _evidence(
+            1, "run-root", "The registered chain Root-case continues through Bridge-case."
+        ),
+        _evidence(
+            2,
+            "run-bridge",
+            "For the same registered chain, Bridge-case continues through Leaf-case.",
+        ),
+        _evidence(
+            3, "run-leaf", "The terminal record associated with Leaf-case is Terminal-case."
+        ),
+        _evidence(
+            4,
+            "run-isolated",
+            "The isolated catalog entry Unconnected-case uses registered-chain terminology "
+            "but belongs to a separate archive.",
+        ),
+    ]
+
+
+class _ChainGraph:
+    """只含 run-root -> run-bridge -> run-leaf 的假关系图；隔离 run 没有任何边。"""
+
+    _EDGES = {1: 2, 2: 3}
+    _RUNS = {1: "run-root", 2: "run-bridge", 3: "run-leaf", 4: "run-isolated"}
+
+    def __init__(self) -> None:
+        self.related_calls: list[list[UUID]] = []
+        self.context_calls: list[list[str]] = []
+
+    def _context(self, number: int) -> MemoryCandidate:
+        return MemoryCandidate(
+            memory_id=UUID(int=100 + number),
+            user_id="user-1",
+            content="context",
+            score=0.0,
+            request_id=self._RUNS[number],
+        )
+
+    def context_candidates_for_requests(
+        self, user_id: str, request_ids: Sequence[str]
+    ) -> list[MemoryCandidate]:
+        del user_id
+        self.context_calls.append(list(request_ids))
+        return [
+            self._context(number)
+            for number, run in self._RUNS.items()
+            if run in request_ids
+        ]
+
+    def related(
+        self, user_id: str, memory_ids: Sequence[UUID], limit: int
+    ) -> list[MemoryCandidate]:
+        del user_id
+        self.related_calls.append(list(memory_ids))
+        neighbours = [
+            self._context(self._EDGES[memory_id.int - 100])
+            for memory_id in memory_ids
+            if memory_id.int - 100 in self._EDGES
+        ]
+        return neighbours[:limit]
+
+
+def _connected_selector(llm: FakeStructuredLLM, graph: _ChainGraph) -> EvidenceSelector:
+    return EvidenceSelector(llm, anchor_connectivity=AnchorConnectivity(graph))
+
+
+def test_mixed_selection_of_anchor_and_unrelated_chain_evidence_is_rejected() -> None:
+    """云端失败轮的最小复现：锚点证据与无关链证据混合选择时必须剔除无关链。
+
+    第三轮 `multi_session_path_probe` 的 stage_selected 返回 partial、selected_count=2、
+    matched_marker_count=1、forbidden_marker_count=2。整组选中文本的并集确实包含查询锚点
+    `Unconnected-case`（隔离记录自带），所以集合级校验会放行；但另一条选中的链头证据与
+    锚点没有任何关系边，必须不能出现在结果里。
+    """
+    llm = FakeStructuredLLM([{"selected_indices": [0, 3], "evidence_state": "partial"}])
+    pool = _chain_pool()
+    graph = _ChainGraph()
+
+    result = _connected_selector(llm, graph).select(
+        "What terminal record is linked to Unconnected-case?",
+        None,
+        pool,
+        {item.memory_id for item in pool},
+    )
+
+    assert result.evidence == (pool[3],)
+    assert result.selected_source_count == 1
+    assert result.abstained is False
+    assert result.fallback is False
+    assert result.evidence_state == "partial"
+
+
+def test_unwired_selector_keeps_the_previous_set_level_behaviour() -> None:
+    """固定未接线 oracle 时的兼容契约：集合级行为不变，混合选择仍会放行。
+
+    这是可选构造参数的契约，不是目标行为：生产路径必须由 ``build_runtime`` 接线
+    ``AnchorConnectivity``（见 `test_runtime_factory.py` 的接线用例），否则云端断开链
+    过选会静默复发。
+    """
+    llm = FakeStructuredLLM([{"selected_indices": [0, 3], "evidence_state": "partial"}])
+    pool = _chain_pool()
+
+    result = EvidenceSelector(llm).select(
+        "What terminal record is linked to Unconnected-case?",
+        None,
+        pool,
+        {item.memory_id for item in pool},
+    )
+
+    assert result.evidence == (pool[0], pool[3])
+
+
+def test_connected_multi_hop_selection_keeps_every_downstream_link() -> None:
+    """合法链的回归护栏：下游证据不重复 Root 字符串，也必须整链保留。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "sufficient"}])
+    pool = _chain_pool()
+    graph = _ChainGraph()
+
+    result = _connected_selector(llm, graph).select(
+        "Follow the registered chain from Root-case and identify its terminal record.",
+        None,
+        pool,
+        {item.memory_id for item in pool},
+    )
+
+    assert result.evidence == (pool[0], pool[1], pool[2])
+    assert result.evidence_state == "sufficient"
+    assert result.abstained is False
+
+
+def test_sufficient_selection_with_an_unrelated_extra_downgrades_to_partial() -> None:
+    """剔除未接地证据后，模型「完整覆盖」的断言不再成立，只能降级为 partial。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0, 3], "evidence_state": "sufficient"}])
+    pool = _chain_pool()
+
+    result = _connected_selector(llm, _ChainGraph()).select(
+        "What terminal record is linked to Unconnected-case?",
+        None,
+        pool,
+        {item.memory_id for item in pool},
+    )
+
+    assert result.evidence == (pool[3],)
+    assert result.evidence_state == "partial"
+    assert result.fallback is False
+
+
+def test_unrelated_chain_evidence_alone_still_abstains() -> None:
+    """整组都不含锚点时保持既有拒答行为，且不触发关系读取。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "partial"}])
+    pool = _chain_pool()
+    graph = _ChainGraph()
+
+    result = _connected_selector(llm, graph).select(
+        "What terminal record is linked to Unconnected-case?",
+        None,
+        pool,
+        {item.memory_id for item in pool},
+    )
+
+    assert result.evidence == ()
+    assert result.abstained is True
+    assert result.evidence_state == "insufficient"
+    assert graph.related_calls == []
+
+
+def test_selection_without_explicit_anchors_skips_relation_reads() -> None:
+    """自然语言问题没有结构化锚点时不做任何关系读取，行为完全不变。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "sufficient"}])
+    pool = _chain_pool()
+    graph = _ChainGraph()
+
+    result = _connected_selector(llm, graph).select(
+        "Which records belong to the registered chain?",
+        None,
+        pool,
+        {item.memory_id for item in pool},
+    )
+
+    assert result.evidence == (pool[0], pool[1])
+    assert result.evidence_state == "sufficient"
+    assert graph.related_calls == []
+    assert graph.context_calls == []
 
 
 def test_legacy_two_field_output_is_accepted_and_kept_on_the_safe_side() -> None:

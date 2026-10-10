@@ -1,6 +1,7 @@
 """增强 Search 集成测试：真实 Repository 链路下的扩展、冲突补全与重复惩罚。"""
 
 import base64
+import importlib
 import io
 from uuid import UUID, uuid4
 
@@ -10,6 +11,7 @@ from sqlalchemy import delete, select, update
 from masm.api.app import create_app
 from masm.providers.fakes import FakeStructuredLLM
 from masm.providers.reranker import RerankerProvider
+from masm.retrieval.anchor_connectivity import AnchorConnectivity
 from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever, ParsedQuery
 from masm.retrieval.evidence_renderer import EvidenceRenderer
 from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
@@ -834,6 +836,162 @@ def test_selector_can_return_original_facts_from_two_add_requests(
     assert {item.content for item in response.data} == {
         "Alice adopted Nimbus", "Nimbus sleeps greenhouse"
     }
+
+
+_CHAIN_TEXTS = (
+    "The registered chain Root-case continues through Bridge-case.",
+    "For the same registered chain, Bridge-case continues through Leaf-case.",
+    "The terminal record associated with Leaf-case is Terminal-case.",
+    "The isolated catalog entry Isolated-case uses registered-chain terminology "
+    "but belongs to a separate archive.",
+)
+
+
+def _chain_search_service(
+    database: Database,
+    asset_store: AssetStore,
+    settings,
+    embeddings,
+    user_id: str,
+    responses: list[dict[str, object]] | None = None,
+):
+    """建出云端探针同形的三个链 run 加一个无关系边的隔离 run。"""
+    stored = [
+        _seed(database, asset_store, settings, embeddings, user_id, text)
+        for text in _CHAIN_TEXTS
+    ]
+    _add_relation(database, user_id, stored[0], stored[1])
+    _add_relation(database, user_id, stored[1], stored[2])
+
+    repository = MemoryRepository(database)
+    llm = FakeStructuredLLM(
+        responses
+        if responses is not None
+        else [{"selected_indices": [], "evidence_state": "insufficient"}]
+    )
+    service = SearchService(
+        BaselineRetriever(repository, embeddings, DEFAULT_CHANNEL_WEIGHTS),
+        max_image_bytes=settings.max_image_bytes,
+        analyzer=QueryAnalyzer(),
+        relevance_gate=RelevanceGate(),
+        expander=RelationExpander(repository),
+        reranker=EvidenceReranker(),
+        selector=EvidenceSelector(llm, anchor_connectivity=AnchorConnectivity(repository)),
+        renderer=EvidenceRenderer(repository, asset_store, max_image_bytes=1024),
+        packer=ResponsePacker(),
+    )
+    return service, llm
+
+
+def _indices_of(llm: FakeStructuredLLM, texts: tuple[str, ...]) -> list[int]:
+    return [
+        candidate["index"]
+        for candidate in llm.requests[-1].payload["candidates"]
+        if candidate["text"] in texts
+    ]
+
+
+def test_anchor_grounded_selection_drops_an_unconnected_chain_through_real_search(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """真实链路复现云端失败轮：混合选择必须只返回锚定问题的隔离证据。
+
+    锚点是隔离记录里的 `Isolated-case`，模型把隔离证据与链尾证据混在一起。集合级并集
+    校验会放行链尾证据；接入真实关系可达性后，与锚点没有关系边的链尾必须被剔除。
+    """
+    user_id = _uid("u")
+    service, llm = _chain_search_service(
+        database, asset_store, settings, embeddings, user_id
+    )
+    request = SearchRequest(
+        query="What terminal record is linked to Isolated-case in the registered chain?",
+        user_id=user_id,
+        top_k=10,
+    )
+
+    assert service.search(request).data == []
+    isolated = _indices_of(llm, (_CHAIN_TEXTS[3],))
+    chain_leaf = _indices_of(llm, (_CHAIN_TEXTS[2],))
+    assert len(isolated) == 1
+    assert len(chain_leaf) == 1
+
+    llm.queue(
+        {
+            "selected_indices": [isolated[0], chain_leaf[0]],
+            "evidence_state": "partial",
+        }
+    )
+    response = service.search(request)
+
+    assert {item.content for item in response.data} == {_CHAIN_TEXTS[3]}
+
+
+def test_anchor_grounded_selection_keeps_a_connected_chain_through_real_search(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """合法链的集成护栏：锚点在链头时，下游消息证据必须整链保留。"""
+    user_id = _uid("u")
+    service, llm = _chain_search_service(
+        database, asset_store, settings, embeddings, user_id
+    )
+    request = SearchRequest(
+        query="Follow the registered chain from Root-case and identify its terminal record.",
+        user_id=user_id,
+        top_k=10,
+    )
+
+    assert service.search(request).data == []
+    chain_indices = _indices_of(llm, _CHAIN_TEXTS[:3])
+    assert len(chain_indices) == 3
+
+    llm.queue({"selected_indices": chain_indices, "evidence_state": "sufficient"})
+    response = service.search(request)
+
+    assert {item.content for item in response.data} == set(_CHAIN_TEXTS[:3])
+
+
+def test_probe_stage_diagnostic_rejects_the_mixed_disconnected_selection(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """直接跑探针的 stage_selected 诊断：这正是云端失败轮的那一行。
+
+    该行由 `_diagnose_search_stages` 在部署容器内计算，是免费门槛实际判定的聚合证据；
+    修复必须让它在混合选择下也通过，而不是只修 `/search` 的响应。
+    """
+    probe = importlib.import_module("scripts.multi_session_path_probe")
+    user_id = _uid("u")
+    service, llm = _chain_search_service(
+        database, asset_store, settings, embeddings, user_id
+    )
+    query = "What terminal record is linked to Isolated-case in the registered chain?"
+    request = SearchRequest(query=query, user_id=user_id, top_k=10)
+
+    assert service.search(request).data == []
+    isolated = _indices_of(llm, (_CHAIN_TEXTS[3],))
+    chain_leaf = _indices_of(llm, (_CHAIN_TEXTS[2],))
+    llm.queue(
+        {
+            "selected_indices": [isolated[0], chain_leaf[0]],
+            "evidence_state": "partial",
+        }
+    )
+
+    rows = probe._diagnose_search_stages(  # noqa: SLF001
+        service,
+        user_id,
+        query,
+        (_CHAIN_TEXTS[3],),
+        _CHAIN_TEXTS[:3],
+        selector_max_candidates=32,
+    )
+    selected_row = next(row for row in rows if row["case"] == "stage_selected")
+
+    assert selected_row["evidence_state"] == "partial"
+    assert selected_row["selected_count"] == 1
+    assert selected_row["matched_marker_count"] == 1
+    assert selected_row["forbidden_marker_count"] == 0
+    assert selected_row["fallback"] is False
+    assert selected_row["passed"] is True
 
 
 def test_selector_restores_original_multimodal_message_after_selection(

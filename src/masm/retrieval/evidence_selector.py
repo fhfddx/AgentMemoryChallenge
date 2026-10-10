@@ -16,6 +16,7 @@ from pydantic import (
 )
 
 from masm.providers.llm import ModelRequest, StructuredLLM, StructuredOutputError
+from masm.retrieval.anchor_connectivity import DEFAULT_ANCHOR_HOPS, AnchorConnectivity
 from masm.retrieval.reranker import RankedEvidence
 from masm.retrieval.selector_pool import (
     DEFAULT_SELECTOR_CANDIDATES,
@@ -186,14 +187,6 @@ def _usable_indices(indices: Sequence[int], pool_size: int, max_selected: int) -
     )
 
 
-def _explicit_question_anchors(question: str) -> frozenset[str]:
-    """Return exact structured identifiers that selected evidence must ground."""
-    return frozenset(
-        match.group(0).casefold()
-        for match in _EXPLICIT_ANCHOR_PATTERN.finditer(question)
-    )
-
-
 def _evidence_text(evidence: RankedEvidence) -> str:
     if isinstance(evidence.content, str):
         return evidence.content
@@ -202,19 +195,20 @@ def _evidence_text(evidence: RankedEvidence) -> str:
     )
 
 
-def _covers_explicit_question_anchors(
-    question: str,
-    selected: Sequence[RankedEvidence],
-) -> bool:
-    anchors = _explicit_question_anchors(question)
-    if not anchors:
-        return True
-    selected_text = " ".join(_evidence_text(evidence) for evidence in selected)
-    selected_tokens = {
-        match.group(0).casefold()
-        for match in _EXPLICIT_ANCHOR_PATTERN.finditer(selected_text)
-    }
-    return anchors.issubset(selected_tokens)
+def _anchor_tokens(text: str) -> frozenset[str]:
+    """文本里出现的结构化标识符集合（大小写不敏感）。"""
+    return frozenset(
+        match.group(0).casefold() for match in _EXPLICIT_ANCHOR_PATTERN.finditer(text)
+    )
+
+
+def _mentions_any_anchor(evidence: RankedEvidence, anchors: frozenset[str]) -> bool:
+    """该条证据自身是否显式提到问题锚点之一。"""
+    return bool(anchors & _anchor_tokens(_evidence_text(evidence)))
+
+
+def _distinct_source_count(selected: Sequence[RankedEvidence]) -> int:
+    return len({item.request_id or str(item.memory_id) for item in selected})
 
 
 def _is_complete_selection(result: SelectionResult) -> bool:
@@ -237,6 +231,8 @@ class EvidenceSelector:
         max_selected: int = MAX_SELECTED_EVIDENCE,
         max_chars_per_candidate: int = DEFAULT_MAX_CHARS_PER_CANDIDATE,
         timeout_seconds: float = 30.0,
+        anchor_connectivity: AnchorConnectivity | None = None,
+        max_anchor_hops: int = DEFAULT_ANCHOR_HOPS,
     ) -> None:
         if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
@@ -246,11 +242,15 @@ class EvidenceSelector:
             raise ValueError("max_chars_per_candidate must be in 1..4096")
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive")
+        if max_anchor_hops < 0:
+            raise ValueError("max_anchor_hops must be nonnegative")
         self._llm = llm
         self._max_candidates = max_candidates
         self._max_selected = max_selected
         self._max_chars_per_candidate = max_chars_per_candidate
         self._timeout_seconds = timeout_seconds
+        self._anchor_connectivity = anchor_connectivity
+        self._max_anchor_hops = max_anchor_hops
 
     def select(
         self,
@@ -381,16 +381,17 @@ class EvidenceSelector:
                     "insufficient",
                 )
             selected_partial = tuple(pool[index] for index in indices)
-            if not _covers_explicit_question_anchors(question, selected_partial):
+            grounded_partial = self._grounded_selection(question, selected_partial)
+            if not grounded_partial:
                 return SelectionResult(
                     (), len(pool), source_count, 0, False, True, "invalid_output",
                     "insufficient",
                 )
             return SelectionResult(
-                selected_partial,
+                grounded_partial,
                 len(pool),
                 source_count,
-                len({labels[index] for index in indices}),
+                _distinct_source_count(grounded_partial),
                 False,
                 False,
                 "none",
@@ -402,20 +403,62 @@ class EvidenceSelector:
                 ranked, strong_anchor_ids, len(pool), source_count, "invalid_output"
             )
         selected = tuple(pool[index] for index in indices)
-        if not _covers_explicit_question_anchors(question, selected):
+        grounded = self._grounded_selection(question, selected)
+        if not grounded:
             return SelectionResult(
                 (), len(pool), source_count, 0, False, True, "invalid_output",
                 "insufficient",
             )
+        # 剔除过未接地证据后，模型「完整覆盖」的断言已不成立：只能降级为 partial。
+        state_after_grounding: ReportedEvidenceState = (
+            "sufficient" if len(grounded) == len(selected) else "partial"
+        )
         return SelectionResult(
-            selected,
+            grounded,
             len(pool),
             source_count,
-            len({labels[index] for index in indices}),
+            _distinct_source_count(grounded),
             False,
             False,
             "none",
-            "sufficient",
+            state_after_grounding,
+        )
+
+    def _grounded_selection(
+        self,
+        question: str,
+        selected: Sequence[RankedEvidence],
+    ) -> tuple[RankedEvidence, ...]:
+        """只保留「自身含问题锚点」或「与含锚点证据同关系分量」的选中证据。
+
+        集合级并集校验只证明「选中文本里出现过锚点」，无法区分「正确锚点证据」与
+        「额外无关链证据」的混合选择。要区分二者必须使用持久化关系信息：合法的下游链
+        证据通常不重复 Root 字符串，文本层面与无关链证据完全同形。
+
+        未接线 ``AnchorConnectivity`` 时保持加校验之前的集合级行为；只有一条选中证据时
+        它与自身天然同分量，不需要关系读取。返回空元组表示整组完全没有锚点接地。
+        """
+        anchors = _anchor_tokens(question)
+        if not anchors:
+            return tuple(selected)
+        anchor_items = tuple(
+            item for item in selected if _mentions_any_anchor(item, anchors)
+        )
+        if not anchor_items:
+            return ()
+        if self._anchor_connectivity is None or len(selected) <= 1:
+            return tuple(selected)
+        connected = self._anchor_connectivity.connected(
+            selected[0].user_id,
+            [item.memory_id for item in anchor_items],
+            [item.request_id for item in anchor_items if item.request_id],
+            self._max_anchor_hops,
+        )
+        return tuple(
+            item
+            for item in selected
+            if item.memory_id in connected.memory_ids
+            or (bool(item.request_id) and item.request_id in connected.request_ids)
         )
 
     def _fallback(

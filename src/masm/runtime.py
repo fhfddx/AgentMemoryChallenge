@@ -15,6 +15,7 @@ from masm.providers.llm import OpenAICompatibleLLM, StructuredLLM
 from masm.providers.multimodal_embeddings import GroundedMultimodalEmbeddingProvider
 from masm.providers.openai_embeddings import OpenAICompatibleEmbeddingProvider
 from masm.providers.reranker import LexicalReranker
+from masm.retrieval.anchor_connectivity import AnchorConnectivity
 from masm.retrieval.baseline import BaselineRetriever, load_channel_weights
 from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
@@ -153,6 +154,9 @@ def build_runtime(
                 max_selected=settings.selector_max_selected,
                 max_chars_per_candidate=settings.selector_max_chars_per_candidate,
                 timeout_seconds=settings.selector_timeout_seconds,
+                # 锚点接地校验必须拿到同用户关系图：没有它就无法区分合法下游链证据与
+                # 仅仅同主题的断开链证据。
+                anchor_connectivity=AnchorConnectivity(repository),
             )
 
     return RuntimeComponents(

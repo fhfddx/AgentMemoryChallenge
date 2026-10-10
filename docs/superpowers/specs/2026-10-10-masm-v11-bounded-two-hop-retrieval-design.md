@@ -198,3 +198,25 @@ justify mixing selector changes into this candidate.
 Rollback is API-only: restore the recorded `masm-v11-final-candidate:84926f6` override and recreate
 only `masm-v11-api-1`. Confirm that the PostgreSQL container ID is unchanged and that the restored
 API reports `running`, `healthy`, and zero restarts. No database rollback or migration is required.
+
+## Follow-up (2026-10-11): per-evidence anchor grounding
+
+The third deployed round of `multi_session_path_probe.py` on `015986a` returned
+`evidence_state=partial` with `selected_count=2`, `matched_marker_count=1` and
+`forbidden_marker_count=2`. The selector had selected the isolated record that carries the query
+anchor `Unconnected-<tag>` **plus** an unrelated chain record. `relation_isolation` still reported
+`neighbor_count=0`, and the recall, expansion, and selector-pool counts matched the passing
+rounds, so the failure is confined to the model selection step.
+
+The set-level check added in `015986a` only proved that the *union* of the selected text mentions
+an anchor. The required property is per-evidence: every selected memory must either state an anchor
+itself or lie in the anchor-rooted, user-scoped relation neighbourhood. Text alone cannot decide
+this — a legitimate downstream chain link does not repeat the Root string, and is textually
+identical to an unrelated chain record. The check therefore consumes persisted relations through
+`masm.retrieval.anchor_connectivity.AnchorConnectivity`, which maps message evidence to its
+same-request context parent (governance edges attach to context memories) and walks at most
+`DEFAULT_ANCHOR_HOPS` bounded hops. The selector drops ungrounded selected evidence, keeps the
+grounded evidence as `partial`, and downgrades `sufficient` to `partial` when anything was dropped.
+`build_runtime` wires the oracle for the official profile; construction without it keeps the
+previous set-level behaviour. The prompt, schema, three-state semantics, fallback anchors, pool
+construction, relation-expansion budgets, and public Add/Search contracts are unchanged.
