@@ -48,16 +48,31 @@ class _GraphRepository:
         return [_candidate(memory_id) for memory_id in unique[:limit]]
 
 
-def test_expands_exactly_one_hop() -> None:
-    """A-B-C 链：以 A 为种子只能拿到 B，二跳节点 C 不得出现。"""
+def test_expands_connected_chain_through_two_hops() -> None:
+    """A-B-C 链：以 A 为种子必须同时拿到直接桥 B 与二跳证据 C。"""
     a, b, c = uuid4(), uuid4(), uuid4()
     repository = _GraphRepository({a: [b], b: [c]})
     expander = RelationExpander(repository)
 
     expanded = expander.expand(_USER, [_candidate(a)], 10)
 
-    assert [candidate.memory_id for candidate in expanded] == [b]
-    assert len(repository.related_calls) == 1, "只允许一次一跳查询"
+    assert [candidate.memory_id for candidate in expanded] == [b, c]
+    assert repository.related_calls == [[a], [b]]
+
+
+def test_disconnected_similar_memory_is_not_traversed() -> None:
+    """内容相似但不在 A-B-C 边上的 D 不能被关系扩展凭空加入。"""
+    a, b, c, d = uuid4(), uuid4(), uuid4(), uuid4()
+    repository = _GraphRepository({a: [b], b: [c], d: [c]})
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(
+        _USER,
+        [_candidate(a, "project root")],
+        10,
+    )
+
+    assert d not in {candidate.memory_id for candidate in expanded}
 
 
 def test_seeds_are_not_returned_as_expansion() -> None:
