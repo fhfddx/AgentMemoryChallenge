@@ -51,7 +51,7 @@ def test_direct_fact_selection_returns_the_original_evidence_object() -> None:
     assert result.abstained is False
     assert len(llm.requests) == 1
     assert llm.requests[0].max_attempts == 1
-    assert llm.requests[0].prompt_version == "evidence-selector-v5"
+    assert llm.requests[0].prompt_version == "evidence-selector-v6"
     assert llm.requests[0].payload["question"] == "What did Alice buy?"
     assert llm.requests[0].payload["options"] == ["Notebook", "Paris"]
 
@@ -202,13 +202,32 @@ def test_selector_requests_deterministic_three_state_decision() -> None:
 
     request = llm.requests[0]
     assert request.temperature == 0.0
-    assert request.prompt_version == "evidence-selector-v5"
+    assert request.prompt_version == "evidence-selector-v6"
     assert "smallest set of memories" in request.prompt
     assert "every attribute, relation, value, or event asked for" in request.prompt
     assert "distinct source_group" in request.prompt
     assert "evidence_state=partial" in request.prompt
     assert "evidence_state=insufficient" in request.prompt
     assert "local fragment of a longer reasoning chain" in request.prompt
+
+
+def test_selector_prompt_requires_naming_a_stated_requested_fact() -> None:
+    """v6 契约：partial 必须由「某条被选记忆直接陈述了被询问事实」支撑。
+
+    v5 的合成探针显示模型会把仅共享实体/选项、或只是长链一环的候选报成 partial。
+    提示词必须给出可执行的自检步骤，而不只是描述三种状态。
+    """
+    llm = FakeStructuredLLM([{"selected_indices": [], "evidence_state": "insufficient"}])
+    candidate = _evidence(1, "source-a", "fact")
+
+    EvidenceSelector(llm).select("fact", None, [candidate], {candidate.memory_id})
+
+    request = llm.requests[0]
+    assert request.prompt_version == "evidence-selector-v6"
+    assert "Name the requested fact" in request.prompt
+    assert "Never report partial merely because" in request.prompt
+    assert "does not state the attribute the question asks for" in request.prompt
+    assert "every link needed to connect them" in request.prompt
 
 
 def test_selection_schema_accepts_only_the_two_protocol_fields() -> None:

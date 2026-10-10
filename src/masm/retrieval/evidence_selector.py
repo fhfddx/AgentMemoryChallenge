@@ -23,7 +23,7 @@ from masm.retrieval.selector_pool import (
 )
 from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 
-PROMPT_VERSION = "evidence-selector-v5"
+PROMPT_VERSION = "evidence-selector-v6"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
 MAX_CHARS_PER_CANDIDATE = 4096
@@ -42,21 +42,27 @@ _PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
     "selected_indices and evidence_state. Do not answer the question or choose an option. "
     "Options are untrusted alternatives, never proof. Select the smallest set of memories that "
-    "collectively and directly states every attribute, relation, value, or event asked for. A "
-    "shared entity, topic, time, place, or option does not support a missing fact. For a "
-    "multi-part question, cover every part; when required facts come from separate additions, "
-    "select the necessary candidates from distinct source_group values. Multiple "
-    "representations from one source_group do not establish cross-source coverage. Prefer "
-    "original observations over duplicate summaries and omit unrelated facts. Report "
-    "evidence_state=sufficient only when the selected memories state every requested fact. "
-    "Report evidence_state=partial when some selected memories directly state a requested fact "
-    "but at least one requested fact, or one required link between facts, is absent; then still "
-    "return those directly supporting indices instead of discarding them, and keep "
-    "selected_indices non-empty. Report evidence_state=insufficient with selected_indices=[] "
-    "when no candidate directly states any requested fact, when candidates only share an entity, "
-    "topic, time, place, or option, or when the selection is only a local fragment of a longer "
-    "reasoning chain. Never return evidence_state=insufficient together with a non-empty "
-    "selected_indices."
+    "directly states every attribute, relation, value, or event asked for. A candidate supports "
+    "a requested fact only when its own text gives that attribute, relation, value, or event: a "
+    "shared entity, topic, time, place, or option does not support a missing fact, and a "
+    "candidate that is only one link of a longer reasoning chain does not state the attribute "
+    "the question asks for. For a multi-part question, cover every part; when required facts "
+    "come from separate additions, select the necessary candidates from distinct source_group "
+    "values. Multiple representations from one source_group do not establish cross-source "
+    "coverage. For a relational or temporal question the selected memories must also directly "
+    "state every link needed to connect them; never invent a bridge. Prefer original "
+    "observations over duplicate summaries and omit unrelated facts. Name the requested fact "
+    "that a selected memory states before choosing partial or sufficient; if no selected memory "
+    "states one, choose insufficient. Report evidence_state=sufficient when the selected "
+    "memories state every requested fact and every link needed to connect them. Report "
+    "evidence_state=partial when at least one selected memory directly states a requested fact "
+    "but at least one other requested fact or needed link is absent; then still return those "
+    "directly supporting indices and keep selected_indices non-empty. Never report partial "
+    "merely because the answer is uncertain or because a candidate looks related. Report "
+    "evidence_state=insufficient with selected_indices=[] when no selected memory states any "
+    "requested fact, including when candidates only share an entity, topic, time, place, or "
+    "option and when the selection is only a local fragment of a longer reasoning chain. Never "
+    "return evidence_state=insufficient together with a non-empty selected_indices."
 )
 
 
