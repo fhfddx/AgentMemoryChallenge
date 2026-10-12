@@ -58,6 +58,69 @@ def test_complex_query_calls_llm_and_is_truncated_to_hard_cap() -> None:
     assert len(parsed.text_queries) <= MAX_SUBQUERIES
 
 
+def test_complex_query_preserves_original_before_bounded_decomposition() -> None:
+    query = "what happened before the meeting last week and who attended it"
+    llm = FakeStructuredLLM(
+        [{"text_queries": ["meeting timeline", "meeting attendees", "unused fourth"]}]
+    )
+    analyzer = _analyzer(llm=llm)
+
+    parsed = analyzer.parse(query)
+
+    assert parsed.text_queries == (query, "meeting timeline", "meeting attendees")
+
+
+def test_decomposition_deduplicates_original_and_repeated_variants_stably() -> None:
+    query = "Who owned the launch plan before the review?"
+    llm = FakeStructuredLLM(
+        [
+            {
+                "text_queries": [
+                    f"  {query.upper()}  ",
+                    "launch plan owner",
+                    " launch   plan owner ",
+                    "review timeline",
+                ]
+            }
+        ]
+    )
+    analyzer = _analyzer(llm=llm)
+
+    parsed = analyzer.parse(query)
+
+    assert parsed.text_queries == (query, "launch plan owner", "review timeline")
+
+
+def test_zero_subquery_budget_remains_empty_for_complex_query() -> None:
+    llm = FakeStructuredLLM([{"text_queries": ["focused lookup"]}])
+    analyzer = _analyzer(llm=llm, max_subqueries=0)
+
+    parsed = analyzer.parse("Who owned the launch plan before the review?")
+
+    assert parsed.text_queries == ()
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "What project used the cobalt access phrase?",
+        "Where was the migration dossier stored?",
+        "How did the project identify its review locker?",
+        "哪个项目使用了钴蓝访问短语？",
+        "项目档案在哪里保存？",
+        "项目如何标记评审柜？",
+    ],
+)
+def test_question_word_query_uses_bounded_decomposition(query: str) -> None:
+    llm = FakeStructuredLLM([{"text_queries": ["focused lookup"]}])
+    analyzer = _analyzer(llm=llm)
+
+    parsed = analyzer.parse(query)
+
+    assert len(llm.requests) == 1
+    assert parsed.text_queries == (query, "focused lookup")
+
+
 def test_llm_failure_degrades_to_rules() -> None:
     llm = FakeStructuredLLM([RuntimeError("provider down")])
     analyzer = _analyzer(llm=llm)
@@ -94,7 +157,10 @@ def test_llm_valid_response_is_used() -> None:
 
     parsed = analyzer.parse("who was related to the meeting before last week")
 
-    assert parsed.text_queries == ("meeting",)
+    assert parsed.text_queries == (
+        "who was related to the meeting before last week",
+        "meeting",
+    )
     assert parsed.entities == ("alice",)
     assert parsed.intent == "relational"
 

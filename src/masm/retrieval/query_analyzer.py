@@ -1,5 +1,6 @@
 """查询分析：简单查询用确定性规则，复杂查询才调用 LLM，失败必须可靠降级。"""
 
+import re
 from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -44,6 +45,9 @@ _COMPLEX_MARKERS = (
     "昨天",
     "明天",
 )
+
+_QUESTION_WORD_PATTERN = re.compile(r"\b(?:what|where|how)\b", re.IGNORECASE)
+_CJK_QUESTION_MARKERS = ("哪个", "哪些", "哪里", "哪儿", "什么", "如何", "怎么")
 
 _CLAUSE_SEPARATORS = "。！？!?;；\n"
 
@@ -121,11 +125,12 @@ class QueryAnalyzer:
         except Exception:
             # 任何 Provider/解析/校验失败都可靠降级为规则结果。
             return self._rule_based(joined, images)
-        subqueries = tuple(text for text in analysis.text_queries if text.strip())
-        if not subqueries:
+        decomposition = tuple(text for text in analysis.text_queries if text.strip())
+        if not decomposition:
             # 空列表/全部空白等语义不可用输出：用**原始查询**做规则降级。
             return self._rule_based(joined, images)
-        return self._from_analysis(analysis, subqueries[: self._max_subqueries], images)
+        subqueries = _query_variants(joined, decomposition, self._max_subqueries)
+        return self._from_analysis(analysis, subqueries, images)
 
     def _request(self, text: str) -> ModelRequest:
         return ModelRequest(
@@ -195,7 +200,31 @@ def _is_complex(text: str) -> bool:
     lowered = text.lower()
     if any(marker in lowered for marker in _COMPLEX_MARKERS):
         return True
+    if _QUESTION_WORD_PATTERN.search(text) is not None:
+        return True
+    if any(marker in text for marker in _CJK_QUESTION_MARKERS):
+        return True
     return len(_split_clauses(text)) > 1
+
+
+def _query_variants(
+    original: str, decomposition: Sequence[str], limit: int
+) -> tuple[str, ...]:
+    """Keep the original retrieval signal, then append stable unique decompositions."""
+    if limit < 1:
+        return ()
+    variants: list[str] = []
+    seen: set[str] = set()
+    for value in (original, *decomposition):
+        text = value.strip()
+        key = " ".join(text.casefold().split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        variants.append(text)
+        if len(variants) >= limit:
+            break
+    return tuple(variants)
 
 
 def _split_clauses(text: str) -> list[str]:
