@@ -1,5 +1,7 @@
 """关系边同用户验证单元测试。"""
 
+from contextlib import contextmanager
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -132,6 +134,46 @@ def test_related_only_returns_target_user(database: Database) -> None:
     results = repo.related(user_a, [a1], limit=10)
     assert all(c.user_id == user_a for c in results)
     assert {c.memory_id for c in results} == {a2}
+
+
+def test_related_orders_rows_before_applying_limit() -> None:
+    """拥挤关系的成员选择必须在 SQL 截断前按 memory ID 固定顺序。"""
+    source_id, target_id = uuid4(), uuid4()
+
+    class _Rows:
+        def __init__(self, rows) -> None:
+            self._rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _Session:
+        def __init__(self) -> None:
+            self.statements = []
+
+        def execute(self, statement):
+            self.statements.append(statement)
+            if len(self.statements) == 1:
+                relation = SimpleNamespace(source_id=source_id, target_id=target_id)
+                return _Rows([relation])
+            return _Rows([])
+
+    class _Database:
+        def __init__(self) -> None:
+            self.connection = _Session()
+
+        @contextmanager
+        def session(self):
+            yield self.connection
+
+    database = _Database()
+    MemoryRepository(database).related("user", [source_id], limit=1)  # type: ignore[arg-type]
+
+    memory_query = str(database.connection.statements[1])
+    assert "ORDER BY memories.id" in memory_query
 
 
 def test_anomalous_cross_user_relation_no_leak(database: Database) -> None:

@@ -48,16 +48,130 @@ class _GraphRepository:
         return [_candidate(memory_id) for memory_id in unique[:limit]]
 
 
-def test_expands_exactly_one_hop() -> None:
-    """A-B-C 链：以 A 为种子只能拿到 B，二跳节点 C 不得出现。"""
+def test_expands_connected_chain_through_two_hops() -> None:
+    """A-B-C 链：以 A 为种子必须同时拿到直接桥 B 与二跳证据 C。"""
     a, b, c = uuid4(), uuid4(), uuid4()
     repository = _GraphRepository({a: [b], b: [c]})
     expander = RelationExpander(repository)
 
     expanded = expander.expand(_USER, [_candidate(a)], 10)
 
+    assert [candidate.memory_id for candidate in expanded] == [b, c]
+    assert repository.related_calls == [[a], [b]]
+
+
+def test_disconnected_similar_memory_is_not_traversed() -> None:
+    """内容相似但不在 A-B-C 边上的 D 不能被关系扩展凭空加入。"""
+    a, b, c, d = uuid4(), uuid4(), uuid4(), uuid4()
+    repository = _GraphRepository({a: [b], b: [c], d: [c]})
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(
+        _USER,
+        [_candidate(a, "project root")],
+        10,
+    )
+
+    assert d not in {candidate.memory_id for candidate in expanded}
+
+
+def test_reciprocal_cycle_does_not_return_the_original_seed() -> None:
+    """A-B-A 环不能把原始种子 A 当作二跳证据再次返回。"""
+    a, b = uuid4(), uuid4()
+    repository = _GraphRepository({a: [b], b: [a]})
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [_candidate(a)], 10)
+
     assert [candidate.memory_id for candidate in expanded] == [b]
-    assert len(repository.related_calls) == 1, "只允许一次一跳查询"
+    assert repository.related_calls == [[a], [b]]
+
+
+def test_diamond_graph_emits_shared_second_hop_once() -> None:
+    """A-B/C-D 菱形中的共享端点 D 只能出现一次。"""
+    a, b, c, d = uuid4(), uuid4(), uuid4(), uuid4()
+    repository = _GraphRepository({a: [b, c], b: [d], c: [d]})
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [_candidate(a)], 10)
+    ids = [candidate.memory_id for candidate in expanded]
+
+    assert set(ids[:2]) == {b, c}
+    assert ids[2:] == [d]
+
+
+def test_empty_first_hop_skips_second_relation_query() -> None:
+    """没有一跳邻居时不得发起无意义的第二次关系查询。"""
+    a = uuid4()
+    repository = _GraphRepository()
+    expander = RelationExpander(repository)
+
+    assert expander.expand(_USER, [_candidate(a)], 10) == []
+    assert repository.related_calls == [[a]]
+
+
+def test_second_hop_traversal_uses_at_most_eight_first_hop_seeds() -> None:
+    """拥挤图中用于第二跳的桥节点必须硬限制为八个。"""
+    a = uuid4()
+    bridges = [uuid4() for _ in range(12)]
+    endpoints = [uuid4() for _ in bridges]
+    adjacency = {a: bridges}
+    adjacency.update(
+        {bridge: [endpoint] for bridge, endpoint in zip(bridges, endpoints, strict=True)}
+    )
+    repository = _GraphRepository(adjacency)
+    expander = RelationExpander(repository)
+
+    expander.expand(_USER, [_candidate(a)], 32)
+
+    assert len(repository.related_calls) == 2
+    assert len(repository.related_calls[1]) == 8
+    assert set(repository.related_calls[1]).issubset(set(bridges))
+
+
+def test_second_hop_emits_at_most_eight_candidates() -> None:
+    """单个桥节点后的宽扇出不能把超过八个二跳节点送入候选池。"""
+    a, bridge = uuid4(), uuid4()
+    endpoints = [uuid4() for _ in range(12)]
+    repository = _GraphRepository({a: [bridge], bridge: endpoints})
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [_candidate(a)], 32)
+    ids = {candidate.memory_id for candidate in expanded}
+
+    assert bridge in ids
+    assert len(ids.intersection(endpoints)) == 8
+
+
+def test_crowded_first_hop_reserves_eight_second_hop_slots() -> None:
+    """一跳填满预算时仍为最多八个链端点保留位置。"""
+    a = uuid4()
+    bridges = [uuid4() for _ in range(30)]
+    endpoints = [uuid4() for _ in range(30)]
+    adjacency = {a: bridges}
+    adjacency.update(
+        {bridge: [endpoint] for bridge, endpoint in zip(bridges, endpoints, strict=True)}
+    )
+    repository = _GraphRepository(adjacency)
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [_candidate(a)], 32)
+    ids = {candidate.memory_id for candidate in expanded}
+
+    assert len(expanded) == 32
+    assert len(ids.intersection(bridges)) == 24
+    assert len(ids.intersection(endpoints)) == 8
+
+
+def test_budget_of_one_keeps_the_direct_bridge() -> None:
+    """预算不足以容纳完整链时，一跳桥 B 必须优先于二跳 C。"""
+    a, b, c = uuid4(), uuid4(), uuid4()
+    repository = _GraphRepository({a: [b], b: [c]})
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [_candidate(a)], 1)
+
+    assert [candidate.memory_id for candidate in expanded] == [b]
 
 
 def test_seeds_are_not_returned_as_expansion() -> None:
@@ -115,6 +229,16 @@ def test_empty_seeds_return_no_expansion() -> None:
     assert repository.related_calls == []
 
 
+def test_zero_seed_limit_skips_all_relation_queries() -> None:
+    """显式关闭种子预算时不能偷偷使用第一个种子或发起空查询。"""
+    seed_id, neighbour = uuid4(), uuid4()
+    repository = _GraphRepository({seed_id: [neighbour]})
+    expander = RelationExpander(repository, max_seeds=0)
+
+    assert expander.expand(_USER, [_candidate(seed_id)], 10) == []
+    assert repository.related_calls == []
+
+
 def test_conflict_peers_win_the_budget_over_plain_neighbours() -> None:
     """普通邻居占满预算时，命中冲突组的同伴仍必须出现。"""
     seed_a, peer, neighbour_one, neighbour_two = uuid4(), uuid4(), uuid4(), uuid4()
@@ -131,6 +255,27 @@ def test_conflict_peers_win_the_budget_over_plain_neighbours() -> None:
     ids = [candidate.memory_id for candidate in expanded]
     assert peer in ids, "冲突组同伴被普通邻居挤掉"
     assert len(ids) <= 2
+
+
+def test_conflict_peer_can_also_be_a_second_hop_bridge() -> None:
+    """冲突同伴若也是直接邻居，仍必须作为桥节点参与第二跳。"""
+    seed_id, bridge, endpoint = uuid4(), uuid4(), uuid4()
+    group = uuid4()
+    repository = _GraphRepository({seed_id: [bridge], bridge: [endpoint]})
+    repository.conflict_members = {seed_id: [bridge], bridge: [seed_id]}
+    seed = MemoryCandidate(
+        memory_id=seed_id,
+        user_id=_USER,
+        content="seed",
+        score=1.0,
+        conflict_group_id=group,
+    )
+    expander = RelationExpander(repository)
+
+    expanded = expander.expand(_USER, [seed], 3)
+
+    assert [candidate.memory_id for candidate in expanded] == [bridge, endpoint]
+    assert repository.related_calls == [[seed_id], [bridge]]
 
 
 def test_multiple_conflict_groups_use_deterministic_order() -> None:

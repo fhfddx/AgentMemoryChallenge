@@ -591,3 +591,47 @@ def test_deterministic_selector_passes_through_existing_local_fake_results() -> 
     assert result.evidence == ranked
     assert result.fallback is False
     assert result.abstained is False
+
+
+@pytest.mark.parametrize("state", ["partial", "sufficient"])
+def test_rephrased_identifier_question_still_returns_the_direct_evidence(
+    state: Literal["partial", "sufficient"],
+) -> None:
+    """付费回归：问题含显式标识符、证据换措辞不逐字重复时，必须返回该直接证据。
+
+    官方 Smoke（ca7eed8）direct_recall 100→0；环境证据（API 全程 200、零 5xx）指向代码侧。
+    锚点接地族（015986a 的并集校验 + 后续的分量裁剪）对这类题整体拒答：sufficient 走并集
+    校验、partial 走分量裁剪，两者都要求证据逐字包含问题标识符。免费门槛没覆盖它，因为
+    探针证据本身逐字含标识符。回退锚点接地后，这类选择必须原样返回。
+    """
+    llm = FakeStructuredLLM([{"selected_indices": [0], "evidence_state": state}])
+    evidence = _evidence(1, "source-a", "The project is internally called Zephyr.")
+
+    result = EvidenceSelector(llm).select(
+        "What is the code name of the Atlas-case project?",
+        None,
+        [evidence],
+        {evidence.memory_id},
+    )
+
+    assert result.evidence == (evidence,)
+    assert result.abstained is False
+
+
+def test_sufficient_multi_source_selection_is_kept_verbatim() -> None:
+    """付费回归护栏：模型报 sufficient 的多来源选择必须整组保留，不做任何裁剪。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "sufficient"}])
+    first = _evidence(1, "run-a", "The Atlas-case migration uses code name Cobalt-case.")
+    second = _evidence(
+        2, "run-b", "The review for that migration is scheduled on November 14, 2026."
+    )
+
+    result = EvidenceSelector(llm).select(
+        "What is the Atlas-case migration code name, and when is its review?",
+        None,
+        [first, second],
+        {first.memory_id, second.memory_id},
+    )
+
+    assert result.evidence == (first, second)
+    assert result.evidence_state == "sufficient"

@@ -1,5 +1,103 @@
 # MASM v1.1 DeepSeek Harness 交接（2026-10-10）
 
+## 最新更新：有界两跳 multi-session 候选（已部署，免费探针复测中）
+
+> **本节取代后文所有旧的“当前状态”和 multi-session 待办描述。** API 已切换到
+> `masm-v11-final-candidate:d74ad1c`；官方 Smoke 尚未启动。
+
+### 候选状态
+
+| 项目 | 当前值 |
+| --- | --- |
+| 工作树 | `C:\Users\23952\.codex\worktrees\masm-v11-multihop\AgentMemoryChallenge` |
+| 分支 | `codex/masm-v11-multihop` |
+| 基线 | `65738a44b181`（`origin/codex/masm-v11-selector-probe`） |
+| 已完成提交 | `bdf92f7`、`3721b7e`、`f6049fa`、`263e29f`、`b71b637`、`2a3ee8c`、`d8390fd`、`e3a7312` |
+| 远端状态 | 分支已推送；GitHub PR `#1` 以 `codex/masm-v11-selector-probe` 为 base，保持 Open、未合并 |
+| 云端状态 | 镜像 `d74ad1c` 已构建并 API-only 部署；尚未运行官方 Smoke |
+| 生产环境 | API 为 `masm-v11-final-candidate:d74ad1c`、`healthy`、`restarts=0`；部署前后 DB 容器 ID 相同 |
+
+提交作用：
+
+| 提交 | 作用 |
+| --- | --- |
+| `bdf92f7` | 记录有界两跳关系扩展设计 |
+| `3721b7e` | 记录逐步实现、验证和回滚计划 |
+| `f6049fa` | 先提交会失败的 A→B→C 两跳测试；冻结基线上只返回 B、不返回 C，确认一跳扩展是可复现阻断点 |
+| `263e29f` | 在 `RelationExpander` 中加入有界第二跳，保留冲突优先级和总上限，处理环、菱形去重与拥挤候选 |
+| `b71b637` | 用真实 repository/Search 路径覆盖第二跳消息证据回填和不相连请求隔离 |
+| `2a3ee8c` | 新增安全的三会话路径探针及其单元测试 |
+| `d8390fd` | 修复审查发现的 conflict-bridge、零种子预算和 SQL 截断前排序边界；把探针负例升级为已存储的断开相似记录 |
+| `e3a7312` | 修正免费探针的负例判据：区分“只返回断开记录自身的否定证据”和“误返回主链证据” |
+
+本候选没有修改 `src/masm/retrieval/evidence_selector.py`，相对基线执行
+`git diff --exit-code 65738a44b181 -- src/masm/retrieval/evidence_selector.py` 返回 `0`。
+`search_service.py` 也无需修改；变化收敛在关系扩展器、测试、探针和文档。
+
+### 实现边界
+
+- 原始种子仍最多 `8` 个，关系扩展后的总候选仍最多 `32` 个，并继续受调用方 `limit` 约束。
+- 先保留 conflict peer，再扩展一跳；只有一跳结果存在且预算允许时才查询第二跳。
+- conflict peer 若同时是直接邻居，仍可作为第二跳 bridge；去重只影响发射，不影响遍历资格。
+- 第二跳遍历种子和第二跳输出分别最多 `8` 个；拥挤时为第二跳保留最多 `8` 个位置，且至少保留一个一跳 bridge。
+- 环、重复边和 diamond 路径按 memory ID 去重；原始种子不会被重新加入。
+- `max_seeds=0` 直接返回且不查询 repository；`related()` 在 SQL `LIMIT` 前按 memory ID 排序，拥挤图成员选择可复现。
+- 所有查询继续经 `MemoryRepository.related()` 按 `user_id` 隔离，没有跨用户或全库扫描。
+- v7 selector 的 prompt、schema、三态语义、fallback 和候选池均保持冻结。
+
+### 失败先行与本地验证证据
+
+实现前的目标测试 `test_expands_connected_chain_through_two_hops` 在冻结基线上失败：结果包含 B，
+但缺少 C；相邻的“不相连相似记忆不得进入结果”测试仍通过。实现后证据如下：
+
+| 门槛 | 结果 |
+| --- | --- |
+| 关系扩展器单测 | `20 passed` |
+| 隔离与既有检索增强回归 | `24 passed` |
+| Search 第二跳回填集成测试 | `2 passed, 21 deselected` |
+| selector 回归 | `63 passed` |
+| 新旧路径探针单测 | `11 passed` |
+| 能力、隔离、selector、探针联合回归 | `133 passed` |
+| 全量 pytest | `793 passed, 1 skipped` |
+| Ruff | 全仓通过 |
+| mypy | `62 source files`，零问题 |
+| `git diff --check` | 通过 |
+
+唯一跳过项是 Windows 上不适用的 POSIX 权限语义测试；其余输出只有既有的
+Starlette/httpx 与 `pytest-asyncio` 弃用警告。数据库相关测试使用本机临时
+`pgvector/pgvector:pg16` 容器 `masm-v11-multihop-test-pg`，仅绑定
+`127.0.0.1:5433`、使用 tmpfs，并在交付前停止删除；它不是云端或业务数据库。
+
+### 新探针契约
+
+`scripts/multi_session_path_probe.py` 只创建完全合成、带随机 tag 的 4 个 run：三个形成
+`Root → Bridge → Leaf → Terminal` 链，第四个保存同用户但无关系边的 `Unconnected` 相似记录。
+它验证：
+
+1. 四次 `/add` 后仅输出 context/message/marker 计数；
+2. connected query 必须找齐 4 个链 marker，且不得夹带已存储的 `Unconnected` marker；
+3. disconnected query 可返回空结果或仅返回 `Unconnected` 自身；只要出现任一主链 marker 就失败；
+4. `finally` 中按预注册 run ID 精确清理，最多三轮，并验证 memories/sources 都为零残留；
+5. 输出只包含 allowlist 聚合字段，不打印 marker、正文、异常文本、凭据或数据库行；
+6. 只接受 loopback API URL，设置/请求失败分别以固定类别和非零退出码报告。
+
+该探针是部署后的免费合成门槛，不使用隐藏题，也不能单独证明官方 multi-session 分项会提升。
+
+### 后续服务器门槛（必须按顺序）
+
+1. **已完成：** 分支推送并创建 PR；服务器检出、镜像构建均固定在 `d74ad1c`。
+2. **已完成：** 仅替换 API；已确认 `API_REPLACED`、`DB_UNCHANGED`、`healthy`、
+   `restarts=0`、`PROMPT_VERSION=evidence-selector-v7`、`MAX_SECOND_HOP=8`。
+3. **已完成但判据需修正：** 首次四会话探针的 storage、connected、cleanup 均通过；
+   disconnected 返回 1 条证据，因此旧判据退出 `1`。cleanup 删除 8 memories、4 sources，
+   最终 memories/sources 零残留。
+4. **待执行：** 从 `e3a7312` 复制更新后的探针到当前 API 容器复测；运行时代码与镜像无需替换。
+5. **待执行：** 联跑既有 selector 四轮门槛和 `search_path_probe.py`；任何回归都停止。
+6. 只有全部免费门槛通过且用户再次明确确认，才启动一次官方 Smoke；不得启动 Full。
+
+旧的第 10 节部署模板仍展示上一分支名，不能原样用于本候选。实际部署时必须把
+`BRANCH` 改为 `codex/masm-v11-multihop`，并以最终远端 SHA 生成镜像和 override 路径。
+
 ## 0. 更新：v7 部署与官方 Smoke（`84926f6`）
 
 > **本节取代后文所有旧的“当前状态”描述。** `84926f6` 已部署到 v1.1，官方 Smoke 和
@@ -484,13 +582,20 @@ wc -l "/tmp/smoke-$SHA-search-diagnostics.jsonl"
 | --- | --- |
 | `src/masm/retrieval/evidence_selector.py` | selector 协议、模型调用、fallback 与 abstention |
 | `src/masm/retrieval/evidence_pool.py` | 候选池构建与排序 |
+| `src/masm/retrieval/relation_expander.py` | 有界一跳/两跳关系扩展、冲突优先级与去重预算 |
+| `src/masm/storage/repositories.py` | 用户隔离的关系读取及 SQL 截断前确定性排序 |
 | `src/masm/services/search_service.py` | Search 主路径及 selector 接入 |
 | `src/masm/retrieval/diagnostics.py` | Search 脱敏遥测 |
 | `scripts/selector_probe.py` | 基础合成 selector 探针 |
 | `scripts/selector_reasoning_probe.py` | strict / chain prompt 合成对照 |
+| `scripts/search_path_probe.py` | 基础存储、direct recall、两会话检索与同实体拒答探针 |
+| `scripts/multi_session_path_probe.py` | 三段链加断开相似记录的四会话对照及精确清理探针 |
 | `scripts/compare_search_diagnostics.py` | 只比较安全字段的遥测工具 |
 | `scripts/cloud_smoke_recovery.py` | Smoke 数据只读审计和精确清理 |
+| `tests/unit/retrieval/test_relation_expander.py` | 两跳、环、diamond、预算与拥挤场景回归 |
 | `tests/unit/retrieval/test_evidence_selector.py` | selector 单元回归 |
+| `tests/integration/test_retrieval_enhancements.py` | Search 第二跳证据回填及不相连请求隔离 |
+| `tests/unit/test_multi_session_path_probe_script.py` | 新路径探针的输出、错误与零残留契约 |
 | `tests/unit/test_selector_probe_script.py` | 基础探针测试 |
 | `tests/unit/test_selector_reasoning_probe_script.py` | reasoning probe 测试 |
 | `tests/unit/test_compare_search_diagnostics_script.py` | 安全比较脚本测试 |

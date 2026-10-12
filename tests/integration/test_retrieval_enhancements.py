@@ -12,7 +12,7 @@ from masm.providers.fakes import FakeStructuredLLM
 from masm.providers.reranker import RerankerProvider
 from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever, ParsedQuery
 from masm.retrieval.evidence_renderer import EvidenceRenderer
-from masm.retrieval.evidence_selector import EvidenceSelector
+from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
@@ -407,6 +407,146 @@ def test_parent_child_dedup_preserves_relation_anchor(
     assert str(message_ids[first_run]) in ids
     assert str(message_ids[second_run]) in ids
     assert len(ids) == len(set(ids))
+
+
+def test_search_rehydrates_message_evidence_from_second_hop(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """消息锚点 A 经 context A-B-C 扩展后必须返回 B/C 的原始消息证据。"""
+    user_id = _uid("u")
+    first = _seed(database, asset_store, settings, embeddings, user_id, "root fact")
+    second = _seed(database, asset_store, settings, embeddings, user_id, "bridge fact")
+    third = _seed(database, asset_store, settings, embeddings, user_id, "terminal fact")
+    disconnected = _seed(
+        database, asset_store, settings, embeddings, user_id, "terminal fact lookalike"
+    )
+    _add_relation(database, user_id, first, second)
+    _add_relation(database, user_id, second, third)
+
+    with database.session() as session:
+        contexts = {
+            row.id: row.request_id
+            for row in session.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.id.in_([first, second, third, disconnected]),
+                )
+            ).scalars()
+        }
+        message_ids = {
+            row.request_id: row.id
+            for row in session.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.granularity == "message",
+                    Memory.request_id.in_(list(contexts.values())),
+                )
+            ).scalars()
+        }
+
+    repository = MemoryRepository(database)
+
+    class _MessageAnchorRetriever:
+        def __init__(self) -> None:
+            self.repository = repository
+
+        def retrieve(self, requested_user: str, query: ParsedQuery, limit: int):
+            del query, limit
+            return [
+                MemoryCandidate(
+                    memory_id=message_ids[contexts[first]],
+                    user_id=requested_user,
+                    content="root fact",
+                    score=0.8,
+                    granularity="message",
+                    request_id=contexts[first],
+                    source_position=0,
+                    retrieval_signals={"lexical": 0.01},
+                )
+            ]
+
+    response = SearchService(
+        _MessageAnchorRetriever(),
+        max_image_bytes=settings.max_image_bytes,
+        expander=RelationExpander(repository),
+        reranker=EvidenceReranker(),
+        relevance_gate=RelevanceGate(),
+        selector=DeterministicEvidenceSelector(),
+    ).search(SearchRequest(query="root fact", user_id=user_id, top_k=10))
+    returned_ids = {row.id for row in response.data}
+
+    assert returned_ids == {
+        str(message_ids[contexts[first]]),
+        str(message_ids[contexts[second]]),
+        str(message_ids[contexts[third]]),
+    }
+    assert str(message_ids[contexts[disconnected]]) not in returned_ids
+
+
+def test_search_does_not_rehydrate_an_unconnected_request(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """同用户且内容相似但无关系边的 request 不能被扩展或回填。"""
+    user_id = _uid("u")
+    anchor = _seed(database, asset_store, settings, embeddings, user_id, "shared topic root")
+    disconnected = _seed(
+        database, asset_store, settings, embeddings, user_id, "shared topic terminal"
+    )
+    with database.session() as session:
+        contexts = {
+            row.id: row.request_id
+            for row in session.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.id.in_([anchor, disconnected]),
+                )
+            ).scalars()
+        }
+        message_ids = {
+            row.request_id: row.id
+            for row in session.execute(
+                select(Memory).where(
+                    Memory.user_id == user_id,
+                    Memory.granularity == "message",
+                    Memory.request_id.in_(list(contexts.values())),
+                )
+            ).scalars()
+        }
+
+    repository = MemoryRepository(database)
+
+    class _MessageAnchorRetriever:
+        def __init__(self) -> None:
+            self.repository = repository
+
+        def retrieve(self, requested_user: str, query: ParsedQuery, limit: int):
+            del query, limit
+            return [
+                MemoryCandidate(
+                    memory_id=message_ids[contexts[anchor]],
+                    user_id=requested_user,
+                    content="shared topic root",
+                    score=0.8,
+                    granularity="message",
+                    request_id=contexts[anchor],
+                    source_position=0,
+                    retrieval_signals={"lexical": 0.01},
+                )
+            ]
+
+    response = SearchService(
+        _MessageAnchorRetriever(),
+        max_image_bytes=settings.max_image_bytes,
+        expander=RelationExpander(repository),
+        reranker=EvidenceReranker(),
+        relevance_gate=RelevanceGate(),
+        selector=DeterministicEvidenceSelector(),
+    ).search(SearchRequest(query="shared topic root", user_id=user_id, top_k=10))
+
+    assert {row.id for row in response.data} == {str(message_ids[contexts[anchor]])}
+    assert str(message_ids[contexts[disconnected]]) not in {
+        row.id for row in response.data
+    }
 
 
 def test_top_100_with_parent_child_pool() -> None:
