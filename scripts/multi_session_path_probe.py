@@ -294,6 +294,40 @@ def run_probe(
         )
 
         context_by_run = {candidate.request_id: candidate for candidate in contexts}
+        connected_contexts = [context_by_run.get(run_id) for run_id in run_ids[:3]]
+        if any(candidate is None for candidate in connected_contexts):
+            raise RuntimeError("Stored context contract")
+        chain = [candidate for candidate in connected_contexts if candidate is not None]
+        neighbor_ids: dict[UUID, set[UUID]] = {}
+        for candidate in chain:
+            neighbor_ids[candidate.memory_id] = {
+                neighbor.memory_id
+                for neighbor in repository.related(
+                    user_id,
+                    [candidate.memory_id],
+                    32,
+                )
+            }
+        expected_adjacencies = ((chain[0], chain[1]), (chain[1], chain[2]))
+        matched_adjacency_count = sum(
+            right.memory_id in neighbor_ids[left.memory_id]
+            or left.memory_id in neighbor_ids[right.memory_id]
+            for left, right in expected_adjacencies
+        )
+        connected_relations_passed = matched_adjacency_count == len(
+            expected_adjacencies
+        )
+        all_passed &= connected_relations_passed
+        _print_row(
+            output,
+            {
+                "case": "connected_relations",
+                "expected_adjacency_count": len(expected_adjacencies),
+                "matched_adjacency_count": matched_adjacency_count,
+                "passed": connected_relations_passed,
+            },
+        )
+
         isolated_context = context_by_run.get(run_ids[-1])
         if isolated_context is None:
             raise RuntimeError("Stored context contract")
