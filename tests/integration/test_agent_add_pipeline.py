@@ -9,16 +9,25 @@ from sqlalchemy import func, select, update
 from masm.agents import MAX_HISTORY
 from masm.agents.curator import MemoryCuratorAgent
 from masm.agents.perception import PerceptionAgent
+from masm.agents.relation_linker import RelationLinkerAgent
 from masm.agents.temporal import TemporalRelationAgent
 from masm.orchestration.action_validator import ActionValidationError, validate_actions
 from masm.orchestration.add_pipeline import AddPipeline, PipelineState
-from masm.providers.fakes import DeterministicFakeEmbeddingProvider, FakeStructuredLLM
+from masm.providers.errors import ProviderUnavailableError
+from masm.providers.fakes import (
+    DeterministicFakeEmbeddingProvider,
+    FakeResponse,
+    FakeStructuredLLM,
+)
+from masm.providers.llm import StructuredOutputError
 from masm.retrieval.baseline import DEFAULT_CHANNEL_WEIGHTS, BaselineRetriever, ParsedQuery
 from masm.schemas.agents import (
     ActionKind,
     CuratorAction,
     CuratorDecision,
     PerceptionResult,
+    RelationLinkDecision,
+    RelationLinkProposal,
     TemporalRelationResult,
 )
 from masm.schemas.api import AddRequest, SearchRequest
@@ -36,6 +45,7 @@ _FULL_TRACE = (
     PipelineState.RECALLED,
     PipelineState.TEMPORALISED,
     PipelineState.CURATED,
+    PipelineState.RELATION_LINKED,
     PipelineState.VALIDATED,
     PipelineState.COMPLETED,
 )
@@ -82,12 +92,16 @@ def _build_pipeline(
     embeddings,
     *,
     decision: CuratorDecision | None = None,
+    linker_response: FakeResponse | None = None,
     max_history: int = 8,
 ) -> tuple[AddPipeline, tuple[FakeStructuredLLM, ...]]:
     perception_llm = FakeStructuredLLM([PerceptionResult(keywords=("cat",), language="en")])
     temporal_llm = FakeStructuredLLM([TemporalRelationResult()])
     curator_llm = FakeStructuredLLM(
         [decision if decision is not None else _decision(ActionKind.CREATE)]
+    )
+    linker_llm = (
+        FakeStructuredLLM([linker_response]) if linker_response is not None else None
     )
     pipeline = AddPipeline(
         perception=PerceptionAgent(perception_llm),
@@ -96,9 +110,27 @@ def _build_pipeline(
         retriever=BaselineRetriever(
             MemoryRepository(database), embeddings, DEFAULT_CHANNEL_WEIGHTS
         ),
+        relation_linker=(
+            RelationLinkerAgent(linker_llm, max_history=max_history)
+            if linker_llm is not None
+            else None
+        ),
         max_history=max_history,
     )
     return pipeline, (perception_llm, temporal_llm, curator_llm)
+
+
+def _link(target: UUID, current: str, historical: str) -> RelationLinkDecision:
+    return RelationLinkDecision(
+        links=(
+            RelationLinkProposal(
+                target_memory_id=target,
+                current_evidence=current,
+                target_evidence=historical,
+                confidence=0.91,
+            ),
+        )
+    )
 
 
 def _count(database: Database, model: type, user_id: str) -> int:
@@ -663,6 +695,243 @@ def test_zero_history_pipeline_still_adds(
     _perception_llm, temporal_llm, curator_llm = llms
     assert temporal_llm.requests[0].payload["history"] == []
     assert curator_llm.requests == []
+
+
+def test_history_add_calls_relation_linker_exactly_once_and_persists_valid_link(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("linker")
+    first_request = _uid("r")
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(first_request, user_id, "The cedar key opens the north cabinet."))
+    target = _memory_row(database, user_id, first_request)
+    current = "The brass label belongs on the same north cabinet."
+    pipeline, _llms = _build_pipeline(
+        database,
+        embeddings,
+        linker_response=_link(target.id, "north cabinet", "north cabinet"),
+    )
+
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings, pipeline=pipeline
+    ).add(_request(_uid("r"), user_id, current))
+
+    assert pipeline._relation_linker is not None  # noqa: SLF001
+    assert len(pipeline._relation_linker._llm.requests) == 1  # noqa: SLF001
+    with database.session() as session:
+        rows = session.execute(
+            select(MemoryRelation).where(MemoryRelation.user_id == user_id)
+        ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].target_id == target.id
+    assert rows[0].relation_type == "link"
+
+
+def test_first_add_and_max_history_zero_skip_relation_linker(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    first_pipeline, _ = _build_pipeline(
+        database, embeddings, linker_response=RelationLinkDecision()
+    )
+    first_pipeline.run(_request(_uid("r"), _uid("fresh"), "first record"))
+    assert first_pipeline._relation_linker is not None  # noqa: SLF001
+    assert first_pipeline._relation_linker._llm.requests == []  # noqa: SLF001
+
+    user_id = _uid("zero")
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(_uid("r"), user_id, "existing record"))
+    zero_pipeline, _ = _build_pipeline(
+        database,
+        embeddings,
+        linker_response=RelationLinkDecision(),
+        max_history=0,
+    )
+    zero_pipeline.run(_request(_uid("r"), user_id, "next record"))
+    assert zero_pipeline._relation_linker is not None  # noqa: SLF001
+    assert zero_pipeline._relation_linker._llm.requests == []  # noqa: SLF001
+
+
+def test_blank_text_and_image_only_history_adds_skip_relation_linker(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("image")
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(_uid("r"), user_id, "existing text history"))
+    pipeline, _ = _build_pipeline(
+        database, embeddings, linker_response=RelationLinkDecision()
+    )
+    request = AddRequest(
+        request_id=_uid("r"),
+        user_id=user_id,
+        session_id="session-image",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                    }
+                ],
+            }
+        ],
+    )
+
+    result = pipeline.run(request)
+
+    assert result.degraded is False
+    assert result.bundle.memories[0].original_text == ""
+    assert pipeline._relation_linker is not None  # noqa: SLF001
+    assert pipeline._relation_linker._llm.requests == []  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "linker_response",
+    [
+        ProviderUnavailableError("offline"),
+        StructuredOutputError("invalid"),
+        {"links": [{"confidence": "not-a-number"}]},
+        "ungrounded",
+    ],
+)
+def test_linker_provider_schema_and_quote_failures_preserve_structured_add(
+    database: Database,
+    asset_store: AssetStore,
+    settings,
+    embeddings,
+    linker_response: object,
+) -> None:
+    user_id = _uid("failure")
+    first_request = _uid("r")
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(first_request, user_id, "historical cabinet record"))
+    target = _memory_row(database, user_id, first_request)
+    response: FakeResponse = (
+        _link(target.id, "absent current quote", "historical")
+        if linker_response == "ungrounded"
+        else linker_response  # type: ignore[assignment]
+    )
+    pipeline, _ = _build_pipeline(
+        database,
+        embeddings,
+        decision=_decision(ActionKind.LINK, target.id),
+        linker_response=response,
+    )
+
+    result = pipeline.run(_request(_uid("r"), user_id, "structured current record"))
+
+    assert result.degraded is False
+    assert result.bundle.memories[0].keywords == ("cat",)
+    assert result.bundle.actions is not None
+    assert len(result.bundle.actions.relations) == 1
+    assert result.bundle.actions.relations[0].target_id == target.id
+
+
+def test_curator_relation_prevents_duplicate_generic_link_persistence(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("dedupe")
+    first_request = _uid("r")
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(first_request, user_id, "shared archive record"))
+    target = _memory_row(database, user_id, first_request)
+    pipeline, _ = _build_pipeline(
+        database,
+        embeddings,
+        decision=_decision(ActionKind.LINK, target.id),
+        linker_response=_link(target.id, "shared archive", "shared archive"),
+    )
+
+    result = pipeline.run(_request(_uid("r"), user_id, "shared archive continuation"))
+
+    assert result.bundle.actions is not None
+    relations = result.bundle.actions.relations
+    assert len(relations) == 1
+    assert relations[0].evidence_ref == {
+        "kind": "link",
+        "evidence": "observed evidence",
+    }
+
+
+def test_paraphrased_cross_session_records_link_without_shared_identifier(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("paraphrase")
+    first_request = _uid("r")
+    historical = "A crimson parcel was stored beside the eastern stairwell."
+    current = "The package near the east stairs contains the missing ledger."
+    AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    ).add(_request(first_request, user_id, historical))
+    target = _memory_row(database, user_id, first_request)
+    pipeline, _ = _build_pipeline(
+        database,
+        embeddings,
+        linker_response=_link(target.id, "missing ledger", "crimson parcel"),
+    )
+
+    result = pipeline.run(_request(_uid("r"), user_id, current))
+
+    assert result.degraded is False
+    assert result.bundle.actions is not None
+    assert [relation.target_id for relation in result.bundle.actions.relations] == [target.id]
+
+
+def test_three_add_chain_persists_two_adjacencies_and_isolated_add_stays_unlinked(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    user_id = _uid("chain")
+    service = AddService(
+        MemoryRepository(database), asset_store, settings, embeddings=embeddings
+    )
+    root_request = _uid("r")
+    service.add(_request(root_request, user_id, "Root keeps the amber map."))
+    root = _memory_row(database, user_id, root_request)
+
+    bridge_request = _uid("r")
+    bridge_pipeline, _ = _build_pipeline(
+        database,
+        embeddings,
+        linker_response=_link(root.id, "amber map", "amber map"),
+    )
+    AddService(
+        MemoryRepository(database), asset_store, settings,
+        embeddings=embeddings, pipeline=bridge_pipeline,
+    ).add(_request(bridge_request, user_id, "The amber map marks a silver gate."))
+    bridge = _memory_row(database, user_id, bridge_request)
+
+    leaf_request = _uid("r")
+    leaf_pipeline, _ = _build_pipeline(
+        database,
+        embeddings,
+        linker_response=_link(bridge.id, "silver gate", "silver gate"),
+    )
+    AddService(
+        MemoryRepository(database), asset_store, settings,
+        embeddings=embeddings, pipeline=leaf_pipeline,
+    ).add(_request(leaf_request, user_id, "Beyond the silver gate is a blue room."))
+
+    isolated_pipeline, _ = _build_pipeline(
+        database, embeddings, linker_response=RelationLinkDecision()
+    )
+    AddService(
+        MemoryRepository(database), asset_store, settings,
+        embeddings=embeddings, pipeline=isolated_pipeline,
+    ).add(_request(_uid("r"), user_id, "An unrelated violin was repaired."))
+
+    with database.session() as session:
+        rows = session.execute(
+            select(MemoryRelation).where(MemoryRelation.user_id == user_id)
+        ).scalars().all()
+    assert {(row.source_id, row.target_id) for row in rows} == {
+        (bridge.id, root.id),
+        (_memory_row(database, user_id, leaf_request).id, bridge.id),
+    }
 
 
 def test_source_message_count_matches_request(

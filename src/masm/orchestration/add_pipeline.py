@@ -15,10 +15,17 @@ from masm.agents import MAX_HISTORY, resolve_max_history
 from masm.agents.curator import MemoryCuratorAgent
 from masm.agents.fused_text import FusedTextAgent, has_one_supported_date
 from masm.agents.perception import PerceptionAgent
+from masm.agents.relation_linker import RelationLinkerAgent
 from masm.agents.temporal import AgentOutputError, TemporalRelationAgent
 from masm.orchestration.action_validator import validate_actions
+from masm.orchestration.history_candidates import HistoryCandidateBuilder
+from masm.orchestration.relation_link_validator import (
+    merge_validated_actions,
+    validate_relation_links,
+)
+from masm.providers.errors import ProviderError
 from masm.providers.llm import StructuredOutputError
-from masm.retrieval.baseline import BaselineRetriever, ParsedQuery
+from masm.retrieval.baseline import BaselineRetriever
 from masm.schemas.agents import CuratorDecision, PerceptionResult, TemporalRelationResult
 from masm.schemas.api import AddRequest
 from masm.schemas.content import ContentPart, TextPart
@@ -35,6 +42,7 @@ class PipelineState(StrEnum):
     RECALLED = "recalled"
     TEMPORALISED = "temporalised"
     CURATED = "curated"
+    RELATION_LINKED = "relation_linked"
     VALIDATED = "validated"
     DEGRADED = "degraded"
     COMPLETED = "completed"
@@ -46,7 +54,12 @@ _ALLOWED_TRANSITIONS: Mapping[PipelineState, frozenset[PipelineState]] = {
     PipelineState.PERCEIVED: frozenset({PipelineState.RECALLED, PipelineState.DEGRADED}),
     PipelineState.RECALLED: frozenset({PipelineState.TEMPORALISED, PipelineState.DEGRADED}),
     PipelineState.TEMPORALISED: frozenset({PipelineState.CURATED, PipelineState.DEGRADED}),
-    PipelineState.CURATED: frozenset({PipelineState.VALIDATED, PipelineState.DEGRADED}),
+    PipelineState.CURATED: frozenset(
+        {PipelineState.RELATION_LINKED, PipelineState.DEGRADED}
+    ),
+    PipelineState.RELATION_LINKED: frozenset(
+        {PipelineState.VALIDATED, PipelineState.DEGRADED}
+    ),
     PipelineState.VALIDATED: frozenset({PipelineState.COMPLETED}),
     PipelineState.DEGRADED: frozenset(),
     PipelineState.COMPLETED: frozenset(),
@@ -97,6 +110,8 @@ class AddPipeline:
         curator: MemoryCuratorAgent,
         retriever: BaselineRetriever,
         fused_text: FusedTextAgent | None = None,
+        relation_linker: RelationLinkerAgent | None = None,
+        history_builder: HistoryCandidateBuilder | None = None,
         max_history: int = DEFAULT_MAX_HISTORY,
     ) -> None:
         self._perception = perception
@@ -104,7 +119,11 @@ class AddPipeline:
         self._curator = curator
         self._retriever = retriever
         self._fused_text = fused_text
+        self._relation_linker = relation_linker
         self._max_history = resolve_max_history(max_history)
+        self._history_builder = history_builder or HistoryCandidateBuilder(
+            retriever, max_history=self._max_history
+        )
 
     @property
     def max_history(self) -> int:
@@ -138,7 +157,7 @@ class AddPipeline:
             )
             machine.advance(PipelineState.PERCEIVED)
 
-            history = self._recall(request)
+            history = self._recall(request, perception)
             machine.advance(PipelineState.RECALLED)
 
             # 预检之后可能有并发写入；出现候选时重做有历史时序分析。
@@ -151,17 +170,33 @@ class AddPipeline:
             )
             machine.advance(PipelineState.TEMPORALISED)
 
-            # 没有候选时治理动作没有可引用的目标；新记忆仍由 _bundle_from 创建。
+            draft = _draft_from(request, content, perception, temporal)
+
+            # 没有候选时治理动作没有可引用的目标；新记忆仍会被写入。
             decision = (
-                self._curator.propose(_draft_from(request, content, perception, temporal), history)
+                self._curator.propose(draft, history)
                 if history else CuratorDecision()
             )
             machine.advance(PipelineState.CURATED)
 
             actions = validate_actions(request.user_id, decision, history)
+            if self._relation_linker is not None and history and draft.original_text.strip():
+                try:
+                    link_decision = self._relation_linker.propose(draft, history)
+                except (ProviderError, ValidationError):
+                    link_decision = None
+                if link_decision is not None:
+                    links = validate_relation_links(
+                        request.user_id,
+                        link_decision,
+                        draft.original_text,
+                        history,
+                    )
+                    actions = merge_validated_actions(actions, links)
+            machine.advance(PipelineState.RELATION_LINKED)
             machine.advance(PipelineState.VALIDATED)
 
-            bundle = _bundle_from(request, content, perception, temporal, actions)
+            bundle = _bundle_from(request, draft, actions)
             machine.advance(PipelineState.COMPLETED)
         except PipelineStateError:
             raise
@@ -192,21 +227,11 @@ class AddPipeline:
             )
         )
 
-    def _recall(self, request: AddRequest) -> list:
+    def _recall(
+        self, request: AddRequest, perception: PerceptionResult | None = None
+    ) -> list:
         """在同一用户范围内召回受限的历史候选。"""
-        if self._max_history == 0:
-            return []
-        text = " ".join(_text_parts(request)).strip()
-        if not text:
-            return []
-        if not self._retriever.repository.has_context_memory(request.user_id):
-            return []
-        return self._retriever.retrieve(
-            request.user_id,
-            ParsedQuery(text_queries=(text,), intent="fact"),
-            self._max_history,
-            granularity="context",
-        )
+        return self._history_builder.build(request, perception or PerceptionResult())
 
 
 def _content_parts(request: AddRequest) -> tuple[ContentPart, ...]:
@@ -274,16 +299,14 @@ def _draft_from(
 
 def _bundle_from(
     request: AddRequest,
-    content: Sequence[ContentPart],
-    perception: PerceptionResult,
-    temporal: TemporalRelationResult,
+    draft: MemoryDraft,
     actions: ValidatedActions,
 ) -> MemoryBundle:
     """成功路径的记忆束：结构化记忆 + 已校验动作。"""
     return MemoryBundle(
         session_id=request.session_id,
         request_id=request.request_id,
-        memories=(_draft_from(request, content, perception, temporal),),
+        memories=(draft,),
         actions=actions,
     )
 

@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 from fastapi.testclient import TestClient
 
+from masm.agents.relation_linker import RelationLinkerAgent
 from masm.api.app import create_app
 from masm.config import RuntimeProfile, Settings
 from masm.orchestration.add_pipeline import AddPipeline
@@ -207,6 +208,35 @@ def test_official_masm_builds_three_agents_and_all_search_components() -> None:
     assert runtime.relevance_gate.min_image_similarity == 0.42
     assert runtime.relevance_gate.min_lexical_rank == 0.001
     assert runtime.retriever._text_queries_search_images is True  # noqa: SLF001
+
+
+def test_official_runtime_wires_relation_linker_and_reports_prompt_version() -> None:
+    llm = FakeStructuredLLM(model="gpt-4o-mini")
+    runtime = build_runtime(
+        _settings(RuntimeProfile.OFFICIAL_MASM),
+        _repository(),
+        embeddings=OfficialTestEmbeddings(),
+        llm=llm,
+    )
+
+    assert runtime.add_pipeline is not None
+    assert isinstance(runtime.add_pipeline._relation_linker, RelationLinkerAgent)  # noqa: SLF001
+    assert runtime.add_pipeline._relation_linker._llm is llm  # noqa: SLF001
+    prompt_versions = runtime.audit_metadata()["prompt_versions"]
+    assert isinstance(prompt_versions, dict)
+    assert prompt_versions["relation_linker"] == "relation-linker-v1"
+
+
+@pytest.mark.parametrize(
+    "profile", [RuntimeProfile.LOCAL_FAKE, RuntimeProfile.OFFICIAL_BASELINE]
+)
+def test_non_official_profiles_do_not_wire_relation_linker(
+    profile: RuntimeProfile,
+) -> None:
+    runtime = build_runtime(_settings(profile), _repository())
+
+    assert runtime.add_pipeline is None
+    assert "relation_linker" not in runtime.audit_metadata()["prompt_versions"]
 
 
 def test_official_masm_can_disable_selection_without_disabling_recall() -> None:

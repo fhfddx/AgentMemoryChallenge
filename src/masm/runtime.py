@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from masm.agents.curator import MemoryCuratorAgent
 from masm.agents.fused_text import FusedTextAgent
 from masm.agents.perception import PerceptionAgent
+from masm.agents.relation_linker import RelationLinkerAgent
 from masm.agents.temporal import TemporalRelationAgent
 from masm.config import RuntimeProfile, Settings
 from masm.orchestration.add_pipeline import AddPipeline
@@ -57,6 +58,10 @@ class RuntimeComponents:
             }
             if self.add_pipeline._fused_text is not None:
                 prompt_versions["fused_text"] = self.add_pipeline._fused_text.prompt_version
+            if self.add_pipeline._relation_linker is not None:
+                prompt_versions["relation_linker"] = (
+                    self.add_pipeline._relation_linker.prompt_version
+                )
         return {
             "profile": self.profile.value,
             "embedding_model": self.embeddings.model_name,
@@ -134,6 +139,7 @@ def build_runtime(
             curator=MemoryCuratorAgent(selected_llm),
             retriever=retriever,
             fused_text=FusedTextAgent(selected_llm) if settings.fused_empty_history_text else None,
+            relation_linker=RelationLinkerAgent(selected_llm),
         )
         query_analyzer = QueryAnalyzer(
             llm=selected_llm,

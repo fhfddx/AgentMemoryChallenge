@@ -37,12 +37,14 @@ class _InMemoryBackend:
         leak_disconnected: bool = False,
         link_disconnected_graph: bool = False,
         return_disconnected_evidence: bool = False,
+        connected_adjacencies: int = 2,
     ) -> None:
         self.run_tag = run_tag
         self.fail_on_search = fail_on_search
         self.leak_disconnected = leak_disconnected
         self.link_disconnected_graph = link_disconnected_graph
         self.return_disconnected_evidence = return_disconnected_evidence
+        self.connected_adjacencies = connected_adjacencies
         self.runs: dict[str, dict[str, Any]] = {}
         self.requests: list[tuple[str, dict[str, Any]]] = []
         self._search_index = 0
@@ -127,15 +129,28 @@ class _InMemoryBackend:
     def related(
         self, user_id: str, memory_ids: Sequence[Any], limit: int
     ) -> list[SimpleNamespace]:
-        if not self.link_disconnected_graph:
-            return []
+        connected_runs = [
+            f"multi-session-path-probe-{self.run_tag}-{index}" for index in range(3)
+        ]
+        connected_ids = [uuid5(NAMESPACE_URL, run_id) for run_id in connected_runs]
+        related_runs: list[str] = []
+        if self.connected_adjacencies >= 1:
+            if connected_ids[0] in memory_ids:
+                related_runs.append(connected_runs[1])
+            if connected_ids[1] in memory_ids:
+                related_runs.append(connected_runs[0])
+        if self.connected_adjacencies >= 2:
+            if connected_ids[1] in memory_ids:
+                related_runs.append(connected_runs[2])
+            if connected_ids[2] in memory_ids:
+                related_runs.append(connected_runs[1])
         disconnected_run = f"multi-session-path-probe-{self.run_tag}-3"
-        if uuid5(NAMESPACE_URL, disconnected_run) not in memory_ids:
-            return []
-        return self._candidates(
-            user_id,
-            [f"multi-session-path-probe-{self.run_tag}-2"],
-        )[:limit]
+        if (
+            self.link_disconnected_graph
+            and uuid5(NAMESPACE_URL, disconnected_run) in memory_ids
+        ):
+            related_runs.append(connected_runs[2])
+        return self._candidates(user_id, related_runs)[:limit]
 
     def delete_run(self, run_id: str, *, user_id: str) -> DeletionReport:
         payload = self.runs.get(run_id)
@@ -181,6 +196,12 @@ def test_probe_exercises_connected_and_disconnected_paths_then_cleans() -> None:
             "message_count": 4,
             "passed": True,
             "stored_marker_count": 5,
+        },
+        {
+            "case": "connected_relations",
+            "expected_adjacency_count": 2,
+            "matched_adjacency_count": 2,
+            "passed": True,
         },
         {
             "case": "relation_isolation",
@@ -370,6 +391,80 @@ def test_probe_reports_a_disconnected_relation_to_the_main_chain() -> None:
     assert "Root-graph-leak" not in output.getvalue()
 
 
+def test_probe_requires_both_connected_chain_adjacencies() -> None:
+    probe = importlib.import_module("scripts.multi_session_path_probe")
+    backend = _InMemoryBackend(run_tag="relations", connected_adjacencies=2)
+    output = StringIO()
+
+    exit_code = probe.run_probe(
+        backend, backend, backend.delete_run, output, run_tag="relations"
+    )
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    connected = next(row for row in rows if row["case"] == "connected_relations")
+    assert exit_code == 0
+    assert connected == {
+        "case": "connected_relations",
+        "expected_adjacency_count": 2,
+        "matched_adjacency_count": 2,
+        "passed": True,
+    }
+
+
+def test_probe_fails_when_only_one_connected_adjacency_exists() -> None:
+    probe = importlib.import_module("scripts.multi_session_path_probe")
+    backend = _InMemoryBackend(run_tag="partial", connected_adjacencies=1)
+    output = StringIO()
+
+    exit_code = probe.run_probe(
+        backend, backend, backend.delete_run, output, run_tag="partial"
+    )
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    connected = next(row for row in rows if row["case"] == "connected_relations")
+    assert exit_code == 1
+    assert connected["expected_adjacency_count"] == 2
+    assert connected["matched_adjacency_count"] == 1
+    assert connected["passed"] is False
+
+
+def test_probe_keeps_isolated_relation_check_independent() -> None:
+    probe = importlib.import_module("scripts.multi_session_path_probe")
+    backend = _InMemoryBackend(
+        run_tag="independent",
+        connected_adjacencies=2,
+        link_disconnected_graph=True,
+    )
+    output = StringIO()
+
+    assert probe.run_probe(
+        backend, backend, backend.delete_run, output, run_tag="independent"
+    ) == 1
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    connected = next(row for row in rows if row["case"] == "connected_relations")
+    isolated = next(row for row in rows if row["case"] == "relation_isolation")
+    assert connected["passed"] is True
+    assert isolated["passed"] is False
+
+
+def test_probe_output_never_contains_generated_markers() -> None:
+    probe = importlib.import_module("scripts.multi_session_path_probe")
+    backend = _InMemoryBackend(run_tag="no-markers", connected_adjacencies=2)
+    output = StringIO()
+
+    assert probe.run_probe(
+        backend, backend, backend.delete_run, output, run_tag="no-markers"
+    ) == 0
+
+    rendered = output.getvalue()
+    assert "Root-no-markers" not in rendered
+    assert "Bridge-no-markers" not in rendered
+    assert "Leaf-no-markers" not in rendered
+    assert "Terminal-no-markers" not in rendered
+    assert "Unconnected-no-markers" not in rendered
+
+
 def test_probe_emits_supplied_search_stage_diagnostics() -> None:
     probe = importlib.import_module("scripts.multi_session_path_probe")
     backend = _InMemoryBackend(run_tag="stages")
@@ -409,6 +504,7 @@ def test_probe_emits_supplied_search_stage_diagnostics() -> None:
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert [row["case"] for row in rows] == [
         "storage",
+        "connected_relations",
         "relation_isolation",
         "stage_selected",
         "connected_chain",
@@ -549,6 +645,8 @@ def test_probe_output_uses_only_safe_aggregate_fields() -> None:
         "matched_marker_count",
         "forbidden_marker_count",
         "neighbor_count",
+        "expected_adjacency_count",
+        "matched_adjacency_count",
         "returned_count",
         "passed",
         "cleanup_attempt_error_count",
