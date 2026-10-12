@@ -55,5 +55,6 @@ class RelationLinkerAgent:
             },
             model=self._model,
             prompt_version=self._prompt_version,
+            temperature=0.0,
         )
         return self._llm.complete_json(request, RelationLinkDecision)

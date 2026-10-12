@@ -69,6 +69,15 @@ def test_relation_linker_records_model_and_prompt_version() -> None:
     assert request.prompt == agent.prompt
 
 
+def test_relation_linker_uses_deterministic_sampling_for_repeatable_links() -> None:
+    llm = FakeStructuredLLM([RelationLinkDecision()])
+    agent = RelationLinkerAgent(llm)
+
+    agent.propose(_draft(), [_candidate(0)])
+
+    assert llm.requests[0].temperature == 0.0
+
+
 def test_relation_linker_prompt_requires_factual_connection_and_forbids_topic_only_links() -> None:
     prompt = " ".join(RelationLinkerAgent(FakeStructuredLLM()).prompt.split()).casefold()
 
