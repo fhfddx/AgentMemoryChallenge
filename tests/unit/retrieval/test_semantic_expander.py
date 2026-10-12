@@ -146,8 +146,23 @@ def test_deduplicates_stably_keeps_best_score_and_sets_vector_signal() -> None:
     assert [candidate.memory_id for candidate in expanded] == [
         UUID(int=10), UUID(int=11), UUID(int=12)
     ]
-    assert expanded[0].score == 0.95
+    assert expanded[0].score == 0.855
     assert expanded[0].retrieval_signals == {TEXT_VECTOR_CHANNEL: 0.95}
+
+
+def test_expansion_score_is_discounted_to_the_seed_rrf_scale() -> None:
+    """原始余弦分数不能直接压过数量级更小的直召回 RRF 分数。"""
+    repository = _VectorRepository()
+    seed = _candidate(1, request_id="seed", score=0.04)
+    repository.vectors[seed.memory_id] = (1.0, 0.0)
+    repository.neighbors[(1.0, 0.0)] = [
+        _candidate(2, request_id="neighbor", score=0.90)
+    ]
+
+    expanded = _expander(repository).expand(_USER, [seed])
+
+    assert expanded[0].score == 0.036
+    assert expanded[0].retrieval_signals == {TEXT_VECTOR_CHANNEL: 0.90}
 
 
 def test_total_expansion_is_hard_capped() -> None:

@@ -99,11 +99,13 @@ class SemanticNeighborExpander:
                     or candidate.score < self._min_similarity
                 ):
                     continue
+                similarity = candidate.score
                 signaled = replace(
                     candidate,
+                    score=round(seed.score * max(0.0, min(1.0, similarity)), 6),
                     retrieval_signals={
                         **candidate.retrieval_signals,
-                        TEXT_VECTOR_CHANNEL: candidate.score,
+                        TEXT_VECTOR_CHANNEL: similarity,
                     },
                 )
                 current = by_id.get(candidate.memory_id)
