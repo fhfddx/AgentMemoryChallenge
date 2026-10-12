@@ -110,15 +110,18 @@ def _merge_candidates(
     semantic_slots = min(SEMANTIC_SLOTS, limit)
     result = list(valid_semantic[:semantic_slots])
     seen = {item.memory_id for item in result}
+    semantic_ids = {item.memory_id for item in valid_semantic}
 
     recent_slots = min(RECENT_SLOTS, max(0, limit - len(result)))
+    recent_added = 0
     for candidate in valid_recent:
-        if candidate.memory_id in seen:
+        if recent_added >= recent_slots:
+            break
+        if candidate.memory_id in semantic_ids:
             continue
         result.append(candidate)
         seen.add(candidate.memory_id)
-        if len(result) >= semantic_slots + recent_slots:
-            break
+        recent_added += 1
 
     for candidate in valid_semantic[semantic_slots:]:
         if len(result) >= limit:

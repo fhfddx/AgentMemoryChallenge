@@ -143,6 +143,28 @@ def test_unused_recent_slots_return_to_semantic_candidates_in_order() -> None:
     assert [item.memory_id for item in result] == [item.memory_id for item in semantic]
 
 
+def test_sparse_semantic_results_add_at_most_two_recent_candidates() -> None:
+    semantic = [_candidate(f"semantic-{index}") for index in range(2)]
+    recent = [_candidate(f"recent-{index}") for index in range(6)]
+    retriever = _FakeRetriever(semantic, recent)
+
+    result = _builder(retriever).build(_request(), _perception())
+
+    assert [item.memory_id for item in result] == [
+        *(item.memory_id for item in semantic),
+        *(item.memory_id for item in recent[:2]),
+    ]
+
+
+def test_recent_overlap_with_semantic_tail_preserves_semantic_order() -> None:
+    semantic = [_candidate(f"semantic-{index}") for index in range(8)]
+    retriever = _FakeRetriever(semantic, [semantic[7], semantic[6]])
+
+    result = _builder(retriever).build(_request(), _perception())
+
+    assert [item.memory_id for item in result] == [item.memory_id for item in semantic]
+
+
 def test_history_never_exceeds_eight_and_contains_only_same_user_contexts() -> None:
     valid = [_candidate(f"valid-{index}") for index in range(10)]
     semantic = [
