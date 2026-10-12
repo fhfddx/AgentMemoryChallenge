@@ -184,7 +184,12 @@ def test_app_state_exposes_only_nonsensitive_runtime_metadata(
         "embedding_model": "text-embedding-v4",
         "embedding_version": "cycle2-fixed",
         "llm_model": "gpt-4o-mini",
-        "prompt_versions": {"perception": "v1", "temporal": "v1", "curator": "v1"},
+        "prompt_versions": {
+            "perception": "v1",
+            "temporal": "v1",
+            "curator": "v1",
+            "relation_linker": "relation-linker-v1",
+        },
         "fused_empty_history_text": False,
         "evidence_selector_enabled": True,
     }

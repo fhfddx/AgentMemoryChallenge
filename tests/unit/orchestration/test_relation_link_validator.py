@@ -93,7 +93,10 @@ def test_accepts_quotes_after_whitespace_normalization_only() -> None:
 def test_rejects_case_or_character_changed_quote() -> None:
     candidate = _candidate()
     wrong_case = _proposal(candidate.memory_id, current_evidence="the internal codename is Zephyr.")
-    wrong_character = _proposal(candidate.memory_id, target_evidence="The Atlas plan begins next spring.")
+    wrong_character = _proposal(
+        candidate.memory_id,
+        target_evidence="The Atlas plan begins next spring.",
+    )
 
     links = _validate(RelationLinkDecision(links=(wrong_case, wrong_character)), [candidate])
 
