@@ -1,7 +1,6 @@
 """Select only evidence that supports the original Search question."""
 
 import math
-import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -16,7 +15,6 @@ from pydantic import (
 )
 
 from masm.providers.llm import ModelRequest, StructuredLLM, StructuredOutputError
-from masm.retrieval.anchor_connectivity import DEFAULT_ANCHOR_HOPS, AnchorConnectivity
 from masm.retrieval.reranker import RankedEvidence
 from masm.retrieval.selector_pool import (
     DEFAULT_SELECTOR_CANDIDATES,
@@ -40,12 +38,6 @@ EvidenceState = Literal["sufficient", "partial", "insufficient"]
 ReportedEvidenceState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
 _SIGNAL_NAMES = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
-_EXPLICIT_ANCHOR_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])(?:"
-    r"[A-Za-z0-9]+(?:[-_.:/@][A-Za-z0-9]+)+"
-    r"|[A-Za-z]*\d[A-Za-z0-9]*"
-    r")(?![A-Za-z0-9])"
-)
 _PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
     "evidence_state and selected_indices, in that order. Do not answer the question or choose "
@@ -187,42 +179,6 @@ def _usable_indices(indices: Sequence[int], pool_size: int, max_selected: int) -
     )
 
 
-def _evidence_text(evidence: RankedEvidence) -> str:
-    if isinstance(evidence.content, str):
-        return evidence.content
-    return " ".join(
-        part.text for part in evidence.content if isinstance(part, TextPart)
-    )
-
-
-def _anchor_tokens(text: str) -> frozenset[str]:
-    """文本里出现的结构化标识符集合（大小写不敏感）。"""
-    return frozenset(
-        match.group(0).casefold() for match in _EXPLICIT_ANCHOR_PATTERN.finditer(text)
-    )
-
-
-def _covers_explicit_question_anchors(
-    question: str,
-    selected: Sequence[RankedEvidence],
-) -> bool:
-    """整组选中文本的并集是否至少提到了问题的全部显式锚点。
-
-    这是 `sufficient` 路径唯一保留的校验：它不裁剪证据，只拒绝完全没锚定的整组选择。
-    """
-    anchors = _anchor_tokens(question)
-    if not anchors:
-        return True
-    union: frozenset[str] = frozenset()
-    for evidence in selected:
-        union |= _anchor_tokens(_evidence_text(evidence))
-    return anchors <= union
-
-
-def _distinct_source_count(selected: Sequence[RankedEvidence]) -> int:
-    return len({item.request_id or str(item.memory_id) for item in selected})
-
-
 def _is_complete_selection(result: SelectionResult) -> bool:
     """深层重试的结果是否优于首轮 partial：必须是模型确认的完整 selection。"""
     return (
@@ -243,8 +199,6 @@ class EvidenceSelector:
         max_selected: int = MAX_SELECTED_EVIDENCE,
         max_chars_per_candidate: int = DEFAULT_MAX_CHARS_PER_CANDIDATE,
         timeout_seconds: float = 30.0,
-        anchor_connectivity: AnchorConnectivity | None = None,
-        max_anchor_hops: int = DEFAULT_ANCHOR_HOPS,
     ) -> None:
         if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
@@ -254,15 +208,11 @@ class EvidenceSelector:
             raise ValueError("max_chars_per_candidate must be in 1..4096")
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive")
-        if max_anchor_hops < 0:
-            raise ValueError("max_anchor_hops must be nonnegative")
         self._llm = llm
         self._max_candidates = max_candidates
         self._max_selected = max_selected
         self._max_chars_per_candidate = max_chars_per_candidate
         self._timeout_seconds = timeout_seconds
-        self._anchor_connectivity = anchor_connectivity
-        self._max_anchor_hops = max_anchor_hops
 
     def select(
         self,
@@ -393,19 +343,11 @@ class EvidenceSelector:
                     "insufficient",
                 )
             selected_partial = tuple(pool[index] for index in indices)
-            grounded_partial = self._narrow_to_anchor_component(
-                question, selected_partial
-            )
-            if not grounded_partial:
-                return SelectionResult(
-                    (), len(pool), source_count, 0, False, True, "invalid_output",
-                    "insufficient",
-                )
             return SelectionResult(
-                grounded_partial,
+                selected_partial,
                 len(pool),
                 source_count,
-                _distinct_source_count(grounded_partial),
+                len({labels[index] for index in indices}),
                 False,
                 False,
                 "none",
@@ -417,93 +359,16 @@ class EvidenceSelector:
                 ranked, strong_anchor_ids, len(pool), source_count, "invalid_output"
             )
         selected = tuple(pool[index] for index in indices)
-        # sufficient 是模型对「已覆盖全部被询问事实与连接」的断言：这里只拒绝整组完全
-        # 没有锚定问题的选择，绝不裁剪模型声明为完整的集合。
-        if not _covers_explicit_question_anchors(question, selected):
-            return SelectionResult(
-                (), len(pool), source_count, 0, False, True, "invalid_output",
-                "insufficient",
-            )
         return SelectionResult(
             selected,
             len(pool),
             source_count,
-            _distinct_source_count(selected),
+            len({labels[index] for index in indices}),
             False,
             False,
             "none",
             "sufficient",
         )
-
-    def _narrow_to_anchor_component(
-        self,
-        question: str,
-        selected: Sequence[RankedEvidence],
-    ) -> tuple[RankedEvidence, ...]:
-        """把 **partial** 选择裁剪到以问题锚点为根的「允许证据路径」连通分量。
-
-        为什么只对 partial 生效：集合级并集校验只证明「选中文本里出现过锚点」，无法区分
-        「正确锚点证据」与「额外无关链证据」的混合选择；原始云端泄漏正是
-        `state=partial` + 混合选择。而 `sufficient` 路径上的裁剪已经两次被线上证据证伪——
-        c7eede8 的关系接地删掉了多跳合法链（模型输出不变，3 条只返回 1 条），cfe596e 的
-        标识符相邻删掉了 search_path_probe 双来源答案（`indices=[0,1]`、`sufficient`
-        只返回 1/2）。裁剪一个模型断言为完整、且确实覆盖全部事实的集合，是那两次回归的
-        共同根因。
-
-        两条证据只要满足下面任一条件就算相连，然后保留与含锚点证据同分量的部分：
-
-        * **共享显式标识符**：合法下游链靠共享标识符串起来（`Bridge-*`、`Leaf-*`），
-          不要求下游重复 Root 字符串。这一步纯文本，不需要数据库。
-        * **持久化关系边**：注入 ``AnchorConnectivity`` 时，锚点关系闭包内的证据也算相连。
-
-        返回空元组表示整组完全没有锚点接地；没有显式锚点时行为完全不变。
-        """
-        anchors = _anchor_tokens(question)
-        if not anchors:
-            return tuple(selected)
-        item_tokens = [_anchor_tokens(_evidence_text(item)) for item in selected]
-        keep = {
-            index for index, tokens in enumerate(item_tokens) if tokens & anchors
-        }
-        if not keep:
-            return ()
-        while True:
-            linked = frozenset().union(*(item_tokens[index] for index in keep))
-            added = {
-                index for index, tokens in enumerate(item_tokens) if tokens & linked
-            }
-            added |= self._relation_linked_indices(selected, keep)
-            if added <= keep:
-                break
-            keep |= added
-        return tuple(
-            item for index, item in enumerate(selected) if index in keep
-        )
-
-    def _relation_linked_indices(
-        self,
-        selected: Sequence[RankedEvidence],
-        keep: Collection[int],
-    ) -> set[int]:
-        """返回位于「当前保留集合」关系闭包内的选中下标；未接线时为空集。"""
-        if self._anchor_connectivity is None:
-            return set()
-        connectivity = self._anchor_connectivity.connected(
-            selected[0].user_id,
-            [selected[index].memory_id for index in sorted(keep)],
-            [
-                selected[index].request_id
-                for index in sorted(keep)
-                if selected[index].request_id
-            ],
-            self._max_anchor_hops,
-        )
-        return {
-            index
-            for index, item in enumerate(selected)
-            if item.memory_id in connectivity.memory_ids
-            or (bool(item.request_id) and item.request_id in connectivity.request_ids)
-        }
 
     def _fallback(
         self,

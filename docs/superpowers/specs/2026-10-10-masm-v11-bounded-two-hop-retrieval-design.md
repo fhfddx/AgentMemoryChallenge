@@ -249,3 +249,31 @@ The component narrowing therefore applies **only when the model reports `partial
 `sufficient` the selector keeps the selection unchanged and only rejects a set whose union does not
 mention the query anchors at all. The prompt, schema, three-state semantics, fallback anchors, pool
 construction, relation-expansion budgets, and public Add/Search contracts are unchanged.
+
+## Follow-up (2026-10-12): paid rejection and full revert of anchor grounding
+
+The official Smoke on `ca7eed8` rejected the whole line. Against the last completed baseline
+(`84926f6`: total 30.77, retrieval 100, direct recall 100, atomic 100, multi-session 0,
+abstention 11.11) the candidate scored: total **15.38**, retrieval 33.33, direct recall **0.00**,
+atomic 50.00, multi-session **0.00**, abstention 11.11. Every pre-registered criterion failed:
+total below baseline, direct recall collapsed to zero, and multi-session stayed flat — which, per
+this document's own criterion, rejects the bounded two-hop hypothesis at the paid level.
+
+Environment evidence rules out a broken deployment: the API container had `restarts=0`, started
+2026-10-12T02:55:52Z, and its log for the window contained only 108×200, 4×404, 2×405 — zero 5xx.
+The 0.00 was decided by the content of successful responses.
+
+The local reproduction shows the mechanism. For a question whose explicit identifier is rephrased
+by the evidence ("What is the code name of the Atlas-case project?" / "The project is internally
+called Zephyr."), the question anchors are `{atlas-case}` while the evidence has no tokens, so the
+`sufficient` union check fails and the `partial` component narrowing is empty — both paths abstain
+on the exact direct-recall shape that previously scored 100. The free gates never caught this
+because their synthetic evidence always repeats the identifier verbatim.
+
+Anchor grounding was therefore removed entirely: the selector is restored to its pre-`015986a`
+(`d74ad1c`) behaviour, `AnchorConnectivity` and its wiring and tests are deleted, and two paid
+regression cases (rephrased identifier under `partial` and `sufficient`; multi-source `sufficient`
+kept verbatim) now guard the reverted behaviour. The disconnected-chain over-selection that the
+anchor family was built to stop is knowingly re-opened and must be addressed through a different
+line of work — not text anchors. The multi-session bottleneck is likewise re-opened: the flat 0.00
+across paid runs points at the Add-side pipeline rather than the Search-side traversal.

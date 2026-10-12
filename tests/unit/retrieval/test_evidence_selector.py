@@ -1,7 +1,6 @@
 """Structured selection returns original evidence or a safe empty/fallback result."""
 
 import json
-from collections.abc import Sequence
 from typing import Literal
 from uuid import UUID
 
@@ -9,7 +8,6 @@ import pytest
 
 from masm.providers.fakes import FakeStructuredLLM
 from masm.providers.llm import ModelUnavailableError, StructuredOutputError
-from masm.retrieval.anchor_connectivity import AnchorConnectivity
 from masm.retrieval.evidence_selector import (
     DeterministicEvidenceSelector,
     EvidenceSelection,
@@ -17,7 +15,6 @@ from masm.retrieval.evidence_selector import (
 )
 from masm.retrieval.reranker import RankedEvidence
 from masm.schemas.content import ImageURLPart, TextPart
-from masm.storage.types import MemoryCandidate
 
 
 def _evidence(number: int, source: str, content: str) -> RankedEvidence:
@@ -159,358 +156,6 @@ def test_partial_without_usable_indices_abstains_instead_of_falling_back() -> No
     assert result.fallback is False
     assert result.evidence_state == "insufficient"
     assert result.failure_category == "invalid_output"
-
-
-@pytest.mark.parametrize("state", ["partial", "sufficient"])
-def test_selection_without_explicit_question_anchor_abstains(
-    state: Literal["partial", "sufficient"],
-) -> None:
-    """选择结果缺少问题中的显式实体时，不能返回同主题的其他事实。"""
-    llm = FakeStructuredLLM(
-        [{"selected_indices": [0], "evidence_state": state}]
-    )
-    chain_fragment = _evidence(
-        1,
-        "chain",
-        "The terminal record associated with Leaf-case is Terminal-case.",
-    )
-    isolated = _evidence(
-        2,
-        "isolated",
-        "Unconnected-case belongs to a separate archive.",
-    )
-
-    result = EvidenceSelector(llm).select(
-        "What terminal record is linked to Unconnected-case?",
-        None,
-        [chain_fragment, isolated],
-        {chain_fragment.memory_id, isolated.memory_id},
-    )
-
-    assert result.evidence == ()
-    assert result.abstained is True
-    assert result.fallback is False
-    assert result.evidence_state == "insufficient"
-    assert result.failure_category == "invalid_output"
-
-
-def _chain_pool() -> list[RankedEvidence]:
-    """云端探针的四个 run：三条链记录 + 一条同主题但无关系边的隔离记录。"""
-    return [
-        _evidence(
-            1, "run-root", "The registered chain Root-case continues through Bridge-case."
-        ),
-        _evidence(
-            2,
-            "run-bridge",
-            "For the same registered chain, Bridge-case continues through Leaf-case.",
-        ),
-        _evidence(
-            3, "run-leaf", "The terminal record associated with Leaf-case is Terminal-case."
-        ),
-        _evidence(
-            4,
-            "run-isolated",
-            "The isolated catalog entry Unconnected-case uses registered-chain terminology "
-            "but belongs to a separate archive.",
-        ),
-    ]
-
-
-class _ChainGraph:
-    """只含 run-root -> run-bridge -> run-leaf 的假关系图；隔离 run 没有任何边。"""
-
-    _EDGES = {1: 2, 2: 3}
-    _RUNS = {1: "run-root", 2: "run-bridge", 3: "run-leaf", 4: "run-isolated"}
-
-    def __init__(self) -> None:
-        self.related_calls: list[list[UUID]] = []
-        self.context_calls: list[list[str]] = []
-
-    def _context(self, number: int) -> MemoryCandidate:
-        return MemoryCandidate(
-            memory_id=UUID(int=100 + number),
-            user_id="user-1",
-            content="context",
-            score=0.0,
-            request_id=self._RUNS[number],
-        )
-
-    def context_candidates_for_requests(
-        self, user_id: str, request_ids: Sequence[str]
-    ) -> list[MemoryCandidate]:
-        del user_id
-        self.context_calls.append(list(request_ids))
-        return [
-            self._context(number)
-            for number, run in self._RUNS.items()
-            if run in request_ids
-        ]
-
-    def related(
-        self, user_id: str, memory_ids: Sequence[UUID], limit: int
-    ) -> list[MemoryCandidate]:
-        del user_id
-        self.related_calls.append(list(memory_ids))
-        neighbours = [
-            self._context(self._EDGES[memory_id.int - 100])
-            for memory_id in memory_ids
-            if memory_id.int - 100 in self._EDGES
-        ]
-        return neighbours[:limit]
-
-
-class _NoRelations:
-    """关系图为空的假仓库：复现云端「related 找不到任何邻居」的事实。"""
-
-    def __init__(self) -> None:
-        self.context_calls: list[list[str]] = []
-
-    def context_candidates_for_requests(
-        self, user_id: str, request_ids: Sequence[str]
-    ) -> list[MemoryCandidate]:
-        del user_id
-        self.context_calls.append(list(request_ids))
-        return [
-            MemoryCandidate(
-                memory_id=UUID(int=300 + index),
-                user_id="user-1",
-                content="context",
-                score=0.0,
-                request_id=run,
-            )
-            for index, run in enumerate(request_ids)
-        ]
-
-    def related(
-        self, user_id: str, memory_ids: Sequence[UUID], limit: int
-    ) -> list[MemoryCandidate]:
-        del user_id, memory_ids, limit
-        return []
-
-
-class _SingleEdgeGraph:
-    """只有 run-a 的 context 与 run-b 的 context 之间一条边。"""
-
-    def context_candidates_for_requests(
-        self, user_id: str, request_ids: Sequence[str]
-    ) -> list[MemoryCandidate]:
-        return [
-            MemoryCandidate(
-                memory_id=UUID(int=200 + index),
-                user_id=user_id,
-                content="context",
-                score=0.0,
-                request_id=run,
-            )
-            for index, run in enumerate(request_ids)
-        ]
-
-    def related(
-        self, user_id: str, memory_ids: Sequence[UUID], limit: int
-    ) -> list[MemoryCandidate]:
-        del limit
-        if all(memory_id.int != 200 for memory_id in memory_ids):
-            return []
-        return [
-            MemoryCandidate(
-                memory_id=UUID(int=201),
-                user_id=user_id,
-                content="context",
-                score=0.0,
-                request_id="run-b",
-            )
-        ]
-
-
-def _connected_selector(
-    llm: FakeStructuredLLM, connectivity: AnchorConnectivity
-) -> EvidenceSelector:
-    return EvidenceSelector(llm, anchor_connectivity=connectivity)
-
-
-def test_identifier_linked_chain_is_kept_when_the_relation_graph_is_empty() -> None:
-    """云端回归的最小复现：关系图为空时，共享标识符相连的下游链必须整链保留。
-
-    c7eede8 在线上的 round 1 里，模型原始选择与未接线时逐字相同（`[0,1,2]`、sufficient），
-    但接入关系可达性后只返回 1 条（2/4 标记），因为 `related()` 没有找回任何邻居。合法下游
-    证据是靠共享标识符（Bridge-case、Leaf-case）串起来的，不能因为关系图为空就丢弃。
-    """
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "partial"}])
-    pool = _chain_pool()
-
-    result = _connected_selector(llm, AnchorConnectivity(_NoRelations())).select(
-        "Follow the registered chain from Root-case and identify its terminal record.",
-        None,
-        pool,
-        {item.memory_id for item in pool},
-    )
-
-    assert result.evidence == (pool[0], pool[1], pool[2])
-    assert result.evidence_state == "partial"
-    assert result.abstained is False
-
-
-def test_mixed_selection_is_rejected_without_any_relation_oracle() -> None:
-    """标识符连通判定不依赖注入的关系图：未接线时也必须拦住混合过选。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 3], "evidence_state": "partial"}])
-    pool = _chain_pool()
-
-    result = EvidenceSelector(llm).select(
-        "What terminal record is linked to Unconnected-case?",
-        None,
-        pool,
-        {item.memory_id for item in pool},
-    )
-
-    assert result.evidence == (pool[3],)
-    assert result.abstained is False
-
-
-def test_relation_edge_links_selected_evidence_without_shared_identifiers() -> None:
-    """关系边是额外的边来源：两条证据没有共同标识符时仍可按关系连通保留。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "partial"}])
-    anchor = _evidence(1, "run-a", "Root-case is recorded here.")
-    unrelated_wording = _evidence(2, "run-b", "A separate archive note with no shared terms.")
-
-    result = _connected_selector(
-        llm, AnchorConnectivity(_SingleEdgeGraph())
-    ).select(
-        "What does Root-case describe?",
-        None,
-        [anchor, unrelated_wording],
-        {anchor.memory_id, unrelated_wording.memory_id},
-    )
-
-    assert result.evidence == (anchor, unrelated_wording)
-    assert result.evidence_state == "partial"
-
-
-def test_identifier_linked_chain_beyond_the_relation_hops_is_kept() -> None:
-    """链路比关系跳数上限更长时，标识符相邻仍必须让整条链留下。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "partial"}])
-    pool = _chain_pool()
-
-    result = _connected_selector(llm, AnchorConnectivity(_NoRelations())).select(
-        "Follow the registered chain from Root-case and identify its terminal record.",
-        None,
-        pool,
-        {item.memory_id for item in pool},
-    )
-
-    assert result.evidence == (pool[0], pool[1], pool[2])
-
-
-def test_mixed_selection_of_anchor_and_unrelated_chain_evidence_is_rejected() -> None:
-    """云端失败轮的最小复现：锚点证据与无关链证据混合选择时必须剔除无关链。
-
-    第三轮 `multi_session_path_probe` 的 stage_selected 返回 partial、selected_count=2、
-    matched_marker_count=1、forbidden_marker_count=2。整组选中文本的并集确实包含查询锚点
-    `Unconnected-case`（隔离记录自带），所以集合级校验会放行；但另一条选中的链头证据与
-    锚点没有任何关系边，必须不能出现在结果里。
-    """
-    llm = FakeStructuredLLM([{"selected_indices": [0, 3], "evidence_state": "partial"}])
-    pool = _chain_pool()
-    graph = _ChainGraph()
-
-    result = _connected_selector(llm, AnchorConnectivity(graph)).select(
-        "What terminal record is linked to Unconnected-case?",
-        None,
-        pool,
-        {item.memory_id for item in pool},
-    )
-
-    assert result.evidence == (pool[3],)
-    assert result.selected_source_count == 1
-    assert result.abstained is False
-    assert result.fallback is False
-    assert result.evidence_state == "partial"
-
-
-def test_connected_multi_hop_selection_keeps_every_downstream_link() -> None:
-    """合法链的回归护栏：下游证据不重复 Root 字符串，也必须整链保留。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1, 2], "evidence_state": "partial"}])
-    pool = _chain_pool()
-    graph = _ChainGraph()
-
-    result = _connected_selector(llm, AnchorConnectivity(graph)).select(
-        "Follow the registered chain from Root-case and identify its terminal record.",
-        None,
-        pool,
-        {item.memory_id for item in pool},
-    )
-
-    assert result.evidence == (pool[0], pool[1], pool[2])
-    assert result.evidence_state == "partial"
-    assert result.abstained is False
-
-
-def test_sufficient_selection_is_not_narrowed_when_the_model_claims_full_coverage() -> None:
-    """search_path_probe 的 multi_session 回归：sufficient 断言不得被裁剪。
-
-    线上证据：候选池含全部两个事实（`pool_expected=2`），模型返回 `indices=[0,1]`、
-    `state=sufficient`；015986a 的集合级校验返回 2/2，而标识符相邻规则只返回 1/2 并把
-    状态降级为 partial，导致 `search_path_probe` 的 multi_session 免费门槛失败。
-    `sufficient` 是模型对「完整覆盖」的断言，裁剪它等于用文本启发式推翻完整答案。
-    """
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "sufficient"}])
-    anchor = _evidence(
-        1, "run-a", "The Atlas-case migration uses code name Cobalt-case."
-    )
-    review = _evidence(
-        2, "run-b", "The review for that migration is scheduled on November 14, 2026."
-    )
-
-    result = _connected_selector(
-        llm, AnchorConnectivity(_NoRelations())
-    ).select(
-        "What is the Atlas-case migration code name, and when is its review?",
-        None,
-        [anchor, review],
-        {anchor.memory_id, review.memory_id},
-    )
-
-    assert result.evidence == (anchor, review)
-    assert result.evidence_state == "sufficient"
-    assert result.abstained is False
-
-
-def test_unrelated_chain_evidence_alone_still_abstains() -> None:
-    """整组都不含锚点时保持既有拒答行为，且不触发关系读取。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "partial"}])
-    pool = _chain_pool()
-    graph = _ChainGraph()
-
-    result = _connected_selector(llm, AnchorConnectivity(graph)).select(
-        "What terminal record is linked to Unconnected-case?",
-        None,
-        pool,
-        {item.memory_id for item in pool},
-    )
-
-    assert result.evidence == ()
-    assert result.abstained is True
-    assert result.evidence_state == "insufficient"
-    assert graph.related_calls == []
-
-
-def test_selection_without_explicit_anchors_skips_relation_reads() -> None:
-    """自然语言问题没有结构化锚点时不做任何关系读取，也不裁剪任何证据。"""
-    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "partial"}])
-    pool = _chain_pool()
-    graph = _ChainGraph()
-
-    result = _connected_selector(llm, AnchorConnectivity(graph)).select(
-        "Which records belong to the registered chain?",
-        None,
-        pool,
-        {item.memory_id for item in pool},
-    )
-
-    assert result.evidence == (pool[0], pool[1])
-    assert result.evidence_state == "partial"
-    assert graph.related_calls == []
-    assert graph.context_calls == []
 
 
 def test_legacy_two_field_output_is_accepted_and_kept_on_the_safe_side() -> None:
@@ -946,3 +591,47 @@ def test_deterministic_selector_passes_through_existing_local_fake_results() -> 
     assert result.evidence == ranked
     assert result.fallback is False
     assert result.abstained is False
+
+
+@pytest.mark.parametrize("state", ["partial", "sufficient"])
+def test_rephrased_identifier_question_still_returns_the_direct_evidence(
+    state: Literal["partial", "sufficient"],
+) -> None:
+    """付费回归：问题含显式标识符、证据换措辞不逐字重复时，必须返回该直接证据。
+
+    官方 Smoke（ca7eed8）direct_recall 100→0；环境证据（API 全程 200、零 5xx）指向代码侧。
+    锚点接地族（015986a 的并集校验 + 后续的分量裁剪）对这类题整体拒答：sufficient 走并集
+    校验、partial 走分量裁剪，两者都要求证据逐字包含问题标识符。免费门槛没覆盖它，因为
+    探针证据本身逐字含标识符。回退锚点接地后，这类选择必须原样返回。
+    """
+    llm = FakeStructuredLLM([{"selected_indices": [0], "evidence_state": state}])
+    evidence = _evidence(1, "source-a", "The project is internally called Zephyr.")
+
+    result = EvidenceSelector(llm).select(
+        "What is the code name of the Atlas-case project?",
+        None,
+        [evidence],
+        {evidence.memory_id},
+    )
+
+    assert result.evidence == (evidence,)
+    assert result.abstained is False
+
+
+def test_sufficient_multi_source_selection_is_kept_verbatim() -> None:
+    """付费回归护栏：模型报 sufficient 的多来源选择必须整组保留，不做任何裁剪。"""
+    llm = FakeStructuredLLM([{"selected_indices": [0, 1], "evidence_state": "sufficient"}])
+    first = _evidence(1, "run-a", "The Atlas-case migration uses code name Cobalt-case.")
+    second = _evidence(
+        2, "run-b", "The review for that migration is scheduled on November 14, 2026."
+    )
+
+    result = EvidenceSelector(llm).select(
+        "What is the Atlas-case migration code name, and when is its review?",
+        None,
+        [first, second],
+        {first.memory_id, second.memory_id},
+    )
+
+    assert result.evidence == (first, second)
+    assert result.evidence_state == "sufficient"
