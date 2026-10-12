@@ -10,7 +10,13 @@ from masm.storage.repositories import MemoryRepository
 from masm.storage.types import EmbeddingDraft, MemoryBundle, MemoryDraft
 
 # 所有读取接口都必须强制要求 user_id。
-READ_METHODS = ("get_by_request", "lexical_candidates", "vector_candidates", "related")
+READ_METHODS = (
+    "get_by_request",
+    "lexical_candidates",
+    "vector_candidates",
+    "text_embedding_vectors",
+    "related",
+)
 
 
 def _uid(prefix: str) -> str:
@@ -22,6 +28,7 @@ def _bundle(
     user_id: str,
     text: str,
     *,
+    request_id: str | None = None,
     vector: list[float] | None = None,
     modality: str = "text",
     model_name: str = "fake-embedding",
@@ -39,7 +46,7 @@ def _bundle(
         )
     return MemoryBundle(
         session_id=f"session-{user_id}",
-        request_id=f"request-{uuid4().hex}",
+        request_id=request_id or f"request-{uuid4().hex}",
         memories=[
             MemoryDraft(
                 summary=text,
@@ -190,3 +197,75 @@ def test_vector_candidates_ignores_other_users_embeddings(database: Database) ->
     )
     assert all(c.user_id == user_a for c in results)
     assert {c.content for c in results} == {"alpha"}
+
+
+def test_text_embedding_vectors_are_scoped_by_user_model_and_requested_ids(
+    database: Database,
+) -> None:
+    """种子向量读取不能跨用户、模型版本或未请求的 memory_id。"""
+    repo = MemoryRepository(database)
+    user_a = _uid("user-a")
+    user_b = _uid("user-b")
+    repo.add_bundle(
+        user_a,
+        _bundle(user_a, "alpha", vector=[1.0, 0.0, 0.0], model_name="model-a"),
+    )
+    repo.add_bundle(
+        user_a,
+        _bundle(user_a, "wrong version", vector=[0.0, 1.0, 0.0], model_name="model-a",
+                model_version="v2"),
+    )
+    repo.add_bundle(
+        user_b,
+        _bundle(user_b, "other user", vector=[1.0, 0.0, 0.0], model_name="model-a"),
+    )
+    own = repo.vector_candidates(
+        user_a, [1.0, 0.0, 0.0], modality="text", model_name="model-a",
+        model_version="v1", limit=10,
+    )[0]
+    other = repo.vector_candidates(
+        user_b, [1.0, 0.0, 0.0], modality="text", model_name="model-a",
+        model_version="v1", limit=10,
+    )[0]
+
+    vectors = repo.text_embedding_vectors(
+        user_a,
+        [own.memory_id, other.memory_id],
+        model_name="model-a",
+        model_version="v1",
+    )
+
+    assert set(vectors) == {own.memory_id}
+    assert vectors[own.memory_id] == pytest.approx((1.0, 0.0, 0.0))
+
+
+def test_vector_candidates_can_exclude_seed_request_ids(database: Database) -> None:
+    """跨会话扩展必须在 SQL 查询阶段排除所有种子 request_id。"""
+    repo = MemoryRepository(database)
+    user = _uid("user")
+    excluded_request = f"excluded-{uuid4().hex}"
+    included_request = f"included-{uuid4().hex}"
+    repo.add_bundle(
+        user,
+        _bundle(
+            user, "excluded seed", request_id=excluded_request, vector=[1.0, 0.0, 0.0]
+        ),
+    )
+    repo.add_bundle(
+        user,
+        _bundle(
+            user, "included neighbor", request_id=included_request, vector=[0.9, 0.1, 0.0]
+        ),
+    )
+
+    results = repo.vector_candidates(
+        user,
+        [1.0, 0.0, 0.0],
+        modality="text",
+        model_name="fake-embedding",
+        model_version="v1",
+        limit=10,
+        exclude_request_ids=[excluded_request],
+    )
+
+    assert [candidate.request_id for candidate in results] == [included_request]

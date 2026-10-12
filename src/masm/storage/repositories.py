@@ -828,6 +828,7 @@ class MemoryRepository:
         model_version: str,
         limit: int,
         granularity: Literal["context", "message"] | None = None,
+        exclude_request_ids: Sequence[str] = (),
     ) -> list[MemoryCandidate]:
         """向量检索：调用方必须明确目标向量空间（模态 + 模型 + 维度）。
 
@@ -848,6 +849,9 @@ class MemoryRepository:
             ]
             if granularity is not None:
                 filters.append(Memory.granularity == granularity)
+            excluded_requests = [request_id for request_id in exclude_request_ids if request_id]
+            if excluded_requests:
+                filters.append(Memory.request_id.not_in(excluded_requests))
             scored = (
                 select(
                     Memory.id.label("memory_id"),
@@ -913,6 +917,37 @@ class MemoryRepository:
             )
             for row in rows
         ]
+
+    def text_embedding_vectors(
+        self,
+        user_id: str,
+        memory_ids: Sequence[UUID],
+        *,
+        model_name: str,
+        model_version: str,
+    ) -> dict[UUID, tuple[float, ...]]:
+        """读取指定记忆在精确文本向量空间中的向量，始终按用户隔离。"""
+        ids = list(dict.fromkeys(memory_ids))
+        if not ids:
+            return {}
+        with self._database.session() as session:
+            rows = session.execute(
+                select(MemoryEmbedding.memory_id, MemoryEmbedding.vector)
+                .join(Memory, Memory.id == MemoryEmbedding.memory_id)
+                .where(
+                    Memory.user_id == user_id,
+                    MemoryEmbedding.user_id == user_id,
+                    MemoryEmbedding.memory_id.in_(ids),
+                    MemoryEmbedding.modality == "text",
+                    MemoryEmbedding.model_name == model_name,
+                    MemoryEmbedding.model_version == model_version,
+                )
+                .order_by(MemoryEmbedding.memory_id, MemoryEmbedding.id)
+            ).all()
+        return {
+            row.memory_id: tuple(float(value) for value in row.vector)
+            for row in rows
+        }
 
     def related(
         self, user_id: str, memory_ids: Sequence[UUID], limit: int
