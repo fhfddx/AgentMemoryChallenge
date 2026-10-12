@@ -44,6 +44,7 @@ class LinkStageRecorder:
     linker_called: bool = False
     proposal_count: int = 0
     expected_target_proposed: bool = False
+    expected_target_confidence: float | None = None
     expected_target_confidence_passed: bool = False
     expected_target_current_quote_grounded: bool = False
     expected_target_history_quote_grounded: bool = False
@@ -60,6 +61,7 @@ class LinkStageRecorder:
         self.linker_called = False
         self.proposal_count = 0
         self.expected_target_proposed = False
+        self.expected_target_confidence = None
         self.expected_target_confidence_passed = False
         self.expected_target_current_quote_grounded = False
         self.expected_target_history_quote_grounded = False
@@ -102,6 +104,7 @@ class LinkStageRecorder:
             None,
         )
         if expected_proposal is not None:
+            self.expected_target_confidence = expected_proposal.confidence
             self.expected_target_confidence_passed = (
                 expected_proposal.confidence >= MIN_LINK_CONFIDENCE
             )
@@ -137,6 +140,7 @@ class LinkStageRecorder:
             "linker_called": self.linker_called,
             "proposal_count": self.proposal_count,
             "expected_target_proposed": self.expected_target_proposed,
+            "expected_target_confidence": self.expected_target_confidence,
             "expected_target_confidence_passed": (
                 self.expected_target_confidence_passed
             ),

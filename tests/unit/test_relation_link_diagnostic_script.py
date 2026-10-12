@@ -83,6 +83,7 @@ def test_observers_separate_history_proposal_and_validation_stages() -> None:
         "accepted_count": 1,
         "case": "relation_link_stage",
         "expected_target_accepted": True,
+        "expected_target_confidence": 0.95,
         "expected_target_confidence_passed": True,
         "expected_target_current_quote_grounded": True,
         "expected_target_in_history": True,
@@ -133,6 +134,7 @@ def test_diagnostic_row_never_contains_content_or_identifiers() -> None:
     assert '"accepted_count": 0' in serialized
     assert '"expected_target_proposed": true' in serialized
     assert '"expected_target_accepted": false' in serialized
+    assert '"expected_target_confidence": 0.95' in serialized
     assert '"expected_target_confidence_passed": true' in serialized
     assert '"expected_target_current_quote_grounded": false' in serialized
     assert '"expected_target_history_quote_grounded": true' in serialized
