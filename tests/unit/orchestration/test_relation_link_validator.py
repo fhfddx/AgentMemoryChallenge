@@ -65,7 +65,7 @@ def test_accepts_grounded_same_user_context_link_at_frozen_threshold() -> None:
         [candidate],
     )
 
-    assert MIN_LINK_CONFIDENCE == 0.85
+    assert MIN_LINK_CONFIDENCE == 0.80
     assert MAX_LINKS == 4
     assert [(link.target_id, link.relation_type) for link in links] == [
         (candidate.memory_id, "link")
@@ -122,7 +122,7 @@ def test_ignores_low_confidence_duplicate_and_over_cap_proposals() -> None:
     candidates = [_candidate() for _ in range(3)]
     decision = RelationLinkDecision(
         links=(
-            _proposal(candidates[0].memory_id, confidence=0.84),
+            _proposal(candidates[0].memory_id, confidence=0.79),
             _proposal(candidates[1].memory_id),
             _proposal(candidates[1].memory_id),
             _proposal(candidates[2].memory_id),

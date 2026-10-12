@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from masm.schemas.agents import RelationLinkDecision
 from masm.storage.types import MemoryCandidate, RelationDraft, ValidatedActions
 
-MIN_LINK_CONFIDENCE = 0.85
+MIN_LINK_CONFIDENCE = 0.80
 MAX_LINKS = 4
 
 
