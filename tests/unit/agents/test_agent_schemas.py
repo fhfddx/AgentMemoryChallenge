@@ -11,6 +11,8 @@ from masm.schemas.agents import (
     ImageDescription,
     ObservedEvent,
     PerceptionResult,
+    RelationLinkDecision,
+    RelationLinkProposal,
     RelationKind,
     RelationSuggestion,
     TemporalExpression,
@@ -114,6 +116,38 @@ def test_evidence_reference_is_never_rewritten() -> None:
 def test_relation_confidence_out_of_range_is_rejected(confidence: float) -> None:
     with pytest.raises(ValidationError):
         RelationSuggestion(**_relation(confidence=confidence))
+
+
+@pytest.mark.parametrize("field", ["current_evidence", "target_evidence"])
+@pytest.mark.parametrize("evidence", _BLANK_EVIDENCE)
+def test_relation_link_proposal_requires_two_non_blank_evidence_quotes(
+    field: str, evidence: str
+) -> None:
+    payload = {
+        "target_memory_id": uuid4(),
+        "current_evidence": "current fact",
+        "target_evidence": "historical fact",
+        "confidence": 0.9,
+    }
+    payload[field] = evidence
+
+    with pytest.raises(ValidationError):
+        RelationLinkProposal(**payload)
+
+
+def test_relation_link_decision_rejects_more_than_four_links() -> None:
+    proposals = tuple(
+        RelationLinkProposal(
+            target_memory_id=uuid4(),
+            current_evidence="current fact",
+            target_evidence="historical fact",
+            confidence=0.9,
+        )
+        for _ in range(5)
+    )
+
+    with pytest.raises(ValidationError):
+        RelationLinkDecision(links=proposals)
 
 
 def test_extra_fields_are_rejected() -> None:

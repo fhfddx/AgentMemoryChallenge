@@ -137,6 +137,28 @@ class RelationSuggestion(_WithEvidence):
     confidence: Confidence
 
 
+class RelationLinkProposal(_StrictModel):
+    """Non-destructive Add-time link grounded in both source memories."""
+
+    target_memory_id: UUID
+    current_evidence: str = Field(min_length=1, max_length=1000)
+    target_evidence: str = Field(min_length=1, max_length=1000)
+    confidence: Confidence
+
+    @field_validator("current_evidence", "target_evidence")
+    @classmethod
+    def _link_evidence_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("link evidence must not be blank")
+        return value
+
+
+class RelationLinkDecision(_StrictModel):
+    """Bounded relation-linker output for one Add request."""
+
+    links: tuple[RelationLinkProposal, ...] = Field(default=(), max_length=4)
+
+
 class TemporalRelationResult(_StrictModel):
     """时序关系智能体输出：只提出关系建议，不修改存储。"""
 
