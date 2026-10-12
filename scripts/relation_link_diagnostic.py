@@ -10,7 +10,10 @@ from uuid import UUID, uuid4
 
 from masm.api.app import create_app
 from masm.config import RuntimeProfile, Settings
-from masm.orchestration.relation_link_validator import validate_relation_links
+from masm.orchestration.relation_link_validator import (
+    MIN_LINK_CONFIDENCE,
+    validate_relation_links,
+)
 from masm.schemas.agents import PerceptionResult, RelationLinkDecision
 from masm.schemas.api import AddRequest, Message
 from masm.services.deletion_service import DeletionReport, DeletionService
@@ -41,6 +44,9 @@ class LinkStageRecorder:
     linker_called: bool = False
     proposal_count: int = 0
     expected_target_proposed: bool = False
+    expected_target_confidence_passed: bool = False
+    expected_target_current_quote_grounded: bool = False
+    expected_target_history_quote_grounded: bool = False
     accepted_count: int = 0
     expected_target_accepted: bool = False
     failure_category: str | None = None
@@ -54,6 +60,9 @@ class LinkStageRecorder:
         self.linker_called = False
         self.proposal_count = 0
         self.expected_target_proposed = False
+        self.expected_target_confidence_passed = False
+        self.expected_target_current_quote_grounded = False
+        self.expected_target_history_quote_grounded = False
         self.accepted_count = 0
         self.expected_target_accepted = False
         self.failure_category = None
@@ -76,6 +85,37 @@ class LinkStageRecorder:
             proposal.target_memory_id == self._expected_target_id
             for proposal in decision.links
         )
+        expected_proposal = next(
+            (
+                proposal
+                for proposal in decision.links
+                if proposal.target_memory_id == self._expected_target_id
+            ),
+            None,
+        )
+        expected_candidate = next(
+            (
+                candidate
+                for candidate in history
+                if candidate.memory_id == self._expected_target_id
+            ),
+            None,
+        )
+        if expected_proposal is not None:
+            self.expected_target_confidence_passed = (
+                expected_proposal.confidence >= MIN_LINK_CONFIDENCE
+            )
+            current_quote = " ".join(expected_proposal.current_evidence.split())
+            current_text = " ".join(new_memory.original_text.split())
+            self.expected_target_current_quote_grounded = bool(
+                current_quote and current_quote in current_text
+            )
+            if expected_candidate is not None:
+                history_quote = " ".join(expected_proposal.target_evidence.split())
+                history_text = " ".join(expected_candidate.content.split())
+                self.expected_target_history_quote_grounded = bool(
+                    history_quote and history_quote in history_text
+                )
         accepted = validate_relation_links(
             self._user_id,
             decision,
@@ -97,6 +137,15 @@ class LinkStageRecorder:
             "linker_called": self.linker_called,
             "proposal_count": self.proposal_count,
             "expected_target_proposed": self.expected_target_proposed,
+            "expected_target_confidence_passed": (
+                self.expected_target_confidence_passed
+            ),
+            "expected_target_current_quote_grounded": (
+                self.expected_target_current_quote_grounded
+            ),
+            "expected_target_history_quote_grounded": (
+                self.expected_target_history_quote_grounded
+            ),
             "accepted_count": self.accepted_count,
             "expected_target_accepted": self.expected_target_accepted,
             "persisted_adjacency": persisted_adjacency,
