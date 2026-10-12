@@ -23,6 +23,7 @@ from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker
+from masm.retrieval.semantic_expander import SemanticNeighborExpander
 from masm.runtime import build_runtime
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
@@ -59,6 +60,7 @@ def test_local_fake_builds_no_llm_or_advanced_pipeline() -> None:
     assert runtime.add_pipeline is None
     assert runtime.query_analyzer is None
     assert runtime.relation_expander is None
+    assert runtime.semantic_expander is None
     assert runtime.reranker is None
     assert runtime.relevance_gate is None
     assert isinstance(runtime.evidence_selector, DeterministicEvidenceSelector)
@@ -146,6 +148,7 @@ def test_official_baseline_builds_real_embeddings_without_add_pipeline() -> None
     assert runtime.add_pipeline is None
     assert runtime.query_analyzer is None
     assert runtime.relation_expander is None
+    assert runtime.semantic_expander is None
     assert runtime.reranker is None
     assert runtime.relevance_gate is None
     assert runtime.evidence_selector is None
@@ -200,6 +203,10 @@ def test_official_masm_builds_three_agents_and_all_search_components() -> None:
     assert runtime.add_pipeline._curator._llm is llm
     assert isinstance(runtime.query_analyzer, QueryAnalyzer)
     assert isinstance(runtime.relation_expander, RelationExpander)
+    assert isinstance(runtime.semantic_expander, SemanticNeighborExpander)
+    assert runtime.semantic_expander._model_name == "text-embedding-v4"  # noqa: SLF001
+    assert runtime.semantic_expander._model_version == "cycle2-fixed"  # noqa: SLF001
+    assert runtime.semantic_expander._min_similarity == 0.48  # noqa: SLF001
     assert isinstance(runtime.reranker, EvidenceReranker)
     assert isinstance(runtime.relevance_gate, RelevanceGate)
     assert isinstance(runtime.evidence_selector, EvidenceSelector)

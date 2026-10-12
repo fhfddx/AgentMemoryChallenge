@@ -17,6 +17,7 @@ from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker, RankedEvidence
 from masm.retrieval.response_packer import ResponsePacker
+from masm.retrieval.semantic_expander import SemanticNeighborExpander
 from masm.schemas.api import MemoryEvidence, SearchRequest, SearchResponse
 from masm.storage.assets import decode_image_data_url
 from masm.storage.types import MemoryCandidate
@@ -32,6 +33,7 @@ class SearchService:
         max_image_bytes: int,
         analyzer: QueryAnalyzer | None = None,
         expander: RelationExpander | None = None,
+        semantic_expander: SemanticNeighborExpander | None = None,
         reranker: EvidenceReranker | None = None,
         relevance_gate: RelevanceGate | None = None,
         selector: EvidenceSelector | DeterministicEvidenceSelector | None = None,
@@ -43,6 +45,7 @@ class SearchService:
         self._max_image_bytes = max_image_bytes
         self._analyzer = analyzer
         self._expander = expander
+        self._semantic_expander = semantic_expander
         self._reranker = reranker
         self._relevance_gate = relevance_gate
         self._selector = selector
@@ -67,10 +70,16 @@ class SearchService:
         if self._relevance_gate is not None:
             candidates = self._relevance_gate.filter(candidates)
         strong_anchor_ids = {item.memory_id for item in candidates}
+        if self._semantic_expander is not None and candidates:
+            candidates = self._with_semantic_expansion(request.user_id, candidates)
         if self._expander is not None and candidates:
             candidates = self._with_expansion(request.user_id, candidates, top_k)
         candidate_count = len(candidates)
-        if self._expander is not None or self._reranker is not None:
+        if (
+            self._semantic_expander is not None
+            or self._expander is not None
+            or self._reranker is not None
+        ):
             candidates = self._deduplicate(candidates)
         dedup_count = len(candidates)
         ranked = self._rank(parsed, candidates)
@@ -151,6 +160,24 @@ class SearchService:
         else:
             parsed = self.analyze(request)
         return parsed
+
+    def _with_semantic_expansion(
+        self, user_id: str, candidates: Sequence[MemoryCandidate]
+    ) -> list[MemoryCandidate]:
+        assert self._semantic_expander is not None
+        known_ids = {candidate.memory_id for candidate in candidates}
+        expanded = self._semantic_expander.expand(
+            user_id,
+            candidates,
+            known_ids=known_ids,
+        )
+        merged = list(candidates)
+        for candidate in expanded:
+            if candidate.user_id != user_id or candidate.memory_id in known_ids:
+                continue
+            known_ids.add(candidate.memory_id)
+            merged.append(candidate)
+        return merged
 
     def _with_expansion(
         self, user_id: str, candidates: Sequence[MemoryCandidate], top_k: int

@@ -21,6 +21,7 @@ from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker
+from masm.retrieval.semantic_expander import SemanticNeighborExpander
 from masm.storage.repositories import MemoryRepository
 
 
@@ -35,6 +36,7 @@ class RuntimeComponents:
     add_pipeline: AddPipeline | None
     query_analyzer: QueryAnalyzer | None
     relation_expander: RelationExpander | None
+    semantic_expander: SemanticNeighborExpander | None
     reranker: EvidenceReranker | None
     relevance_gate: RelevanceGate | None
     evidence_selector: EvidenceSelector | DeterministicEvidenceSelector | None
@@ -119,6 +121,7 @@ def build_runtime(
     add_pipeline: AddPipeline | None = None
     query_analyzer: QueryAnalyzer | None = None
     relation_expander: RelationExpander | None = None
+    semantic_expander: SemanticNeighborExpander | None = None
     reranker: EvidenceReranker | None = None
     relevance_gate: RelevanceGate | None = None
     evidence_selector: EvidenceSelector | DeterministicEvidenceSelector | None = None
@@ -140,6 +143,12 @@ def build_runtime(
             max_image_bytes=settings.max_image_bytes,
         )
         relation_expander = RelationExpander(repository)
+        semantic_expander = SemanticNeighborExpander(
+            repository,
+            model_name=selected_embeddings.model_name,
+            model_version=selected_embeddings.model_version,
+            min_similarity=settings.min_text_similarity,
+        )
         reranker = EvidenceReranker(provider=LexicalReranker())
         relevance_gate = RelevanceGate(
             min_lexical_rank=settings.min_lexical_rank,
@@ -163,6 +172,7 @@ def build_runtime(
         add_pipeline=add_pipeline,
         query_analyzer=query_analyzer,
         relation_expander=relation_expander,
+        semantic_expander=semantic_expander,
         reranker=reranker,
         relevance_gate=relevance_gate,
         evidence_selector=evidence_selector,

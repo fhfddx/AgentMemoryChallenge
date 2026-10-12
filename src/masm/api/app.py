@@ -94,6 +94,7 @@ def create_app(
         max_image_bytes=settings.max_image_bytes,
         analyzer=runtime.query_analyzer,
         expander=runtime.relation_expander,
+        semantic_expander=runtime.semantic_expander,
         reranker=runtime.reranker,
         relevance_gate=runtime.relevance_gate,
         selector=runtime.evidence_selector,
