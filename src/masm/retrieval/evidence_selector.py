@@ -23,7 +23,7 @@ from masm.retrieval.selector_pool import (
 )
 from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 
-PROMPT_VERSION = "evidence-selector-v8"
+PROMPT_VERSION = "evidence-selector-v9"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
 MAX_CHARS_PER_CANDIDATE = 4096
@@ -52,6 +52,13 @@ _PROMPT = (
     "distinct source_group values. Multiple representations from one source_group do not "
     "establish cross-source coverage. For a relational or temporal question the selected "
     "memories must also directly state every link needed to connect them; never invent a bridge. "
+    "Trace an explicit path from the subject referred to by the question to the requested value; "
+    "identify the same subject by meaning or an explicit alias or context, without requiring a "
+    "verbatim identifier match, and require every relation hop to be stated in candidate text. "
+    "A complete path for another subject does not support the question subject unless candidate "
+    "text explicitly connects the two subjects. Ranking and signal fields are retrieval hints, "
+    "not proof, and never replace candidate text. A statement that a value is missing or unknown "
+    "does not create a bridge to a value stated for another subject. "
     "Prefer original observations over duplicate summaries and omit unrelated facts. Name the "
     "requested fact that a selected memory states before choosing partial or sufficient; if no "
     "selected memory states one, choose insufficient. When the question asks for a concrete "
