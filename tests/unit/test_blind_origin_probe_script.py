@@ -17,6 +17,7 @@ def test_blind_origin_probe_separates_extraction_from_question_comparison() -> N
             {"origin_labels": ["Dossier-A", "Sapphire file"]}, {"matches": True},
             {"origin_labels": ["Atlas project"]}, {"matches": True},
             {"origin_labels": ["I", "speaker"]}, {"matches": True},
+            {"origin_labels": ["I", "speaker"]}, {"matches": True},
         ]
     )
     output = StringIO()
@@ -31,14 +32,15 @@ def test_blind_origin_probe_separates_extraction_from_question_comparison() -> N
         "alias_chain",
         "direct_two_attributes",
         "paraphrased_direct",
+        "paraphrased_multi_source",
         "summary",
     ]
     assert [row["matches"] for row in rows[:-1]] == [
-        False, True, True, True, True
+        False, True, True, True, True, True
     ]
-    assert rows[-1]["passed_count"] == 5
+    assert rows[-1]["passed_count"] == 6
     assert all(row["passed"] is True for row in rows)
-    assert len(llm.requests) == 10
+    assert len(llm.requests) == 12
     for extraction, comparison in zip(llm.requests[::2], llm.requests[1::2], strict=True):
         assert "question" not in extraction.payload
         assert "selected_evidence" in extraction.payload

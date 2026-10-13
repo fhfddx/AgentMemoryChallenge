@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import TextIO
 
 from pydantic import BaseModel, ConfigDict, StrictBool
-from scripts.selected_evidence_audit_probe import _cases
+from scripts.selected_evidence_audit_probe import _Case, _cases
 
 from masm.config import RuntimeProfile, Settings
 from masm.providers.llm import (
@@ -61,11 +61,22 @@ _CASE_NAMES = frozenset(
         "paraphrased_direct",
     }
 )
+_PARAPHRASED_MULTI_SOURCE = _Case(
+    "paraphrased_multi_source",
+    "Which city hosts the workshop the speaker signed up for?",
+    (
+        "I signed up for the Zephyr workshop.",
+        "The Zephyr workshop is held in Lisbon.",
+    ),
+    True,
+)
 
 
 def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
     """Report case-level booleans; never emit evidence or extracted names."""
-    cases = tuple(case for case in _cases() if case.name in _CASE_NAMES)
+    cases = tuple(case for case in _cases() if case.name in _CASE_NAMES) + (
+        _PARAPHRASED_MULTI_SOURCE,
+    )
     passed_count = 0
     provider_logger = logging.getLogger("masm.provider")
     was_disabled = provider_logger.disabled
