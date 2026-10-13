@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import sys
 from collections.abc import Sequence
 from typing import TextIO
@@ -97,6 +98,16 @@ def validate_claims(extraction: ClaimExtraction, sources: Sequence[str]) -> tupl
     if not 1 <= len(claims) <= MAX_CLAIMS:
         raise ValueError("invalid claim count")
     for claim in claims:
+        if not all(
+            value.strip()
+            for value in (
+                claim.quote,
+                claim.subject_mention,
+                claim.relation_mention,
+                claim.object_mention,
+            )
+        ):
+            raise ValueError("blank quote or mention")
         if not 0 <= claim.source_index < len(sources):
             raise ValueError("source index out of range")
         if claim.quote not in sources[claim.source_index]:
@@ -121,6 +132,12 @@ def validate_claims(extraction: ClaimExtraction, sources: Sequence[str]) -> tupl
             "ours",
         }:
             raise ValueError("speaker flag lacks first-person subject")
+        if claim.subject_is_speaker and re.search(
+            rf"(?<!\w){re.escape(claim.subject_mention)}(?!\w)",
+            claim.quote,
+            flags=re.IGNORECASE,
+        ) is None:
+            raise ValueError("first-person mention is not standalone")
     return claims
 
 

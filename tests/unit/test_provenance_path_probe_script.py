@@ -68,6 +68,45 @@ def test_rejects_speaker_flag_without_first_person_subject() -> None:
         validate_claims(ClaimExtraction(claims=(_claim(1, subject_is_speaker=True),)), _SOURCES)
 
 
+def test_rejects_whitespace_only_quote_and_mentions() -> None:
+    with pytest.raises(ValueError):
+        validate_claims(
+            ClaimExtraction(
+                claims=(
+                    _claim(
+                        0,
+                        quote=" ",
+                        subject_mention=" ",
+                        relation_mention=" ",
+                        object_mention=" ",
+                        subject_is_speaker=False,
+                    ),
+                )
+            ),
+            _SOURCES,
+        )
+
+
+def test_rejects_incidental_i_inside_another_word_as_speaker() -> None:
+    source = "Isolated dossier is archived."
+    with pytest.raises(ValueError):
+        validate_claims(
+            ClaimExtraction(
+                claims=(
+                    _claim(
+                        0,
+                        quote=source,
+                        subject_mention="I",
+                        relation_mention="is archived",
+                        object_mention="archived",
+                        subject_is_speaker=True,
+                    ),
+                )
+            ),
+            (source,),
+        )
+
+
 @pytest.mark.parametrize("indices", [(), (0, 0), (0, 2), (-1,)])
 def test_rejects_unsupported_or_invalid_judgment_paths(indices: tuple[int, ...]) -> None:
     decision = PathJudgement(
