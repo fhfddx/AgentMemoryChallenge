@@ -207,6 +207,22 @@ def _is_complete_selection(result: SelectionResult) -> bool:
     )
 
 
+def _finalize_selection(result: SelectionResult) -> SelectionResult:
+    """Expose evidence only after the model declares the requested answer complete."""
+    if result.evidence_state != "partial":
+        return result
+    return SelectionResult(
+        (),
+        result.candidate_count,
+        result.source_count,
+        0,
+        result.fallback,
+        True,
+        result.failure_category,
+        "partial",
+    )
+
+
 class EvidenceSelector:
     """Bound one model request and validate its evidence-only response."""
 
@@ -256,15 +272,15 @@ class EvidenceSelector:
         )
         extended_pool = self._deeper_pool(result, pool, ranked)
         if extended_pool is None:
-            return result
+            return _finalize_selection(result)
         extended = self._select_pool(
             question, visual, options, ranked, strong_anchor_ids, extended_pool
         )
         if result.evidence_state == "partial":
-            # 深层重试只能改进结果：首轮的 partial 是安全证据，只有深层给出完整
-            # selection 时才允许替换它，否则必须原样保留首轮结果。
-            return extended if _is_complete_selection(extended) else result
-        return extended
+            # partial 仍可触发深池重试，但只有完整 selection 才能向 Search 暴露证据。
+            chosen = extended if _is_complete_selection(extended) else result
+            return _finalize_selection(chosen)
+        return _finalize_selection(extended)
 
     def _deeper_pool(
         self,

@@ -188,9 +188,9 @@ def test_selector_diagnostics_record_the_partial_evidence_state(caplog) -> None:
             SearchRequest(query="private-query", user_id="private-user", top_k=10)
         )
 
-    assert len(response.data) == 1
+    assert len(response.data) == 0
     payload = _captured(caplog)
     assert payload["selector_evidence_state"] == "partial"
-    assert payload["selector_abstained"] is False
+    assert payload["selector_abstained"] is True
     assert payload["selector_fallback"] is False
     assert "private-content" not in caplog.text
