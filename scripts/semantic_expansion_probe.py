@@ -4,14 +4,20 @@ import argparse
 import json
 import sys
 from collections.abc import Callable, Sequence
-from typing import Any, Protocol, TextIO
+from typing import Any, Protocol, TextIO, cast
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
 
 from masm.config import RuntimeProfile, Settings
+from masm.retrieval.evidence_selector import SelectionResult
+from masm.retrieval.reranker import RankedEvidence
+from masm.retrieval.selector_pool import build_selector_pool
+from masm.runtime import RuntimeComponents, build_runtime
+from masm.schemas.api import SearchRequest
 from masm.services.deletion_service import DeletionReport, DeletionService
+from masm.services.search_service import SearchService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 from masm.storage.repositories import MemoryRepository
@@ -42,6 +48,89 @@ class _Repository(Protocol):
 
 
 DeleteRun = Callable[..., DeletionReport]
+PoolDiagnostic = Callable[[str, str, dict[str, str]], dict[str, Any]]
+
+_SAFE_SIGNAL_NAMES = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
+_MISSING_PHRASES = (
+    "not been documented",
+    "not documented",
+    "unknown",
+    "unavailable",
+    "cannot be determined",
+)
+
+
+class _PoolCaptureSelector:
+    """Capture only non-content selector-pool features for deployment diagnosis."""
+
+    def __init__(self, markers: dict[str, str], *, max_candidates: int) -> None:
+        self._markers = markers
+        self._max_candidates = max_candidates
+        self.snapshot: dict[str, Any] = {
+            "candidate_count": 0,
+            "source_count": 0,
+            "candidates": [],
+        }
+
+    def select(
+        self,
+        query: str | Sequence[Any],
+        options: Sequence[str] | None,
+        ranked: Sequence[RankedEvidence],
+        strong_anchor_ids: set[Any],
+    ) -> SelectionResult:
+        del query, options
+        pool = build_selector_pool(ranked, max_candidates=self._max_candidates)
+        source_ordinals: dict[str, int] = {}
+        features: list[dict[str, Any]] = []
+        for item in pool:
+            source_key = item.request_id or str(item.memory_id)
+            source_ordinals.setdefault(source_key, len(source_ordinals) + 1)
+            text = (
+                item.content
+                if isinstance(item.content, str)
+                else " ".join(
+                    str(getattr(part, "text", "")) for part in item.content
+                )
+            )
+            lowered = text.casefold()
+            features.append(
+                {
+                    "source_ordinal": source_ordinals[source_key],
+                    "rank": item.rank,
+                    "granularity": item.granularity,
+                    "is_strong_anchor": item.memory_id in strong_anchor_ids,
+                    "contains_question_subject": self._markers[
+                        "question_subject"
+                    ].casefold()
+                    in lowered,
+                    "contains_other_subject": self._markers["other_subject"].casefold()
+                    in lowered,
+                    "contains_relay": self._markers["relay"].casefold() in lowered,
+                    "contains_terminal": self._markers["terminal"].casefold() in lowered,
+                    "contains_missing_statement": any(
+                        phrase in lowered for phrase in _MISSING_PHRASES
+                    ),
+                    "signal_names": sorted(
+                        name for name in item.metadata if name in _SAFE_SIGNAL_NAMES
+                    ),
+                }
+            )
+        self.snapshot = {
+            "candidate_count": len(pool),
+            "source_count": len(source_ordinals),
+            "candidates": features,
+        }
+        return SelectionResult(
+            (),
+            len(pool),
+            len(source_ordinals),
+            0,
+            False,
+            True,
+            "none",
+            "insufficient",
+        )
 
 
 def _post(client: _Client, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -79,6 +168,7 @@ def run_probe(
     output: TextIO,
     *,
     run_tag: str,
+    pool_diagnostic: PoolDiagnostic | None = None,
 ) -> int:
     """Exercise a crowded semantic chain and an isolated abstention boundary."""
     user_id = f"semantic-expansion-probe-{run_tag}"
@@ -153,6 +243,22 @@ def run_probe(
             },
         )
 
+        isolated_query = (
+            f"Which compartment do records for {isolated} ultimately reach?"
+        )
+        if pool_diagnostic is not None:
+            snapshot = pool_diagnostic(
+                user_id,
+                isolated_query,
+                {
+                    "question_subject": isolated,
+                    "other_subject": dossier,
+                    "relay": relay,
+                    "terminal": terminal,
+                },
+            )
+            _print_row(output, {"case": "selector_pool", **snapshot})
+
         searches = (
             (
                 "connected_semantic_chain",
@@ -162,7 +268,7 @@ def run_probe(
             ),
             (
                 "isolated_abstention",
-                f"Which compartment do records for {isolated} ultimately reach?",
+                isolated_query,
                 (),
                 (terminal,),
             ),
@@ -289,6 +395,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run semantic expansion diagnostics")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument("--pool-diagnostic", action="store_true")
     args = parser.parse_args([] if argv is None else argv)
     try:
         settings = Settings.from_env()
@@ -314,10 +421,37 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     database: Database | None = None
+    runtime: RuntimeComponents | None = None
     try:
         database = Database.create(settings.database_url)
         repository = MemoryRepository(database)
         deletion = DeletionService(repository, AssetStore(settings.asset_dir))
+        pool_diagnostic: PoolDiagnostic | None = None
+        if args.pool_diagnostic:
+            runtime = build_runtime(settings, repository)
+
+            def capture_pool(
+                user_id: str, query: str, markers: dict[str, str]
+            ) -> dict[str, Any]:
+                selector = _PoolCaptureSelector(
+                    markers,
+                    max_candidates=settings.selector_max_candidates,
+                )
+                service = SearchService(
+                    runtime.retriever,
+                    max_image_bytes=settings.max_image_bytes,
+                    analyzer=runtime.query_analyzer,
+                    expander=runtime.relation_expander,
+                    semantic_expander=runtime.semantic_expander,
+                    reranker=runtime.reranker,
+                    relevance_gate=runtime.relevance_gate,
+                    selector=cast(Any, selector),
+                    runtime_profile=settings.runtime_profile.value,
+                )
+                service.search(SearchRequest(query=query, user_id=user_id, top_k=3))
+                return selector.snapshot
+
+            pool_diagnostic = capture_pool
         with httpx.Client(
             base_url=base_url,
             headers={"X-Api-Key": settings.api_keys[0]},
@@ -329,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
                 deletion.delete_run,
                 sys.stdout,
                 run_tag=uuid4().hex[:12],
+                pool_diagnostic=pool_diagnostic,
             )
     except Exception:
         _print_row(
@@ -341,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     finally:
+        if runtime is not None:
+            runtime.close()
         if database is not None:
             database.engine.dispose()
 

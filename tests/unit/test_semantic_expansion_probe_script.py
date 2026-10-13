@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from io import StringIO
 from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
 
+from masm.retrieval.reranker import RankedEvidence
 from masm.services.deletion_service import DeletionReport
 
 
@@ -189,3 +191,124 @@ def test_probe_rejects_isolated_leak_and_prints_only_safe_aggregates() -> None:
     assert backend.runs == {}
     assert all(set(row).issubset(allowed) for row in rows)
     assert "private-marker" not in output.getvalue()
+
+
+def test_pool_capture_reports_roles_and_signals_without_candidate_text() -> None:
+    probe = importlib.import_module("scripts.semantic_expansion_probe")
+    markers = {
+        "question_subject": "Isolated-secret",
+        "other_subject": "Dossier-secret",
+        "relay": "Relay-secret",
+        "terminal": "Compartment-secret",
+    }
+    selector = probe._PoolCaptureSelector(markers, max_candidates=32)
+    ranked = (
+        RankedEvidence(
+            memory_id=UUID(int=1),
+            user_id="probe-user",
+            content=(
+                "Isolated-secret is independent and its destination has not been documented."
+            ),
+            score=1.0,
+            rank=1,
+            metadata={"lexical": 0.75, "ignored": 10.0},
+            granularity="context",
+            request_id="request-a",
+        ),
+        RankedEvidence(
+            memory_id=UUID(int=2),
+            user_id="probe-user",
+            content="Dossier-secret follows Relay-secret to Compartment-secret.",
+            score=0.9,
+            rank=2,
+            metadata={"text_vector": 0.88},
+            granularity="message",
+            request_id="request-b",
+        ),
+    )
+
+    result = selector.select(
+        "Where does Isolated-secret go?",
+        None,
+        ranked,
+        {ranked[0].memory_id},
+    )
+
+    snapshot = selector.snapshot
+    serialized = json.dumps(snapshot, sort_keys=True)
+    assert result.abstained is True
+    assert snapshot["candidate_count"] == 2
+    assert snapshot["source_count"] == 2
+    assert snapshot["candidates"] == [
+        {
+            "contains_missing_statement": True,
+            "contains_other_subject": False,
+            "contains_question_subject": True,
+            "contains_relay": False,
+            "contains_terminal": False,
+            "granularity": "context",
+            "is_strong_anchor": True,
+            "rank": 1,
+            "signal_names": ["lexical"],
+            "source_ordinal": 1,
+        },
+        {
+            "contains_missing_statement": False,
+            "contains_other_subject": True,
+            "contains_question_subject": False,
+            "contains_relay": True,
+            "contains_terminal": True,
+            "granularity": "message",
+            "is_strong_anchor": False,
+            "rank": 2,
+            "signal_names": ["text_vector"],
+            "source_ordinal": 2,
+        },
+    ]
+    assert all(marker not in serialized for marker in markers.values())
+
+
+def test_probe_can_emit_a_safe_selector_pool_snapshot() -> None:
+    probe = importlib.import_module("scripts.semantic_expansion_probe")
+    backend = _Backend(run_tag="pool123")
+    output = StringIO()
+
+    def capture(
+        user_id: str, query: str, markers: dict[str, str]
+    ) -> dict[str, Any]:
+        assert user_id == "semantic-expansion-probe-pool123"
+        assert markers["question_subject"] in query
+        return {
+            "candidate_count": 1,
+            "source_count": 1,
+            "candidates": [
+                {
+                    "source_ordinal": 1,
+                    "rank": 1,
+                    "granularity": "message",
+                    "is_strong_anchor": True,
+                    "contains_question_subject": True,
+                    "contains_other_subject": False,
+                    "contains_relay": False,
+                    "contains_terminal": False,
+                    "contains_missing_statement": True,
+                    "signal_names": ["lexical"],
+                }
+            ],
+        }
+
+    exit_code = probe.run_probe(
+        backend,
+        backend,
+        backend.delete_run,
+        output,
+        run_tag="pool123",
+        pool_diagnostic=capture,
+    )
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    snapshot = next(row for row in rows if row["case"] == "selector_pool")
+    assert exit_code == 0
+    assert snapshot["candidate_count"] == 1
+    assert snapshot["candidates"][0]["contains_missing_statement"] is True
+    assert "pool123" not in json.dumps(snapshot, sort_keys=True)
