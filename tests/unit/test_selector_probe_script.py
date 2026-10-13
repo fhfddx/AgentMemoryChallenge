@@ -133,7 +133,11 @@ def test_missing_only_probe_reports_missing_value_abstention_boundary() -> None:
     assert len(
         {row["source_group"] for row in llm.requests[0].payload["candidates"]}
     ) == 8
-    assert "not been documented" in llm.requests[0].payload["candidates"][0]["text"]
+    candidates = llm.requests[0].payload["candidates"]
+    assert "not been documented" in candidates[0]["text"]
+    assert "Relay-Cobalt" in candidates[1]["text"]
+    assert "compartment Ember" in candidates[7]["text"]
+    assert all(set(candidate["signals"]) == {"text_vector"} for candidate in candidates)
 
 
 def test_crowded_only_probe_retries_deep_complete_evidence_with_48_candidates() -> None:

@@ -75,24 +75,20 @@ def run_probe(
             ),
             score=1.0,
             rank=1,
+            metadata={"text_vector": 0.92},
             granularity="message",
             request_id="synthetic-source-5",
         ),
         RankedEvidence(
-            memory_id=UUID(int=6),
-            user_id="synthetic-selector-probe",
-            content="Records routed by Relay-Cobalt arrive at compartment Ember.",
-            score=0.9,
-            rank=2,
-            granularity="message",
-            request_id="synthetic-source-6",
-        ),
-        RankedEvidence(
             memory_id=UUID(int=7),
             user_id="synthetic-selector-probe",
-            content="Records for Dossier-A use transfer phrase Relay-Cobalt.",
-            score=0.8,
-            rank=3,
+            content=(
+                "Records for Dossier-A are assigned to the transfer phrase Relay-Cobalt. "
+                "That phrase is the only routing link for this dossier."
+            ),
+            score=0.9,
+            rank=2,
+            metadata={"text_vector": 0.88},
             granularity="message",
             request_id="synthetic-source-7",
         ),
@@ -105,12 +101,26 @@ def run_probe(
                     "filing and archive routing, but records neither a transfer phrase "
                     "nor a destination."
                 ),
-                score=0.7 - index * 0.05,
-                rank=4 + index,
+                score=0.8 - index * 0.05,
+                rank=3 + index,
+                metadata={"text_vector": 0.84 - index * 0.04},
                 granularity="message",
                 request_id=f"synthetic-source-{8 + index}",
             )
             for index in range(5)
+        ),
+        RankedEvidence(
+            memory_id=UUID(int=6),
+            user_id="synthetic-selector-probe",
+            content=(
+                "Every record routed by the transfer phrase Relay-Cobalt ultimately "
+                "arrives at compartment Ember."
+            ),
+            score=0.55,
+            rank=8,
+            metadata={"text_vector": 0.64},
+            granularity="message",
+            request_id="synthetic-source-6",
         ),
     )
     crowded_ranked = (
