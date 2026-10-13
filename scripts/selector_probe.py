@@ -81,23 +81,36 @@ def run_probe(
         RankedEvidence(
             memory_id=UUID(int=6),
             user_id="synthetic-selector-probe",
-            content=(
-                "The Isolated dossier is an independent registry entry. "
-                "Its destination compartment has not been documented."
-            ),
+            content="Records routed by Relay-Cobalt arrive at compartment Ember.",
             score=0.9,
             rank=2,
-            granularity="context",
-            request_id="synthetic-source-5",
+            granularity="message",
+            request_id="synthetic-source-6",
         ),
         RankedEvidence(
             memory_id=UUID(int=7),
             user_id="synthetic-selector-probe",
-            content="Records routed by the Relay phrase arrive at compartment Ember.",
+            content="Records for Dossier-A use transfer phrase Relay-Cobalt.",
             score=0.8,
             rank=3,
             granularity="message",
-            request_id="synthetic-source-6",
+            request_id="synthetic-source-7",
+        ),
+        *(
+            RankedEvidence(
+                memory_id=UUID(int=8 + index),
+                user_id="synthetic-selector-probe",
+                content=(
+                    f"Administrative note {index + 1} for Dossier-A discusses record "
+                    "filing and archive routing, but records neither a transfer phrase "
+                    "nor a destination."
+                ),
+                score=0.7 - index * 0.05,
+                rank=4 + index,
+                granularity="message",
+                request_id=f"synthetic-source-{8 + index}",
+            )
+            for index in range(5)
         ),
     )
     crowded_ranked = (

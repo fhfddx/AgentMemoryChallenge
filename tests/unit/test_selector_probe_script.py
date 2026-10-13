@@ -124,10 +124,15 @@ def test_missing_only_probe_reports_missing_value_abstention_boundary() -> None:
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert exit_code == 0
     assert [row["case"] for row in rows] == ["missing_value_abstention"]
+    assert rows[0]["candidate_source_count"] == 8
     assert rows[0]["evidence_state"] == "insufficient"
     assert rows[0]["abstained"] is True
     assert rows[0]["fallback"] is False
     assert "Which compartment" in llm.requests[0].payload["question"]
+    assert len(llm.requests[0].payload["candidates"]) == 8
+    assert len(
+        {row["source_group"] for row in llm.requests[0].payload["candidates"]}
+    ) == 8
     assert "not been documented" in llm.requests[0].payload["candidates"][0]["text"]
 
 
