@@ -20,6 +20,7 @@ def run_probe(
     *,
     extended_only: bool = False,
     crowded_only: bool = False,
+    missing_only: bool = False,
 ) -> int:
     """Check direct, abstention, option-overlap, and multi-source boundaries."""
     known_id, distractor_id = UUID(int=1), UUID(int=2)
@@ -62,6 +63,41 @@ def run_probe(
             rank=2,
             granularity="message",
             request_id="synthetic-source-4",
+        ),
+    )
+    missing_value_ranked = (
+        RankedEvidence(
+            memory_id=UUID(int=5),
+            user_id="synthetic-selector-probe",
+            content=(
+                "The Isolated dossier is an independent registry entry. "
+                "Its destination compartment has not been documented."
+            ),
+            score=1.0,
+            rank=1,
+            granularity="message",
+            request_id="synthetic-source-5",
+        ),
+        RankedEvidence(
+            memory_id=UUID(int=6),
+            user_id="synthetic-selector-probe",
+            content=(
+                "The Isolated dossier is an independent registry entry. "
+                "Its destination compartment has not been documented."
+            ),
+            score=0.9,
+            rank=2,
+            granularity="context",
+            request_id="synthetic-source-5",
+        ),
+        RankedEvidence(
+            memory_id=UUID(int=7),
+            user_id="synthetic-selector-probe",
+            content="Records routed by the Relay phrase arrive at compartment Ember.",
+            score=0.8,
+            rank=3,
+            granularity="message",
+            request_id="synthetic-source-6",
         ),
     )
     crowded_ranked = (
@@ -221,7 +257,29 @@ def run_probe(
             "sufficient",
         ),
     )
-    if crowded_only:
+    missing_checks: tuple[
+        tuple[
+            str,
+            str,
+            list[str] | None,
+            tuple[RankedEvidence, ...],
+            set[UUID],
+            str,
+        ],
+        ...,
+    ] = (
+        (
+            "missing_value_abstention",
+            "Which compartment do records for the Isolated dossier ultimately reach?",
+            None,
+            missing_value_ranked,
+            set(),
+            "insufficient",
+        ),
+    )
+    if missing_only:
+        checks = missing_checks
+    elif crowded_only:
         checks = crowded_checks
     elif extended_only:
         checks = checks[2:]
@@ -292,6 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--extended-only", action="store_true")
     mode.add_argument("--crowded-only", action="store_true")
+    mode.add_argument("--missing-only", action="store_true")
     args = parser.parse_args([] if argv is None else argv)
     try:
         settings = Settings.from_env()
@@ -320,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout,
                 extended_only=args.extended_only,
                 crowded_only=args.crowded_only,
+                missing_only=args.missing_only,
             )
         finally:
             close = getattr(llm, "close", None)

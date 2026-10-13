@@ -107,6 +107,30 @@ def test_extended_only_probe_makes_exactly_two_new_model_calls() -> None:
     assert len(llm.requests) == 2
 
 
+def test_missing_only_probe_reports_missing_value_abstention_boundary() -> None:
+    probe = importlib.import_module("scripts.selector_probe")
+    llm = FakeStructuredLLM(
+        [{"selected_indices": [], "evidence_state": "insufficient"}]
+    )
+    output = StringIO()
+
+    exit_code = probe.run_probe(
+        llm,
+        Settings(database_url=""),
+        output,
+        missing_only=True,
+    )
+
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert exit_code == 0
+    assert [row["case"] for row in rows] == ["missing_value_abstention"]
+    assert rows[0]["evidence_state"] == "insufficient"
+    assert rows[0]["abstained"] is True
+    assert rows[0]["fallback"] is False
+    assert "Which compartment" in llm.requests[0].payload["question"]
+    assert "not been documented" in llm.requests[0].payload["candidates"][0]["text"]
+
+
 def test_crowded_only_probe_retries_deep_complete_evidence_with_48_candidates() -> None:
     probe = importlib.import_module("scripts.selector_probe")
     llm = FakeStructuredLLM(
