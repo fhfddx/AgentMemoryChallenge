@@ -51,7 +51,7 @@ def test_direct_fact_selection_returns_the_original_evidence_object() -> None:
     assert result.abstained is False
     assert len(llm.requests) == 1
     assert llm.requests[0].max_attempts == 1
-    assert llm.requests[0].prompt_version == "evidence-selector-v7"
+    assert llm.requests[0].prompt_version == "evidence-selector-v8"
     assert llm.requests[0].payload["question"] == "What did Alice buy?"
     assert llm.requests[0].payload["options"] == ["Notebook", "Paris"]
 
@@ -202,7 +202,7 @@ def test_selector_requests_deterministic_three_state_decision() -> None:
 
     request = llm.requests[0]
     assert request.temperature == 0.0
-    assert request.prompt_version == "evidence-selector-v7"
+    assert request.prompt_version == "evidence-selector-v8"
     assert "smallest set of memories" in request.prompt
     assert "every attribute, relation, value, or event asked for" in request.prompt
     assert "distinct source_group" in request.prompt
@@ -223,11 +223,33 @@ def test_selector_prompt_requires_naming_a_stated_requested_fact() -> None:
     EvidenceSelector(llm).select("fact", None, [candidate], {candidate.memory_id})
 
     request = llm.requests[0]
-    assert request.prompt_version == "evidence-selector-v7"
+    assert request.prompt_version == "evidence-selector-v8"
     assert "Name the requested fact" in request.prompt
     assert "Never report partial merely because" in request.prompt
     assert "does not state the attribute the question asks for" in request.prompt
     assert "every link needed to connect them" in request.prompt
+
+
+def test_selector_prompt_rejects_missing_values_except_for_meta_questions() -> None:
+    """v8 契约：没有记录答案值，不等于直接陈述了答案值。"""
+    llm = FakeStructuredLLM([{"selected_indices": [], "evidence_state": "insufficient"}])
+    candidate = _evidence(
+        1,
+        "source-a",
+        "The destination compartment has not been documented.",
+    )
+
+    EvidenceSelector(llm).select(
+        "Which compartment is the destination?",
+        None,
+        [candidate],
+        {candidate.memory_id},
+    )
+
+    request = llm.requests[0]
+    assert request.prompt_version == "evidence-selector-v8"
+    assert "does not state that value" in request.prompt
+    assert "unless the question itself asks whether" in request.prompt
 
 
 def test_selection_schema_asks_for_the_state_before_the_indices() -> None:
@@ -252,7 +274,7 @@ def test_selection_schema_asks_for_the_state_before_the_indices() -> None:
     EvidenceSelector(llm).select("fact", None, [candidate], {candidate.memory_id})
 
     request = llm.requests[0]
-    assert request.prompt_version == "evidence-selector-v7"
+    assert request.prompt_version == "evidence-selector-v8"
     assert "Decide evidence_state before you choose selected_indices" in request.prompt
 
 

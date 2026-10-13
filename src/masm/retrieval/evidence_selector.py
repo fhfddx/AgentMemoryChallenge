@@ -23,7 +23,7 @@ from masm.retrieval.selector_pool import (
 )
 from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 
-PROMPT_VERSION = "evidence-selector-v7"
+PROMPT_VERSION = "evidence-selector-v8"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
 MAX_CHARS_PER_CANDIDATE = 4096
@@ -54,7 +54,12 @@ _PROMPT = (
     "memories must also directly state every link needed to connect them; never invent a bridge. "
     "Prefer original observations over duplicate summaries and omit unrelated facts. Name the "
     "requested fact that a selected memory states before choosing partial or sufficient; if no "
-    "selected memory states one, choose insufficient. Report evidence_state=sufficient when the "
+    "selected memory states one, choose insufficient. When the question asks for a concrete "
+    "value, attribute, relation, event, or destination, a statement that it is unknown, missing, "
+    "unavailable, not documented, or cannot be determined does not state that value and must not "
+    "be selected; choose insufficient if that is all the candidates provide. Such a statement "
+    "does not count as direct evidence unless the question itself asks whether the value is known, "
+    "recorded, available, missing, or undetermined. Report evidence_state=sufficient when the "
     "selected memories state every requested fact and every link needed to connect them. Report "
     "evidence_state=partial when at least one selected memory directly states a requested fact "
     "but at least one other requested fact or needed link is absent; then still return those "
