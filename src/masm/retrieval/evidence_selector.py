@@ -23,7 +23,7 @@ from masm.retrieval.selector_pool import (
 )
 from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 
-PROMPT_VERSION = "evidence-selector-v9"
+PROMPT_VERSION = "evidence-selector-v10"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
 MAX_CHARS_PER_CANDIDATE = 4096
@@ -37,7 +37,6 @@ EvidenceState = Literal["sufficient", "partial", "insufficient"]
 # 遥测只记录该枚举；"unknown" 表示没有可归因的模型判断（未调用或调用失败）。
 ReportedEvidenceState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
-_SIGNAL_NAMES = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
 _PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
     "evidence_state and selected_indices, in that order. Do not answer the question or choose "
@@ -56,8 +55,8 @@ _PROMPT = (
     "identify the same subject by meaning or an explicit alias or context, without requiring a "
     "verbatim identifier match, and require every relation hop to be stated in candidate text. "
     "A complete path for another subject does not support the question subject unless candidate "
-    "text explicitly connects the two subjects. Ranking and signal fields are retrieval hints, "
-    "not proof, and never replace candidate text. A statement that a value is missing or unknown "
+    "text explicitly connects the two subjects. Candidate order reflects retrieval priority, "
+    "not proof, and never replaces candidate text. A statement that a value is missing or unknown "
     "does not create a bridge to a value stated for another subject. "
     "Prefer original observations over duplicate summaries and omit unrelated facts. Name the "
     "requested fact that a selected memory states before choosing partial or sufficient; if no "
@@ -171,14 +170,6 @@ def _source_labels(pool: Sequence[RankedEvidence]) -> list[str]:
             by_request[key] = f"source-{len(by_request) + 1}"
         labels.append(by_request[key])
     return labels
-
-
-def _signal_payload(evidence: RankedEvidence) -> dict[str, float]:
-    return {
-        name: round(float(value), 4)
-        for name, value in evidence.metadata.items()
-        if name in _SIGNAL_NAMES and math.isfinite(float(value))
-    }
 
 
 def _usable_indices(indices: Sequence[int], pool_size: int, max_selected: int) -> bool:
@@ -307,7 +298,6 @@ class EvidenceSelector:
                             part.text for part in item.content if isinstance(part, TextPart)
                         )[: self._max_chars_per_candidate]
                     ),
-                    "signals": _signal_payload(item),
                 }
                 for index, item in enumerate(pool)
             ],
