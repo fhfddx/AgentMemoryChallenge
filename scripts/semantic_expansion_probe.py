@@ -63,9 +63,16 @@ _MISSING_PHRASES = (
 class _PoolCaptureSelector:
     """Capture only non-content selector-pool features for deployment diagnosis."""
 
-    def __init__(self, markers: dict[str, str], *, max_candidates: int) -> None:
+    def __init__(
+        self,
+        markers: dict[str, str],
+        *,
+        max_candidates: int,
+        delegate: Any | None = None,
+    ) -> None:
         self._markers = markers
         self._max_candidates = max_candidates
+        self._delegate = delegate
         self.snapshot: dict[str, Any] = {
             "candidate_count": 0,
             "source_count": 0,
@@ -79,7 +86,6 @@ class _PoolCaptureSelector:
         ranked: Sequence[RankedEvidence],
         strong_anchor_ids: set[Any],
     ) -> SelectionResult:
-        del query, options
         pool = build_selector_pool(ranked, max_candidates=self._max_candidates)
         source_ordinals: dict[str, int] = {}
         features: list[dict[str, Any]] = []
@@ -121,6 +127,25 @@ class _PoolCaptureSelector:
             "source_count": len(source_ordinals),
             "candidates": features,
         }
+        if self._delegate is not None:
+            result: SelectionResult = self._delegate.select(
+                query, options, ranked, strong_anchor_ids
+            )
+            selected_objects = {id(item) for item in result.evidence}
+            selected_indices = [
+                index for index, item in enumerate(pool) if id(item) in selected_objects
+            ]
+            self.snapshot["selection"] = {
+                "state": result.evidence_state,
+                "abstained": result.abstained,
+                "fallback": result.fallback,
+                "selected_count": len(result.evidence),
+                "selected_candidate_indices": selected_indices,
+                "selected_source_ordinals": sorted(
+                    {features[index]["source_ordinal"] for index in selected_indices}
+                ),
+            }
+            return result
         return SelectionResult(
             (),
             len(pool),
@@ -396,6 +421,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--timeout", type=float, default=240.0)
     parser.add_argument("--pool-diagnostic", action="store_true")
+    parser.add_argument("--selection-diagnostic", action="store_true")
     args = parser.parse_args([] if argv is None else argv)
     try:
         settings = Settings.from_env()
@@ -427,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
         repository = MemoryRepository(database)
         deletion = DeletionService(repository, AssetStore(settings.asset_dir))
         pool_diagnostic: PoolDiagnostic | None = None
-        if args.pool_diagnostic:
+        if args.pool_diagnostic or args.selection_diagnostic:
             runtime = build_runtime(settings, repository)
 
             def capture_pool(
@@ -436,6 +462,9 @@ def main(argv: list[str] | None = None) -> int:
                 selector = _PoolCaptureSelector(
                     markers,
                     max_candidates=settings.selector_max_candidates,
+                    delegate=(
+                        runtime.evidence_selector if args.selection_diagnostic else None
+                    ),
                 )
                 service = SearchService(
                     runtime.retriever,

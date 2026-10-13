@@ -268,6 +268,72 @@ def test_pool_capture_reports_roles_and_signals_without_candidate_text() -> None
     assert all(marker not in serialized for marker in markers.values())
 
 
+def test_pool_capture_can_report_selected_roles_without_content() -> None:
+    probe = importlib.import_module("scripts.semantic_expansion_probe")
+    markers = {
+        "question_subject": "Isolated-secret",
+        "other_subject": "Dossier-secret",
+        "relay": "Relay-secret",
+        "terminal": "Compartment-secret",
+    }
+    ranked = (
+        RankedEvidence(
+            memory_id=UUID(int=1),
+            user_id="probe-user",
+            content="Isolated-secret destination is not documented.",
+            score=1.0,
+            rank=1,
+            granularity="message",
+            request_id="request-a",
+        ),
+        RankedEvidence(
+            memory_id=UUID(int=2),
+            user_id="probe-user",
+            content="Dossier-secret uses Relay-secret.",
+            score=0.9,
+            rank=2,
+            granularity="message",
+            request_id="request-b",
+        ),
+        RankedEvidence(
+            memory_id=UUID(int=3),
+            user_id="probe-user",
+            content="Relay-secret arrives at Compartment-secret.",
+            score=0.8,
+            rank=3,
+            granularity="message",
+            request_id="request-c",
+        ),
+    )
+    selected = probe.SelectionResult(
+        ranked[1:], 3, 3, 2, False, False, "none", "sufficient"
+    )
+
+    class Delegate:
+        def select(self, query: Any, options: Any, candidates: Any, anchors: Any) -> Any:
+            assert candidates is ranked
+            return selected
+
+    selector = probe._PoolCaptureSelector(
+        markers, max_candidates=32, delegate=Delegate()
+    )
+    result = selector.select(
+        "Where does Isolated-secret go?", None, ranked, {ranked[0].memory_id}
+    )
+
+    snapshot = selector.snapshot
+    assert result is selected
+    assert snapshot["selection"] == {
+        "state": "sufficient",
+        "abstained": False,
+        "fallback": False,
+        "selected_count": 2,
+        "selected_candidate_indices": [1, 2],
+        "selected_source_ordinals": [2, 3],
+    }
+    assert all(marker not in json.dumps(snapshot) for marker in markers.values())
+
+
 def test_probe_can_emit_a_safe_selector_pool_snapshot() -> None:
     probe = importlib.import_module("scripts.semantic_expansion_probe")
     backend = _Backend(run_tag="pool123")
