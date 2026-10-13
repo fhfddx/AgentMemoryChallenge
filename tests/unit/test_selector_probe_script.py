@@ -137,7 +137,7 @@ def test_missing_only_probe_reports_missing_value_abstention_boundary() -> None:
     assert "not been documented" in candidates[0]["text"]
     assert "Relay-Cobalt" in candidates[1]["text"]
     assert "compartment Ember" in candidates[7]["text"]
-    assert all("signals" not in candidate for candidate in candidates)
+    assert all(set(candidate["signals"]) == {"text_vector"} for candidate in candidates)
 
 
 def test_crowded_only_probe_retries_deep_complete_evidence_with_48_candidates() -> None:

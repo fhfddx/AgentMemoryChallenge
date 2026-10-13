@@ -23,7 +23,7 @@ from masm.retrieval.selector_pool import (
 )
 from masm.schemas.content import ContentPart, ImageURLPart, TextPart
 
-PROMPT_VERSION = "evidence-selector-v10"
+PROMPT_VERSION = "evidence-selector-v11"
 MAX_SELECTED_EVIDENCE = 12
 DEFAULT_MAX_CHARS_PER_CANDIDATE = 1200
 MAX_CHARS_PER_CANDIDATE = 4096
@@ -37,6 +37,7 @@ EvidenceState = Literal["sufficient", "partial", "insufficient"]
 # 遥测只记录该枚举；"unknown" 表示没有可归因的模型判断（未调用或调用失败）。
 ReportedEvidenceState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
+_SIGNAL_NAMES = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
 _PROMPT = (
     "You select supporting memories for the original question. Return JSON with only "
     "evidence_state and selected_indices, in that order. Do not answer the question or choose "
@@ -65,7 +66,14 @@ _PROMPT = (
     "unavailable, not documented, or cannot be determined does not state that value and must not "
     "be selected; choose insufficient if that is all the candidates provide. Such a statement "
     "does not count as direct evidence unless the question itself asks whether the value is known, "
-    "recorded, available, missing, or undetermined. Report evidence_state=sufficient when the "
+    "recorded, available, missing, or undetermined. "
+    "Disconnected example: the question asks where Subject A ends; candidates say Subject A's "
+    "destination is not recorded, Subject B uses Route R, and Route R ends at Vault V. Choose "
+    "insufficient with selected_indices=[] because no candidate links Subject A to Route R or "
+    "Vault V. Connected contrast: candidates say Subject A uses Route R and Route R ends at Vault "
+    "V. Those two candidates form a sufficient path, even when the same subject is expressed by "
+    "a clear alias or paraphrase rather than a verbatim identifier. Report "
+    "evidence_state=sufficient when the "
     "selected memories state every requested fact and every link needed to connect them. Report "
     "evidence_state=partial when at least one selected memory directly states a requested fact "
     "but at least one other requested fact or needed link is absent; then still return those "
@@ -170,6 +178,14 @@ def _source_labels(pool: Sequence[RankedEvidence]) -> list[str]:
             by_request[key] = f"source-{len(by_request) + 1}"
         labels.append(by_request[key])
     return labels
+
+
+def _signal_payload(evidence: RankedEvidence) -> dict[str, float]:
+    return {
+        name: round(float(value), 4)
+        for name, value in evidence.metadata.items()
+        if name in _SIGNAL_NAMES and math.isfinite(float(value))
+    }
 
 
 def _usable_indices(indices: Sequence[int], pool_size: int, max_selected: int) -> bool:
@@ -298,6 +314,7 @@ class EvidenceSelector:
                             part.text for part in item.content if isinstance(part, TextPart)
                         )[: self._max_chars_per_candidate]
                     ),
+                    "signals": _signal_payload(item),
                 }
                 for index, item in enumerate(pool)
             ],

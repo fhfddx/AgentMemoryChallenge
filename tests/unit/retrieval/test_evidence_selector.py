@@ -51,12 +51,12 @@ def test_direct_fact_selection_returns_the_original_evidence_object() -> None:
     assert result.abstained is False
     assert len(llm.requests) == 1
     assert llm.requests[0].max_attempts == 1
-    assert llm.requests[0].prompt_version == "evidence-selector-v10"
+    assert llm.requests[0].prompt_version == "evidence-selector-v11"
     assert llm.requests[0].payload["question"] == "What did Alice buy?"
     assert llm.requests[0].payload["options"] == ["Notebook", "Paris"]
 
 
-def test_selector_payload_omits_retrieval_signals_that_are_not_evidence() -> None:
+def test_selector_payload_keeps_retrieval_signals_as_non_evidentiary_hints() -> None:
     llm = FakeStructuredLLM([{"selected_indices": [], "evidence_state": "insufficient"}])
     candidate = _evidence(1, "source-a", "The destination has not been documented.")
 
@@ -68,7 +68,7 @@ def test_selector_payload_omits_retrieval_signals_that_are_not_evidence() -> Non
     )
 
     payload_candidate = llm.requests[0].payload["candidates"][0]
-    assert "signals" not in payload_candidate
+    assert payload_candidate["signals"] == {"lexical": 0.05}
 
 
 def test_insufficient_decision_without_indices_abstains_without_fallback() -> None:
@@ -217,7 +217,7 @@ def test_selector_requests_deterministic_three_state_decision() -> None:
 
     request = llm.requests[0]
     assert request.temperature == 0.0
-    assert request.prompt_version == "evidence-selector-v10"
+    assert request.prompt_version == "evidence-selector-v11"
     assert "smallest set of memories" in request.prompt
     assert "every attribute, relation, value, or event asked for" in request.prompt
     assert "distinct source_group" in request.prompt
@@ -238,7 +238,7 @@ def test_selector_prompt_requires_naming_a_stated_requested_fact() -> None:
     EvidenceSelector(llm).select("fact", None, [candidate], {candidate.memory_id})
 
     request = llm.requests[0]
-    assert request.prompt_version == "evidence-selector-v10"
+    assert request.prompt_version == "evidence-selector-v11"
     assert "Name the requested fact" in request.prompt
     assert "Never report partial merely because" in request.prompt
     assert "does not state the attribute the question asks for" in request.prompt
@@ -262,7 +262,7 @@ def test_selector_prompt_rejects_missing_values_except_for_meta_questions() -> N
     )
 
     request = llm.requests[0]
-    assert request.prompt_version == "evidence-selector-v10"
+    assert request.prompt_version == "evidence-selector-v11"
     assert "does not state that value" in request.prompt
     assert "unless the question itself asks whether" in request.prompt
 
@@ -284,13 +284,34 @@ def test_selector_prompt_requires_subject_bound_paths_and_ignores_ranking_as_pro
     )
 
     request = llm.requests[0]
-    assert request.prompt_version == "evidence-selector-v10"
+    assert request.prompt_version == "evidence-selector-v11"
     assert "subject referred to by the question" in request.prompt
     assert "without requiring a verbatim identifier match" in request.prompt
     assert "another subject" in request.prompt
     assert "Candidate order reflects retrieval priority" in request.prompt
     assert "not proof" in request.prompt
     assert "does not create a bridge" in request.prompt
+
+
+def test_selector_prompt_contrasts_disconnected_and_connected_paths() -> None:
+    """v11 契约：用抽象正反例固定跨主体关系链边界。"""
+    llm = FakeStructuredLLM([{"selected_indices": [], "evidence_state": "insufficient"}])
+    candidate = _evidence(1, "source-a", "Subject A has no recorded destination.")
+
+    EvidenceSelector(llm).select(
+        "Where does Subject A end?",
+        None,
+        [candidate],
+        {candidate.memory_id},
+    )
+
+    request = llm.requests[0]
+    assert request.prompt_version == "evidence-selector-v11"
+    assert "Disconnected example" in request.prompt
+    assert "Subject A's destination is not recorded" in request.prompt
+    assert "no candidate links Subject A to Route R" in request.prompt
+    assert "Connected contrast" in request.prompt
+    assert "Subject A uses Route R" in request.prompt
 
 
 def test_selection_schema_asks_for_the_state_before_the_indices() -> None:
@@ -315,7 +336,7 @@ def test_selection_schema_asks_for_the_state_before_the_indices() -> None:
     EvidenceSelector(llm).select("fact", None, [candidate], {candidate.memory_id})
 
     request = llm.requests[0]
-    assert request.prompt_version == "evidence-selector-v10"
+    assert request.prompt_version == "evidence-selector-v11"
     assert "Decide evidence_state before you choose selected_indices" in request.prompt
 
 
