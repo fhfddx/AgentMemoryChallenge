@@ -66,3 +66,25 @@ SourceMessage 存有 role、timestamp 和 position，但 repository 的 snapshot
 本机主改动全量：806 passed、1 skipped（Windows 的 POSIX 权限测试），92 条已有
 依赖弃用告警。随后新增日志摘要工具另行验证。Ruff 和 mypy 已验证主改动。
 真实 Provider 对照、服务器端到端验证、官方得分仍待执行。此文件不是上线许可结论。
+
+## 完整性审计 spike（不进入生产路径）
+
+首轮真实 Provider 对照得到 candidate 9/10、regressions 0，但
+`cross_source_context` 仍只选中一个来源并把局部证据判为 sufficient。因此
+`b18b429` 不具备部署资格，也不通过重复调用挑选偶然成功结果。
+
+`scripts/completeness_repair_probe.py` 在同一组固定合成案例上一次性比较三种结果：
+
+1. `current`：现有 source-context selector 的原始决定；
+2. `audit_only`：仅当候选池有多个来源、但 sufficient 结果只用了一个来源时，
+   用独立结构化调用审核“已选证据自身是否完整”；审核不完整即拒答；
+3. `repair`：审核不完整后，允许对完整候选池执行一次且仅一次修复选择。
+
+审计只返回 `evidence_complete` 布尔值，不生成答案或自由文本。审计或修复的
+Provider/Schema 失败均作为失败处理，不 fallback，不输出错误详情。脚本仅访问内存
+合成资料，不读取数据库、线上日志或官方评测内容，也不改变生产 selector。
+
+预先固定的首次运行门槛为：10/10 全部通过、相对 current 无回归、repair 严格优于
+current、`cross_source_context` 必须选择恰好两个来源、全程无 Provider/Schema 失败。
+首次不达标即停止该方案，不追加轮次。只有首次达标，才允许设计独立的生产实现；
+本 spike 自身无论结果如何都不是部署候选或官方分数证明。
