@@ -92,11 +92,19 @@ class PathJudgement(BaseModel):
     used_claim_indices: tuple[StrictInt, ...]
 
 
+class DiagnosticValidationError(ValueError):
+    """Content-safe local validation failure with a fixed reason code."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 def validate_claims(extraction: ClaimExtraction, sources: Sequence[str]) -> tuple[Claim, ...]:
     """Reject invented source references, quotes, or subject/relation/object mentions."""
     claims = extraction.claims
     if not 1 <= len(claims) <= MAX_CLAIMS:
-        raise ValueError("invalid claim count")
+        raise DiagnosticValidationError("invalid_claim_count")
     for claim in claims:
         if not all(
             value.strip()
@@ -107,11 +115,11 @@ def validate_claims(extraction: ClaimExtraction, sources: Sequence[str]) -> tupl
                 claim.object_mention,
             )
         ):
-            raise ValueError("blank quote or mention")
+            raise DiagnosticValidationError("blank_quote_or_mention")
         if not 0 <= claim.source_index < len(sources):
-            raise ValueError("source index out of range")
+            raise DiagnosticValidationError("source_index_out_of_range")
         if claim.quote not in sources[claim.source_index]:
-            raise ValueError("quote not in source")
+            raise DiagnosticValidationError("quote_not_in_source")
         if any(
             mention not in claim.quote
             for mention in (
@@ -120,7 +128,7 @@ def validate_claims(extraction: ClaimExtraction, sources: Sequence[str]) -> tupl
                 claim.object_mention,
             )
         ):
-            raise ValueError("mention not in quote")
+            raise DiagnosticValidationError("mention_not_in_quote")
         if claim.subject_is_speaker and claim.subject_mention.casefold().strip() not in {
             "i",
             "me",
@@ -131,13 +139,13 @@ def validate_claims(extraction: ClaimExtraction, sources: Sequence[str]) -> tupl
             "our",
             "ours",
         }:
-            raise ValueError("speaker flag lacks first-person subject")
+            raise DiagnosticValidationError("speaker_flag_without_pronoun")
         if claim.subject_is_speaker and re.search(
             rf"(?<!\w){re.escape(claim.subject_mention)}(?!\w)",
             claim.quote,
             flags=re.IGNORECASE,
         ) is None:
-            raise ValueError("first-person mention is not standalone")
+            raise DiagnosticValidationError("speaker_pronoun_not_standalone")
     return claims
 
 
@@ -164,6 +172,7 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
     provider_logger.disabled = True
     try:
         for case in cases:
+            failure_stage = "extraction"
             try:
                 extraction = llm.complete_json(
                     ModelRequest(
@@ -182,7 +191,9 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
                     ),
                     ClaimExtraction,
                 )
+                failure_stage = "validation"
                 claims = validate_claims(extraction, case.selected_evidence)
+                failure_stage = "judgment"
                 decision = llm.complete_json(
                     ModelRequest(
                         prompt=_JUDGE_PROMPT,
@@ -203,14 +214,14 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
                     len(indices) != len(set(indices))
                     or any(not 0 <= index < len(claims) for index in indices)
                 ):
-                    raise ValueError("invalid claim path")
+                    raise DiagnosticValidationError("invalid_claim_path")
                 if (
                     decision.question_subject_supported
                     and decision.all_required_links_supported
                     and decision.requested_value_supported
                     and not indices
                 ):
-                    raise ValueError("supported path lacks indices")
+                    raise DiagnosticValidationError("supported_path_without_indices")
                 supported = judgement_supported(decision, len(claims))
                 passed = supported is case.expected_supported
                 passed_count += passed
@@ -225,16 +236,28 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
                     "failure_category": "none",
                 }
             except Exception as exc:
+                invalid_output = isinstance(
+                    exc,
+                    (
+                        StructuredOutputError,
+                        ValidationError,
+                        DiagnosticValidationError,
+                        ValueError,
+                        TypeError,
+                    ),
+                )
                 row = {
                     "case": case.name,
                     "supported": False,
                     "passed": False,
-                    "failure_category": (
-                        "invalid_output"
-                        if isinstance(
-                            exc, (StructuredOutputError, ValidationError, ValueError, TypeError)
-                        )
-                        else "unavailable"
+                    "failure_category": "invalid_output" if invalid_output else "unavailable",
+                    "failure_stage": failure_stage,
+                    "failure_reason": (
+                        exc.reason
+                        if isinstance(exc, DiagnosticValidationError)
+                        else "schema"
+                        if invalid_output
+                        else "provider"
                     ),
                 }
             print(json.dumps(row, sort_keys=True), file=output)

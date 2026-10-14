@@ -332,6 +332,10 @@ def test_probe_sanitizes_invalid_quote_and_provider_error() -> None:
     rows = [json.loads(line) for line in output.getvalue().splitlines()]
     assert result == 1
     assert rows[0]["failure_category"] == "invalid_output"
+    assert rows[0]["failure_stage"] == "validation"
+    assert rows[0]["failure_reason"] == "quote_not_in_source"
     assert rows[1]["failure_category"] == "unavailable"
+    assert rows[1]["failure_stage"] == "extraction"
+    assert rows[1]["failure_reason"] == "provider"
     assert "Private" not in output.getvalue()
     assert "private model response" not in output.getvalue()
