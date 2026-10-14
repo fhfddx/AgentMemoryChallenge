@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import replace
 from typing import TextIO
 from uuid import UUID
 
@@ -20,6 +21,7 @@ def run_probe(
     *,
     extended_only: bool = False,
     crowded_only: bool = False,
+    partial_only: bool = False,
 ) -> int:
     """Check direct, abstention, option-overlap, and multi-source boundaries."""
     known_id, distractor_id = UUID(int=1), UUID(int=2)
@@ -221,11 +223,30 @@ def run_probe(
             "sufficient",
         ),
     )
-    if crowded_only:
+    if partial_only:
+        incomplete = (multi_source_ranked[0], direct_ranked[1])
+        undocumented = (replace(
+            multi_source_ranked[0],
+            content="The Atlas project's review date has not been documented.",
+        ), direct_ranked[1])
+        checks = (
+            ("known_attribute", "What is the code name of the Atlas project?",
+             None, incomplete, {project_id}, "sufficient"),
+            ("missing_attribute",
+             "What are the code name and review date of the Atlas project?",
+             None, incomplete, set(), "incomplete"),
+            ("complete_attributes",
+             "What are the code name and review date of the Atlas project?",
+             None, multi_source_ranked, {project_id, review_id}, "sufficient"),
+            ("undocumented_value", "What is the review date of the Atlas project?",
+             None, undocumented, set(), "incomplete"),
+        )
+    elif crowded_only:
         checks = crowded_checks
     elif extended_only:
         checks = checks[2:]
     all_passed = True
+    partial_observed = False
     provider_logger = logging.getLogger("masm.provider")
     was_disabled = provider_logger.disabled
     provider_logger.disabled = True
@@ -238,11 +259,19 @@ def run_probe(
                 {item.memory_id for item in ranked},
             )
             selected_ids = {item.memory_id for item in result.evidence}
+            if not expected_ids and result.evidence_state == "partial":
+                partial_observed = True
+            state_matches = (
+                result.evidence_state in {"partial", "insufficient"}
+                if expected_state == "incomplete"
+                else result.evidence_state == expected_state
+            )
             passed = (
                 selected_ids == expected_ids
                 and not result.fallback
                 and result.abstained == (not expected_ids)
-                and result.evidence_state == expected_state
+                and state_matches
+                and (not partial_only or result.failure_category == "none")
             )
             all_passed &= passed
             print(
@@ -264,6 +293,14 @@ def run_probe(
             )
     finally:
         provider_logger.disabled = was_disabled
+    if partial_only:
+        cases_passed = all_passed
+        all_passed &= partial_observed
+        print(json.dumps({
+            "case": "partial_summary", "case_count": len(checks),
+            "cases_passed": cases_passed, "partial_observed": partial_observed,
+            "passed": all_passed,
+        }, sort_keys=True), file=output)
     return 0 if all_passed else 1
 
 
@@ -292,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--extended-only", action="store_true")
     mode.add_argument("--crowded-only", action="store_true")
+    mode.add_argument("--partial-only", action="store_true")
     args = parser.parse_args([] if argv is None else argv)
     try:
         settings = Settings.from_env()
@@ -320,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout,
                 extended_only=args.extended_only,
                 crowded_only=args.crowded_only,
+                partial_only=args.partial_only,
             )
         finally:
             close = getattr(llm, "close", None)

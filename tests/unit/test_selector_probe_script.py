@@ -10,10 +10,76 @@ from io import StringIO
 from pathlib import Path
 
 import httpx
+import pytest
 
 from masm.config import Settings
 from masm.providers.fakes import FakeStructuredLLM
 from masm.providers.llm import OpenAICompatibleLLM
+
+
+@pytest.mark.parametrize(
+    ("negative", "expected_exit", "coverage"),
+    [
+        ({"evidence_state": "partial", "selected_indices": [0]}, 0, True),
+        ({"evidence_state": "insufficient", "selected_indices": []}, 1, False),
+        ({"evidence_state": "sufficient", "selected_indices": [0]}, 1, False),
+        ({"evidence_state": "insufficient", "selected_indices": [0]}, 1, False),
+        (TimeoutError("private-response"), 1, False),
+    ],
+)
+def test_partial_probe_requires_abstention_and_observed_partial(
+    negative, expected_exit, coverage
+) -> None:
+    probe = importlib.import_module("scripts.selector_probe")
+    llm = FakeStructuredLLM([
+        {"evidence_state": "sufficient", "selected_indices": [0]},
+        negative,
+        {"evidence_state": "sufficient", "selected_indices": [0, 1]},
+        {"evidence_state": "insufficient", "selected_indices": []},
+    ])
+    output = StringIO()
+    result = probe.run_probe(llm, Settings(database_url=""), output, partial_only=True)
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert result == expected_exit
+    assert [r["case"] for r in rows] == [
+        "known_attribute", "missing_attribute", "complete_attributes",
+        "undocumented_value", "partial_summary",
+    ]
+    assert rows[-1]["partial_observed"] is coverage
+    assert rows[-1]["passed"] is (expected_exit == 0)
+    assert rows[0]["selected_count"] == 1
+    assert rows[2]["selected_count"] == 2
+    assert rows[3]["selected_count"] == 0
+    if coverage:
+        assert rows[1]["abstained"] is True
+        assert rows[1]["selected_count"] == 0
+        assert rows[1]["selected_source_count"] == 0
+    assert llm.requests[0].payload["candidates"] == llm.requests[1].payload["candidates"]
+    assert llm.requests[1].payload["question"] == llm.requests[2].payload["question"]
+    assert "private-response" not in output.getvalue()
+    assert "Zephyr" not in output.getvalue()
+
+
+@pytest.mark.parametrize("positive_index", [0, 2])
+def test_partial_probe_fails_when_complete_evidence_is_withheld(positive_index) -> None:
+    probe = importlib.import_module("scripts.selector_probe")
+    responses = [
+        {"evidence_state": "sufficient", "selected_indices": [0]},
+        {"evidence_state": "partial", "selected_indices": [0]},
+        {"evidence_state": "sufficient", "selected_indices": [0, 1]},
+        {"evidence_state": "insufficient", "selected_indices": []},
+    ]
+    responses[positive_index] = {"evidence_state": "partial", "selected_indices": [0]}
+    output = StringIO()
+    result = probe.run_probe(
+        FakeStructuredLLM(responses), Settings(database_url=""), output, partial_only=True
+    )
+    rows = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert result == 1
+    assert rows[positive_index]["passed"] is False
+    assert rows[-1]["cases_passed"] is False
+    assert rows[-1]["partial_observed"] is True
+    assert rows[-1]["passed"] is False
 
 
 def test_probe_reports_all_four_selection_boundaries() -> None:
