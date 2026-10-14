@@ -22,12 +22,16 @@ _SOURCES = (
 )
 
 
-def test_accepts_claims_with_only_exact_quote_provenance() -> None:
+def test_accepts_claims_with_exact_quote_and_subject_provenance() -> None:
     extraction = ClaimExtraction.model_validate(
         {
             "claims": [
-                {"source_index": 0, "quote": _SOURCES[0]},
-                {"source_index": 1, "quote": _SOURCES[1]},
+                {"source_index": 0, "quote": _SOURCES[0], "subject_mention": "I"},
+                {
+                    "source_index": 1,
+                    "quote": _SOURCES[1],
+                    "subject_mention": "The Zephyr workshop",
+                },
             ]
         }
     )
@@ -39,6 +43,7 @@ def _claim(base_source_index: int = 0, **overrides: object) -> Claim:
     fields: dict[str, object] = {
         "source_index": base_source_index,
         "quote": _SOURCES[base_source_index],
+        "subject_mention": "I" if base_source_index == 0 else "The Zephyr workshop",
     }
     fields.update(overrides)
     return Claim(**fields)
@@ -54,6 +59,7 @@ def test_validates_quote_backed_claims_across_two_sources() -> None:
     "claim",
     [
         _claim(0, source_index=1),
+        _claim(0, subject_mention="Nora"),
         _claim(0, quote="I signed up for an imaginary workshop."),
     ],
 )
@@ -69,11 +75,20 @@ def test_rejects_empty_and_oversized_extractions() -> None:
         validate_claims(ClaimExtraction(claims=(_claim(0),) * 17), _SOURCES)
 
 
-def test_rejects_whitespace_only_quote() -> None:
+@pytest.mark.parametrize("claim", [_claim(0, quote=" "), _claim(0, subject_mention=" ")])
+def test_rejects_whitespace_only_quote_or_subject(claim: Claim) -> None:
+    with pytest.raises(ValueError):
+        validate_claims(ClaimExtraction(claims=(claim,)), _SOURCES)
+
+
+def test_rejects_incidental_i_inside_another_word_as_speaker_subject() -> None:
+    source = "Isolated dossier is archived."
     with pytest.raises(ValueError):
         validate_claims(
-            ClaimExtraction(claims=(_claim(0, quote=" "),)),
-            _SOURCES,
+            ClaimExtraction(
+                claims=(Claim(source_index=0, quote=source, subject_mention="I"),)
+            ),
+            (source,),
         )
 
 
@@ -103,10 +118,12 @@ def test_accepts_complete_path_without_verbatim_question_subject() -> None:
 def _fake_claim(
     source_index: int,
     quote: str,
+    subject: str,
 ) -> dict[str, object]:
     return {
         "source_index": source_index,
         "quote": quote,
+        "subject_mention": subject,
     }
 
 
@@ -115,10 +132,12 @@ def test_probe_separates_source_claim_extraction_from_question_judgment() -> Non
         _fake_claim(
             0,
             "Records for Dossier-A are assigned to the transfer phrase Relay-Cobalt.",
+            "Dossier-A",
         ),
         _fake_claim(
             1,
             "Every record routed by Relay-Cobalt ultimately arrives at Compartment Ember.",
+            "Relay-Cobalt",
         ),
     ]
     cases = [
@@ -129,9 +148,10 @@ def test_probe_separates_source_claim_extraction_from_question_judgment() -> Non
                 _fake_claim(
                     0,
                     "The Sapphire file is also recorded as Dossier-A.",
+                    "Sapphire file",
                 ),
-                _fake_claim(1, str(dossier[0]["quote"])),
-                _fake_claim(2, str(dossier[1]["quote"])),
+                _fake_claim(1, str(dossier[0]["quote"]), "Dossier-A"),
+                _fake_claim(2, str(dossier[1]["quote"]), "Relay-Cobalt"),
             ],
             True,
         ),
@@ -140,10 +160,12 @@ def test_probe_separates_source_claim_extraction_from_question_judgment() -> Non
                 _fake_claim(
                     0,
                     "The Atlas project uses code name Zephyr.",
+                    "Atlas project",
                 ),
                 _fake_claim(
                     1,
                     "The Atlas project review is scheduled on April 18.",
+                    "Atlas project",
                 ),
             ],
             True,
@@ -153,10 +175,12 @@ def test_probe_separates_source_claim_extraction_from_question_judgment() -> Non
                 _fake_claim(
                     0,
                     "Nora plans to attend the Zephyr workshop.",
+                    "Nora",
                 ),
                 _fake_claim(
                     1,
                     "The Aurora workshop will be held in Lisbon.",
+                    "Aurora workshop",
                 ),
             ],
             False,
@@ -166,6 +190,7 @@ def test_probe_separates_source_claim_extraction_from_question_judgment() -> Non
                 _fake_claim(
                     0,
                     "The Isolated dossier's destination has not been documented.",
+                    "Isolated dossier",
                 ),
             ],
             False,
@@ -175,6 +200,7 @@ def test_probe_separates_source_claim_extraction_from_question_judgment() -> Non
                 _fake_claim(
                     0,
                     "I placed the cabinet key in drawer three.",
+                    "I",
                 ),
             ],
             True,
@@ -184,10 +210,12 @@ def test_probe_separates_source_claim_extraction_from_question_judgment() -> Non
                 _fake_claim(
                     0,
                     "I signed up for the Zephyr workshop.",
+                    "I",
                 ),
                 _fake_claim(
                     1,
                     "The Zephyr workshop is held in Lisbon.",
+                    "Zephyr workshop",
                 ),
             ],
             True,
@@ -233,7 +261,7 @@ def test_probe_separates_source_claim_extraction_from_question_judgment() -> Non
         assert "claims" in judgment.payload
         assert "selected_evidence" not in judgment.payload
     assert [
-        [claim["has_first_person_reference"] for claim in judgment.payload["claims"]]
+        [claim["subject_is_speaker"] for claim in judgment.payload["claims"]]
         for judgment in llm.requests[1::2]
     ] == [
         [False, False],
@@ -254,7 +282,7 @@ def test_probe_sanitizes_invalid_quote_and_provider_error() -> None:
         [
             {
                 "claims": [
-                    _fake_claim(0, "Private fabricated quote")
+                    _fake_claim(0, "Private fabricated quote", "Private")
                 ]
             },
             RuntimeError("private model response"),

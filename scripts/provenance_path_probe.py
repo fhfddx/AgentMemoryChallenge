@@ -19,20 +19,20 @@ from masm.providers.llm import (
 )
 
 MAX_CLAIMS = 16
-_FIRST_PERSON_REFERENCE = re.compile(
-    r"(?<!\w)(?:I|me|my|mine|we|us|our|ours)(?!\w)", re.IGNORECASE
-)
-_EXTRACT_VERSION = "provenance-path-extract-probe-v2"
-_JUDGE_VERSION = "provenance-path-judge-probe-v2"
+_SPEAKER_SUBJECTS = frozenset({"i", "me", "my", "mine", "we", "us", "our", "ours"})
+_EXTRACT_VERSION = "provenance-path-extract-probe-v3"
+_JUDGE_VERSION = "provenance-path-judge-probe-v3"
 _EXTRACT_PROMPT = (
     "Read only the selected evidence, without a question. Extract up to 16 directly "
     "stated atomic facts as quote-backed claims. Return JSON with claims only. For each "
     "claim, source_index is the index of its own source and quote must be an exact "
-    "contiguous substring copied from that source. Do not rewrite, normalize, label, or "
-    "summarize any part of a quote. Prefer the shortest complete sentence or phrase that "
-    "retains the stated subject, relation, and object. Do not invent an alias, connection, "
-    "or unstated value. Keep explicit alias statements and unknown-value statements as "
-    "verbatim quote claims, but do not fill in missing facts."
+    "contiguous substring copied from that source. subject_mention must be an exact "
+    "contiguous substring of quote naming the subject that the quoted fact is about. If "
+    "that subject is the source speaker, copy its first-person pronoun. Do not rewrite, "
+    "normalize, label, or summarize quote or subject_mention. Prefer the shortest complete "
+    "sentence or phrase that retains the stated subject, relation, and object. Do not "
+    "invent an alias, connection, or unstated value. Keep explicit alias statements and "
+    "unknown-value statements as verbatim quote claims, but do not fill in missing facts."
 )
 _JUDGE_PROMPT = (
     "Judge whether these validated, quote-backed claims fully support the question. "
@@ -40,9 +40,10 @@ _JUDGE_PROMPT = (
     "requested_value_supported, and used_claim_indices. Use only the claims; do not "
     "answer the question. Interpret each exact quote as a claim and trace a complete path "
     "from the questioned subject to each requested value. An explicit alias claim may "
-    "connect names. has_first_person_reference is derived locally from its exact quote; "
-    "a first-person quote refers to that source's speaker and may satisfy a question about "
-    "the speaker without identical wording. Do not equate speakers from different sources "
+    "connect names. subject_mention is an exact, locally validated anchor for the entity "
+    "that each quote is about. subject_is_speaker is derived locally from that anchor; a "
+    "speaker-subject claim may satisfy a question about the speaker without identical "
+    "wording. Do not equate speakers from different sources "
     "without evidence. A complete path about a different subject is "
     "unsupported, even if it reaches a plausible value. Likewise, shared topic, type, "
     "location or route is not a bridge. An unknown or undocumented value does not support "
@@ -63,12 +64,13 @@ _PARAPHRASED_MULTI_SOURCE = _Case(
 
 
 class Claim(BaseModel):
-    """One atomic fact copied verbatim from a single source."""
+    """One atomic fact with an exact subject anchor copied from a single source."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     source_index: StrictInt
     quote: str = Field(min_length=1, max_length=1000)
+    subject_mention: str = Field(min_length=1, max_length=200)
 
 
 class ClaimExtraction(BaseModel):
@@ -99,17 +101,29 @@ class DiagnosticValidationError(ValueError):
 
 
 def validate_claims(extraction: ClaimExtraction, sources: Sequence[str]) -> tuple[Claim, ...]:
-    """Reject invented source references or non-verbatim quotes."""
+    """Reject invented source references, quotes, or subject anchors."""
     claims = extraction.claims
     if not 1 <= len(claims) <= MAX_CLAIMS:
         raise DiagnosticValidationError("invalid_claim_count")
     for claim in claims:
-        if not claim.quote.strip():
-            raise DiagnosticValidationError("blank_quote")
+        if not claim.quote.strip() or not claim.subject_mention.strip():
+            raise DiagnosticValidationError("blank_quote_or_subject")
         if not 0 <= claim.source_index < len(sources):
             raise DiagnosticValidationError("source_index_out_of_range")
         if claim.quote not in sources[claim.source_index]:
             raise DiagnosticValidationError("quote_not_in_source")
+        if claim.subject_mention not in claim.quote:
+            raise DiagnosticValidationError("subject_mention_not_in_quote")
+        if (
+            claim.subject_mention.casefold().strip() in _SPEAKER_SUBJECTS
+            and re.search(
+                rf"(?<!\w){re.escape(claim.subject_mention)}(?!\w)",
+                claim.quote,
+                flags=re.IGNORECASE,
+            )
+            is None
+        ):
+            raise DiagnosticValidationError("speaker_subject_not_standalone")
     return claims
 
 
@@ -128,10 +142,10 @@ def judgement_supported(decision: PathJudgement, claim_count: int) -> bool:
 
 
 def _judge_claim_payload(claim: Claim) -> dict[str, object]:
-    """Add only a deterministic marker derived from an already validated quote."""
+    """Add only a deterministic marker derived from a validated subject anchor."""
     return {
         **claim.model_dump(mode="json"),
-        "has_first_person_reference": bool(_FIRST_PERSON_REFERENCE.search(claim.quote)),
+        "subject_is_speaker": claim.subject_mention.casefold().strip() in _SPEAKER_SUBJECTS,
     }
 
 
