@@ -49,6 +49,7 @@ class RankedEvidence:
     granularity: Literal["context", "message"] = "context"
     request_id: str = ""
     source_position: int | None = None
+    source_context: str | None = None
 
 
 class EvidenceReranker:

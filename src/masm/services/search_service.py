@@ -17,6 +17,7 @@ from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker, RankedEvidence
 from masm.retrieval.response_packer import ResponsePacker
+from masm.retrieval.source_context import SourceContextEnricher
 from masm.schemas.api import MemoryEvidence, SearchRequest, SearchResponse
 from masm.storage.assets import decode_image_data_url
 from masm.storage.types import MemoryCandidate
@@ -38,6 +39,7 @@ class SearchService:
         renderer: EvidenceRenderer | None = None,
         packer: ResponsePacker | None = None,
         runtime_profile: str = "unknown",
+        source_context: SourceContextEnricher | None = None,
     ) -> None:
         self._retriever = retriever
         self._max_image_bytes = max_image_bytes
@@ -49,6 +51,7 @@ class SearchService:
         self._renderer = renderer
         self._packer = packer
         self._runtime_profile = runtime_profile
+        self._source_context = source_context
 
     def search(self, request: SearchRequest) -> SearchResponse:
         """执行查询分析、混合召回、关系扩展与证据重排。"""
@@ -74,6 +77,8 @@ class SearchService:
             candidates = self._deduplicate(candidates)
         dedup_count = len(candidates)
         ranked = self._rank(parsed, candidates)
+        if self._source_context is not None:
+            ranked = self._source_context.enrich(request.user_id, ranked)
         selection = None
         selector_latency_ms = 0.0
         if self._selector is not None:

@@ -289,7 +289,7 @@ class EvidenceSelector:
                     "source_position": item.source_position,
                     "granularity": item.granularity,
                     "text": (
-                        item.content[: self._max_chars_per_candidate]
+                        (item.source_context or item.content)[: self._max_chars_per_candidate]
                         if isinstance(item.content, str)
                         else " ".join(
                             part.text for part in item.content if isinstance(part, TextPart)

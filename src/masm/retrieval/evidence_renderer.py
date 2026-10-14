@@ -41,16 +41,24 @@ class EvidenceRenderer:
                 (item.request_id, item.source_position)
                 for item in evidence
                 if item.granularity == "message"
+                and item.source_context is None
                 and item.request_id
                 and item.source_position is not None
             )
         )
         if not locations:
-            return list(evidence)
+            return [
+                replace(item, content=item.source_context)
+                if item.source_context is not None and item.user_id == user_id else item
+                for item in evidence
+            ]
         snapshots = self._repo.source_messages_for_positions(user_id, locations)
         rendered: list[RankedEvidence] = []
         remaining_image_bytes = self._max_total_image_bytes
         for item in evidence:
+            if item.source_context is not None and item.user_id == user_id:
+                rendered.append(replace(item, content=item.source_context))
+                continue
             snapshot = (
                 snapshots.get((item.request_id, item.source_position))
                 if item.source_position is not None

@@ -139,6 +139,8 @@ class SourceMessageSnapshot:
 
     content: Any
     assets: Mapping[str, StoredAssetSnapshot] = field(default_factory=dict)
+    role: str | None = None
+    timestamp: int | None = None
 
 
 @dataclass(frozen=True)

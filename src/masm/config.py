@@ -66,6 +66,7 @@ class Settings:
     min_image_similarity: float = 0.42
     min_lexical_rank: float = 0.001
     selector_enabled: bool = True
+    source_context_enabled: bool = False
     selector_max_candidates: int = 32
     selector_max_selected: int = 12
     selector_max_chars_per_candidate: int = 1200
@@ -163,6 +164,7 @@ class Settings:
             min_image_similarity=_float_env("MASM_MIN_IMAGE_SIMILARITY", 0.42),
             min_lexical_rank=_float_env("MASM_MIN_LEXICAL_RANK", 0.001),
             selector_enabled=os.getenv("MASM_EVIDENCE_SELECTOR_ENABLED", "1") == "1",
+            source_context_enabled=os.getenv("MASM_SOURCE_CONTEXT_ENABLED", "0") == "1",
             selector_max_candidates=_int_env("MASM_SELECTOR_MAX_CANDIDATES", 32),
             selector_max_selected=_int_env("MASM_SELECTOR_MAX_SELECTED", 12),
             selector_max_chars_per_candidate=_int_env(

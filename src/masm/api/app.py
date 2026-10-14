@@ -18,6 +18,7 @@ from masm.providers.llm import StructuredLLM
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
 from masm.retrieval.evidence_renderer import EvidenceRenderer
 from masm.retrieval.response_packer import ResponsePacker
+from masm.retrieval.source_context import SourceContextEnricher
 from masm.runtime import build_runtime
 from masm.services.add_service import AddService
 from masm.services.search_service import SearchService
@@ -107,6 +108,11 @@ def create_app(
         ),
         packer=response_packer,
         runtime_profile=settings.runtime_profile.value,
+        source_context=(
+            SourceContextEnricher(
+                repository, max_chars=settings.selector_max_chars_per_candidate,
+            ) if settings.source_context_enabled else None
+        ),
     )
 
     @application.middleware("http")

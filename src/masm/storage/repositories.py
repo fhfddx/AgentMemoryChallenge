@@ -1731,6 +1731,8 @@ class MemoryRepository:
             snapshots[key] = SourceMessageSnapshot(
                 content=message.content,
                 assets=referenced,
+                role=message.role,
+                timestamp=message.timestamp,
             )
         return snapshots
 
