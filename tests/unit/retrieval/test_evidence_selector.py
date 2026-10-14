@@ -91,12 +91,8 @@ def test_inconsistent_insufficient_decision_normalizes_to_safe_abstention() -> N
     assert result.evidence_state == "insufficient"
 
 
-def test_partial_direct_evidence_is_retained_instead_of_being_discarded() -> None:
-    """成对用例 A：模型声明 partial 并给出直接事实，不得丢弃全部召回。
-
-    `partial` 表示「选中的记忆直接陈述了某个被询问的事实，但不足以覆盖全部询问」。
-    这是二态协议无法表达的边界：既不能无条件拒答，也不能回落到旧式全量强锚点。
-    """
+def test_partial_direct_evidence_abstains_without_a_deeper_complete_selection() -> None:
+    """模型自报 partial 时，最终 Search 不暴露不足以完整回答的证据。"""
     llm = FakeStructuredLLM([{"selected_indices": [0], "evidence_state": "partial"}])
     purchase = _evidence(1, "source-a", "Alice bought a blue notebook")
     unrelated = _evidence(2, "source-b", "Bob visited Paris")
@@ -108,8 +104,9 @@ def test_partial_direct_evidence_is_retained_instead_of_being_discarded() -> Non
         {purchase.memory_id, unrelated.memory_id},
     )
 
-    assert result.evidence == (purchase,)
-    assert result.abstained is False
+    assert result.evidence == ()
+    assert result.selected_source_count == 0
+    assert result.abstained is True
     assert result.fallback is False
     assert result.evidence_state == "partial"
     assert result.failure_category == "none"
@@ -363,8 +360,8 @@ def test_partial_first_pass_retries_deeper_and_returns_the_complete_selection() 
     ],
     ids=["insufficient", "invalid_output", "unavailable"],
 )
-def test_partial_first_pass_survives_a_worse_deeper_round(deeper_output) -> None:
-    """深层重试只能改进结果，绝不能丢掉首轮已经安全的 partial 证据。"""
+def test_partial_first_pass_abstains_after_a_worse_deeper_round(deeper_output) -> None:
+    """深层重试未得到完整证据时，保留 partial 遥测但不返回证据。"""
     ranked = [
         _evidence(number, f"source-{number}", f"fact {number}")
         for number in range(1, 49)
@@ -383,9 +380,10 @@ def test_partial_first_pass_survives_a_worse_deeper_round(deeper_output) -> None
         {item.memory_id for item in ranked},
     )
 
-    assert result.evidence == (ranked[0],)
+    assert result.evidence == ()
     assert result.evidence_state == "partial"
-    assert result.abstained is False
+    assert result.selected_source_count == 0
+    assert result.abstained is True
     assert result.fallback is False
     assert result.failure_category == "none"
     assert len(llm.requests) == 2

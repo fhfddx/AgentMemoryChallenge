@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 from uuid import UUID
 
@@ -188,6 +188,13 @@ def _is_complete_selection(result: SelectionResult) -> bool:
     )
 
 
+def _withhold_partial_evidence(result: SelectionResult) -> SelectionResult:
+    """Keep partial telemetry while withholding incomplete answer evidence."""
+    if result.evidence_state != "partial":
+        return result
+    return replace(result, evidence=(), selected_source_count=0, abstained=True)
+
+
 class EvidenceSelector:
     """Bound one model request and validate its evidence-only response."""
 
@@ -237,15 +244,15 @@ class EvidenceSelector:
         )
         extended_pool = self._deeper_pool(result, pool, ranked)
         if extended_pool is None:
-            return result
+            return _withhold_partial_evidence(result)
         extended = self._select_pool(
             question, visual, options, ranked, strong_anchor_ids, extended_pool
         )
         if result.evidence_state == "partial":
-            # 深层重试只能改进结果：首轮的 partial 是安全证据，只有深层给出完整
-            # selection 时才允许替换它，否则必须原样保留首轮结果。
-            return extended if _is_complete_selection(extended) else result
-        return extended
+            # 深层重试只能改进结果：只有完整 selection 才能向 Search 暴露证据。
+            chosen = extended if _is_complete_selection(extended) else result
+            return _withhold_partial_evidence(chosen)
+        return _withhold_partial_evidence(extended)
 
     def _deeper_pool(
         self,
