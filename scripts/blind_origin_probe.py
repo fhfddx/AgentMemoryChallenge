@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import sys
 from collections.abc import Sequence
 from typing import TextIO
@@ -32,8 +33,18 @@ _COMPARE_PROMPT = (
     "verbatim identifier. Do not treat two differently named records as identical merely "
     "because they share a type, route, topic, place, or destination. The origin labels "
     "were extracted without seeing the question. If their identity with the question "
-    "subject is not established, return false. Do not answer the question."
+    "subject is not established, return false. The literal label source-speaker is a "
+    "question-blind local marker for the author of a first-person evidence statement. "
+    "Treat it as matching a question about that statement's speaker, without assuming "
+    "that it matches any named person. Do not answer the question."
 )
+
+_FIRST_PERSON_LABELS = frozenset({"i", "me", "my", "mine", "we", "us", "our", "ours"})
+_FIRST_PERSON_OPENING = re.compile(
+    r"^\s*[\"'“‘(]*(?:i\b|i['’](?:m|ve|d|ll)\b|me\b|my\b|mine\b|we\b|us\b|our\b|ours\b)",
+    re.IGNORECASE,
+)
+_SOURCE_SPEAKER = "source-speaker"
 
 
 class OriginLabels(BaseModel):
@@ -72,6 +83,29 @@ _PARAPHRASED_MULTI_SOURCE = _Case(
 )
 
 
+def _normalize_origin_labels(
+    origin_labels: Sequence[str], selected_evidence: Sequence[str]
+) -> tuple[str, ...]:
+    """Replace question-blind first-person origins with a stable local marker."""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    has_source_speaker = any(
+        _FIRST_PERSON_OPENING.search(content) is not None for content in selected_evidence
+    )
+    for label in origin_labels:
+        stripped = label.strip()
+        if stripped.casefold() in _FIRST_PERSON_LABELS:
+            has_source_speaker = True
+            continue
+        folded = stripped.casefold()
+        if folded not in seen:
+            normalized.append(stripped)
+            seen.add(folded)
+    if has_source_speaker and _SOURCE_SPEAKER not in seen:
+        normalized.append(_SOURCE_SPEAKER)
+    return tuple(normalized)
+
+
 def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
     """Report case-level booleans; never emit evidence or extracted names."""
     cases = tuple(case for case in _cases() if case.name in _CASE_NAMES) + (
@@ -105,15 +139,18 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
                     not label.strip() for label in origins.origin_labels
                 ):
                     raise ValueError("empty origin")
+                normalized_origins = _normalize_origin_labels(
+                    origins.origin_labels, case.selected_evidence
+                )
                 comparison = llm.complete_json(
                     ModelRequest(
                         prompt=_COMPARE_PROMPT,
                         payload={
                             "question": case.question,
-                            "origin_labels": list(origins.origin_labels),
+                            "origin_labels": list(normalized_origins),
                         },
                         model=llm.model,
-                        prompt_version="blind-origin-compare-probe-v1",
+                        prompt_version="blind-origin-compare-probe-v2",
                         timeout_seconds=settings.selector_timeout_seconds,
                         max_attempts=1,
                         temperature=0.0,
@@ -124,7 +161,7 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
                 passed_count += passed
                 row: dict[str, object] = {
                     "case": case.name,
-                    "origin_count": len(origins.origin_labels),
+                    "origin_count": len(normalized_origins),
                     "matches": comparison.matches,
                     "passed": passed,
                 }

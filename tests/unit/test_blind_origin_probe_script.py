@@ -16,8 +16,8 @@ def test_blind_origin_probe_separates_extraction_from_question_comparison() -> N
             {"origin_labels": ["Dossier-A"]}, {"matches": True},
             {"origin_labels": ["Dossier-A", "Sapphire file"]}, {"matches": True},
             {"origin_labels": ["Atlas project"]}, {"matches": True},
-            {"origin_labels": ["I", "speaker"]}, {"matches": True},
-            {"origin_labels": ["I", "speaker"]}, {"matches": True},
+            {"origin_labels": ["I"]}, {"matches": True},
+            {"origin_labels": ["Zephyr workshop"]}, {"matches": True},
         ]
     )
     output = StringIO()
@@ -46,6 +46,11 @@ def test_blind_origin_probe_separates_extraction_from_question_comparison() -> N
         assert "selected_evidence" in extraction.payload
         assert "question" in comparison.payload
         assert "selected_evidence" not in comparison.payload
+    assert llm.requests[-3].payload["origin_labels"] == ["source-speaker"]
+    assert llm.requests[-1].payload["origin_labels"] == [
+        "Zephyr workshop",
+        "source-speaker",
+    ]
     assert "Dossier-A" not in output.getvalue()
     assert "Sapphire file" not in output.getvalue()
 
