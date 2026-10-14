@@ -19,29 +19,31 @@ from masm.providers.llm import (
 )
 
 MAX_CLAIMS = 16
-_EXTRACT_VERSION = "provenance-path-extract-probe-v1"
-_JUDGE_VERSION = "provenance-path-judge-probe-v1"
+_FIRST_PERSON_REFERENCE = re.compile(
+    r"(?<!\w)(?:I|me|my|mine|we|us|our|ours)(?!\w)", re.IGNORECASE
+)
+_EXTRACT_VERSION = "provenance-path-extract-probe-v2"
+_JUDGE_VERSION = "provenance-path-judge-probe-v2"
 _EXTRACT_PROMPT = (
-    "Read only the selected evidence, without a question. Extract up to 16 atomic "
-    "subject-relation-object claims directly stated there. Return JSON with claims only. "
-    "For each claim, source_index is the index of its own source. quote must be an exact "
-    "contiguous substring of that source. subject_mention, relation_mention and "
-    "object_mention must each be exact contiguous substrings of quote. Do not invent an "
-    "alias, a connection, or an unstated value. If the subject is first-person I/me/my/"
-    "we/us/our, copy that pronoun as subject_mention and set subject_is_speaker=true; "
-    "otherwise set it false. This marks the speaker of that one source only and never "
-    "equates speakers across sources. Keep explicit alias statements and unknown-value "
-    "statements as claims, but do not fill in missing facts."
+    "Read only the selected evidence, without a question. Extract up to 16 directly "
+    "stated atomic facts as quote-backed claims. Return JSON with claims only. For each "
+    "claim, source_index is the index of its own source and quote must be an exact "
+    "contiguous substring copied from that source. Do not rewrite, normalize, label, or "
+    "summarize any part of a quote. Prefer the shortest complete sentence or phrase that "
+    "retains the stated subject, relation, and object. Do not invent an alias, connection, "
+    "or unstated value. Keep explicit alias statements and unknown-value statements as "
+    "verbatim quote claims, but do not fill in missing facts."
 )
 _JUDGE_PROMPT = (
     "Judge whether these validated, quote-backed claims fully support the question. "
     "Return JSON with question_subject_supported, all_required_links_supported, "
     "requested_value_supported, and used_claim_indices. Use only the claims; do not "
-    "answer the question. Trace a complete path from the questioned subject to each "
-    "requested value. An explicit alias claim may connect names. A first-person claim "
-    "with subject_is_speaker=true refers to that source's speaker and may satisfy a "
-    "question about the speaker without identical wording; do not equate speakers from "
-    "different sources without evidence. A complete path about a different subject is "
+    "answer the question. Interpret each exact quote as a claim and trace a complete path "
+    "from the questioned subject to each requested value. An explicit alias claim may "
+    "connect names. has_first_person_reference is derived locally from its exact quote; "
+    "a first-person quote refers to that source's speaker and may satisfy a question about "
+    "the speaker without identical wording. Do not equate speakers from different sources "
+    "without evidence. A complete path about a different subject is "
     "unsupported, even if it reaches a plausible value. Likewise, shared topic, type, "
     "location or route is not a bridge. An unknown or undocumented value does not support "
     "a requested concrete value. When all requested attributes and every needed link "
@@ -61,16 +63,12 @@ _PARAPHRASED_MULTI_SOURCE = _Case(
 
 
 class Claim(BaseModel):
-    """One atomic relation with mentions copied from a single source quote."""
+    """One atomic fact copied verbatim from a single source."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     source_index: StrictInt
     quote: str = Field(min_length=1, max_length=1000)
-    subject_mention: str = Field(min_length=1, max_length=200)
-    relation_mention: str = Field(min_length=1, max_length=200)
-    object_mention: str = Field(min_length=1, max_length=200)
-    subject_is_speaker: StrictBool
 
 
 class ClaimExtraction(BaseModel):
@@ -101,49 +99,17 @@ class DiagnosticValidationError(ValueError):
 
 
 def validate_claims(extraction: ClaimExtraction, sources: Sequence[str]) -> tuple[Claim, ...]:
-    """Reject invented source references, quotes, or subject/relation/object mentions."""
+    """Reject invented source references or non-verbatim quotes."""
     claims = extraction.claims
     if not 1 <= len(claims) <= MAX_CLAIMS:
         raise DiagnosticValidationError("invalid_claim_count")
     for claim in claims:
-        if not all(
-            value.strip()
-            for value in (
-                claim.quote,
-                claim.subject_mention,
-                claim.relation_mention,
-                claim.object_mention,
-            )
-        ):
-            raise DiagnosticValidationError("blank_quote_or_mention")
+        if not claim.quote.strip():
+            raise DiagnosticValidationError("blank_quote")
         if not 0 <= claim.source_index < len(sources):
             raise DiagnosticValidationError("source_index_out_of_range")
         if claim.quote not in sources[claim.source_index]:
             raise DiagnosticValidationError("quote_not_in_source")
-        for field_name, mention in (
-            ("subject", claim.subject_mention),
-            ("relation", claim.relation_mention),
-            ("object", claim.object_mention),
-        ):
-            if mention not in claim.quote:
-                raise DiagnosticValidationError(f"{field_name}_mention_not_in_quote")
-        if claim.subject_is_speaker and claim.subject_mention.casefold().strip() not in {
-            "i",
-            "me",
-            "my",
-            "mine",
-            "we",
-            "us",
-            "our",
-            "ours",
-        }:
-            raise DiagnosticValidationError("speaker_flag_without_pronoun")
-        if claim.subject_is_speaker and re.search(
-            rf"(?<!\w){re.escape(claim.subject_mention)}(?!\w)",
-            claim.quote,
-            flags=re.IGNORECASE,
-        ) is None:
-            raise DiagnosticValidationError("speaker_pronoun_not_standalone")
     return claims
 
 
@@ -159,6 +125,14 @@ def judgement_supported(decision: PathJudgement, claim_count: int) -> bool:
         and len(indices) == len(set(indices))
         and all(0 <= index < claim_count for index in indices)
     )
+
+
+def _judge_claim_payload(claim: Claim) -> dict[str, object]:
+    """Add only a deterministic marker derived from an already validated quote."""
+    return {
+        **claim.model_dump(mode="json"),
+        "has_first_person_reference": bool(_FIRST_PERSON_REFERENCE.search(claim.quote)),
+    }
 
 
 def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
@@ -197,7 +171,7 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
                         prompt=_JUDGE_PROMPT,
                         payload={
                             "question": case.question,
-                            "claims": [claim.model_dump(mode="json") for claim in claims],
+                            "claims": [_judge_claim_payload(claim) for claim in claims],
                         },
                         model=llm.model,
                         prompt_version=_JUDGE_VERSION,
@@ -227,7 +201,6 @@ def run_probe(llm: StructuredLLM, settings: Settings, output: TextIO) -> int:
                     "case": case.name,
                     "claim_count": len(claims),
                     "source_count": len({claim.source_index for claim in claims}),
-                    "speaker_claim_count": sum(claim.subject_is_speaker for claim in claims),
                     "used_claim_count": len(indices),
                     "supported": supported,
                     "passed": passed,
