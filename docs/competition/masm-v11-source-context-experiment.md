@@ -88,3 +88,26 @@ Provider/Schema 失败均作为失败处理，不 fallback，不输出错误详�
 current、`cross_source_context` 必须选择恰好两个来源、全程无 Provider/Schema 失败。
 首次不达标即停止该方案，不追加轮次。只有首次达标，才允许设计独立的生产实现；
 本 spike 自身无论结果如何都不是部署候选或官方分数证明。
+
+首次 Provider 运行中，`current`、`audit_only`、`repair` 在目标案例上都只返回
+一个来源；summary 为 repair 9/10、target_repaired false、failure_count 0。
+这表示独立审计把不完整证据误判为完整，修复调用没有触发。该路线至此淘汰，
+不得用重复运行或继续调审计 prompt 改写结论。
+
+## Selector-gate 确定性扩展 spike
+
+`scripts/gate_expansion_probe.py` 不再增加第二个模型判断。现有 selector 只承担
+安全门：只有无失败、无 fallback、非拒答且状态为 sufficient 的单来源结果才允许
+扩展。脚本预先比较两个确定性策略：
+
+- `next_distinct`：保留当前证据，最多补入排名最高的另一个强锚点来源；
+- `top2_distinct`：从强锚点中按原排名保留前两个不同来源。
+
+未被原检索路径列为 strong anchor 的高排名干扰项不能加入；selector 拒答、partial、
+fallback 或 Provider/Schema 失败时都不扩展。固定案例覆盖普通/拥挤跨来源链、直接事实
+加高排名干扰项、双来源直接事实、断链、错误主体、同实体缺失值和 32 候选拥挤拒答。
+
+首次 Provider 门槛为：至少一个预注册策略 8/8、相对 current 零回归、普通与拥挤
+跨来源目标均精确返回两个来源、failure_count 0，并严格优于 current。脚本还固定了
+反事实安全测试：如果直接查询的干扰项也被列为 strong anchor，两种策略必须因回归
+而失去资格。该 spike 只读内存合成资料，不修改生产 Search，也不是部署许可。
