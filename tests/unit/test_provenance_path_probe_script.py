@@ -7,6 +7,7 @@ import pytest
 from scripts.provenance_path_probe import (
     Claim,
     ClaimExtraction,
+    DiagnosticValidationError,
     PathJudgement,
     judgement_supported,
     run_probe,
@@ -54,6 +55,23 @@ def test_validates_quote_backed_claims_across_two_sources() -> None:
 def test_rejects_claims_not_grounded_in_their_own_quote(claim: Claim) -> None:
     with pytest.raises(ValueError):
         validate_claims(ClaimExtraction(claims=(claim,)), _SOURCES)
+
+
+@pytest.mark.parametrize(
+    ("claim", "expected_reason"),
+    [
+        (_claim(0, subject_mention="Nora"), "subject_mention_not_in_quote"),
+        (_claim(0, relation_mention="attended"), "relation_mention_not_in_quote"),
+        (_claim(0, object_mention="Paris"), "object_mention_not_in_quote"),
+    ],
+)
+def test_identifies_which_claim_mention_is_not_quote_grounded(
+    claim: Claim, expected_reason: str
+) -> None:
+    with pytest.raises(DiagnosticValidationError) as captured:
+        validate_claims(ClaimExtraction(claims=(claim,)), _SOURCES)
+
+    assert captured.value.reason == expected_reason
 
 
 def test_rejects_empty_and_oversized_extractions() -> None:

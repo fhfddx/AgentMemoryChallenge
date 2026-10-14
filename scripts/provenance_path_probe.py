@@ -120,15 +120,13 @@ def validate_claims(extraction: ClaimExtraction, sources: Sequence[str]) -> tupl
             raise DiagnosticValidationError("source_index_out_of_range")
         if claim.quote not in sources[claim.source_index]:
             raise DiagnosticValidationError("quote_not_in_source")
-        if any(
-            mention not in claim.quote
-            for mention in (
-                claim.subject_mention,
-                claim.relation_mention,
-                claim.object_mention,
-            )
+        for field_name, mention in (
+            ("subject", claim.subject_mention),
+            ("relation", claim.relation_mention),
+            ("object", claim.object_mention),
         ):
-            raise DiagnosticValidationError("mention_not_in_quote")
+            if mention not in claim.quote:
+                raise DiagnosticValidationError(f"{field_name}_mention_not_in_quote")
         if claim.subject_is_speaker and claim.subject_mention.casefold().strip() not in {
             "i",
             "me",
