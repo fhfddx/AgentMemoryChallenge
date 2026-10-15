@@ -1192,6 +1192,36 @@ def test_planner_transport_failure_falls_back_to_the_frozen_selector_once() -> N
     ]
 
 
+def test_planner_failure_falls_back_once_over_the_same_bounded_pool() -> None:
+    llm = FakeStructuredLLM(
+        [
+            TimeoutError("private-provider-detail"),
+            {"evidence_state": "insufficient", "selected_indices": []},
+            {"evidence_state": "sufficient", "selected_indices": [0]},
+        ]
+    )
+    ranked = [
+        _evidence(index, f"source-{index}", f"Candidate {index}.")
+        for index in range(1, 41)
+    ]
+
+    outcome = _selector(llm).select(
+        "Where did I store the amber key?",
+        None,
+        ranked,
+        _anchors(*ranked),
+        GraphContext(),
+    )
+
+    assert outcome.graph.fallback is True
+    assert outcome.graph.failure_category == "planner_unavailable"
+    assert outcome.selection.candidate_count == 32
+    assert [request.prompt_version for request in llm.requests] == [
+        "evidence-graph-planner-v1",
+        "evidence-selector-v7",
+    ]
+
+
 def _invalid_proposals() -> list[dict[str, object]]:
     grounded = {"question_quote": "Where did I store the amber key", "kind": "location"}
     return [
