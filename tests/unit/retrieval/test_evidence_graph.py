@@ -877,6 +877,41 @@ def test_conflicting_support_in_one_stored_conflict_group_keeps_both_sides() -> 
     assert outcome.selection.evidence == (blue, denied)
 
 
+def test_stored_conflict_group_connects_both_sides_without_planner_link() -> None:
+    group = UUID(int=1001)
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("What color bicycle did I buy", "attribute")],
+                supports=[
+                    _support(0, 0, "I bought the blue bicycle.", "direct"),
+                    _support(0, 1, "I did not buy a blue bicycle.", "negative"),
+                ],
+                links=[],
+            )
+        ]
+    )
+    blue = _evidence(1, "source-a", "I bought the blue bicycle.", conflict_group_id=group)
+    denied = _evidence(
+        2,
+        "source-b",
+        "I did not buy a blue bicycle.",
+        conflict_group_id=group,
+    )
+
+    outcome = _selector(llm).select(
+        "What color bicycle did I buy?",
+        None,
+        [blue, denied],
+        _anchors(blue, denied),
+        GraphContext(),
+    )
+
+    assert outcome.graph.link_count == 0
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == (blue, denied)
+
+
 def test_conflicting_support_outside_a_conflict_group_is_partial() -> None:
     llm = FakeStructuredLLM(
         [

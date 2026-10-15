@@ -47,7 +47,11 @@ def assemble(
     cited = {support.candidate_index for support in supports}
     linked = {index for link in links for index in (link.left_index, link.right_index)}
     nodes = sorted(cited | linked)
-    adjacency = _adjacency(nodes, links)
+    adjacency = _adjacency(
+        nodes,
+        links,
+        internal_pairs=_stored_conflict_pairs(supports, candidates),
+    )
     components = _components(adjacency)
     component_of = {
         node: index for index, component in enumerate(components) for node in component
@@ -134,16 +138,60 @@ def assemble(
     return AssemblyOutcome("partial", _selected(included, candidates), len(components))
 
 
-def _adjacency(nodes: Sequence[int], links: Sequence[ValidatedLink]) -> dict[int, list[int]]:
+def _adjacency(
+    nodes: Sequence[int],
+    links: Sequence[ValidatedLink],
+    *,
+    internal_pairs: Sequence[tuple[int, int]] = (),
+) -> dict[int, list[int]]:
     adjacency: dict[int, list[int]] = {node: [] for node in nodes}
-    for link in links:
-        if link.left_index not in adjacency or link.right_index not in adjacency:
+    pairs = [
+        (link.left_index, link.right_index)
+        for link in links
+    ]
+    pairs.extend(internal_pairs)
+    for left, right in pairs:
+        if left not in adjacency or right not in adjacency:
             continue
-        adjacency[link.left_index].append(link.right_index)
-        adjacency[link.right_index].append(link.left_index)
+        adjacency[left].append(right)
+        adjacency[right].append(left)
     for neighbours in adjacency.values():
-        neighbours.sort()
+        neighbours[:] = sorted(set(neighbours))
     return adjacency
+
+
+def _stored_conflict_pairs(
+    supports: Sequence[ValidatedSupport],
+    candidates: Sequence[CandidateView],
+) -> tuple[tuple[int, int], ...]:
+    """Derive internal adjacency only from grounded opposite-role stored peers."""
+    requirements = sorted({support.requirement_index for support in supports})
+    pairs: list[tuple[int, int]] = []
+    for requirement in requirements:
+        positives = {
+            support.candidate_index
+            for support in supports
+            if support.requirement_index == requirement and support.role == "direct"
+        }
+        negatives = {
+            support.candidate_index
+            for support in supports
+            if support.requirement_index == requirement and support.role == "negative"
+        }
+        positive_groups = {
+            candidates[node].conflict_group_id for node in positives
+        } - {None}
+        negative_groups = {
+            candidates[node].conflict_group_id for node in negatives
+        } - {None}
+        for group in sorted(positive_groups & negative_groups, key=str):
+            members = sorted(
+                node
+                for node in positives | negatives
+                if candidates[node].conflict_group_id == group
+            )
+            pairs.extend(zip(members, members[1:], strict=False))
+    return tuple(pairs)
 
 
 def _components(adjacency: Mapping[int, Sequence[int]]) -> list[tuple[int, ...]]:
