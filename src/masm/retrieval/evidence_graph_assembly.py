@@ -21,8 +21,6 @@ from masm.retrieval.evidence_graph_rules import (
 GraphState = Literal["sufficient", "partial", "insufficient"]
 
 _COVERING_ROLES = frozenset({"direct", "negative"})
-# 覆盖节点组合的确定性枚举上限；超出后退化为每个需求取最小 rank 的覆盖节点。
-MAX_ASSEMBLY_COMBINATIONS = 512
 
 
 @dataclass(frozen=True)
@@ -192,12 +190,9 @@ def _combinations(
     choice_lists: Sequence[tuple[int, Sequence[int]]],
 ) -> list[tuple[int, ...]]:
     nodes_per_requirement = [list(nodes) for _, nodes in choice_lists]
-    total = 1
-    for nodes in nodes_per_requirement:
-        total *= max(1, len(nodes))
-    if total <= MAX_ASSEMBLY_COMBINATIONS:
-        return [tuple(combination) for combination in itertools.product(*nodes_per_requirement)]
-    return [tuple(nodes[0] for nodes in nodes_per_requirement)]
+    # Validator caps (4 requirements, 24 supports) bound the largest balanced product
+    # to 6^4 = 1296, so every valid interpretation can be examined deterministically.
+    return [tuple(combination) for combination in itertools.product(*nodes_per_requirement)]
 
 
 def _single_component(chosen: Iterable[int], component_of: Mapping[int, int]) -> int | None:

@@ -1035,6 +1035,60 @@ def test_complete_graph_over_the_evidence_cap_degrades_to_bounded_partial() -> N
     assert outcome.selection.evidence[-1] == nodes[13]
 
 
+def test_connected_solution_after_512_combinations_is_sufficient() -> None:
+    question = "Where is alpha, where is beta, where is gamma, and where is delta?"
+    requirement_quotes = ("Where is alpha", "where is beta", "where is gamma", "where is delta")
+    candidates: list[RankedEvidence] = []
+    supports: list[dict[str, object]] = []
+    connected_indices: list[int] = []
+    for requirement_index in range(4):
+        for choice_index in range(5):
+            candidate_index = len(candidates)
+            text = f"Grounded support {requirement_index}-{choice_index}."
+            is_connected_choice = choice_index == 4
+            candidates.append(
+                _evidence(
+                    candidate_index + 1,
+                    "connected-source" if is_connected_choice else f"isolated-{candidate_index}",
+                    text,
+                    position=requirement_index if is_connected_choice else 0,
+                )
+            )
+            supports.append(_support(requirement_index, candidate_index, text, "direct"))
+            if is_connected_choice:
+                connected_indices.append(candidate_index)
+    links = [
+        _link(
+            left,
+            right,
+            str(candidates[left].content),
+            str(candidates[right].content),
+            "same_source_context",
+        )
+        for left, right in zip(connected_indices, connected_indices[1:], strict=False)
+    ]
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement(quote) for quote in requirement_quotes],
+                supports=supports,
+                links=links,
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        question,
+        None,
+        candidates,
+        _anchors(*candidates),
+        GraphContext(source_context_enabled=True),
+    )
+
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == tuple(candidates[index] for index in connected_indices)
+
+
 # --- 15. Chinese -------------------------------------------------------------------------
 
 
