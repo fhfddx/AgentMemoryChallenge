@@ -242,6 +242,25 @@ def test_main_stability_flag_routes_to_the_fixed_five_round_gate(
     }
 
 
+def test_main_sanitizes_settings_parse_failure(monkeypatch, capsys) -> None:
+    def raise_private_parse_error(cls) -> None:
+        raise ValueError("private-malformed-value")
+
+    monkeypatch.setattr(
+        probe.Settings,
+        "from_env",
+        classmethod(raise_private_parse_error),
+    )
+
+    code = probe.main(["--stability"])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == '{"case":"probe_error","passed":false}\n'
+    assert captured.err == ""
+    assert "private-malformed-value" not in captured.out
+
+
 def test_main_stability_gate_rejects_debug_reverse_order(monkeypatch) -> None:
     settings = SimpleNamespace(runtime_profile=RuntimeProfile.LOCAL_FAKE)
     monkeypatch.setattr(

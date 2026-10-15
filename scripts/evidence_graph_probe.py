@@ -774,7 +774,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
-    settings = Settings.from_env()
+    try:
+        settings = Settings.from_env()
+    except Exception:
+        print('{"case":"probe_error","passed":false}')
+        return 2
     if settings.runtime_profile is not RuntimeProfile.OFFICIAL_MASM:
         print('{"case":"configuration","passed":false}')
         return 2

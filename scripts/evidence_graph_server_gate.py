@@ -76,6 +76,15 @@ except Exception:
 else:
     candidate_modules = "present"
 
+try:
+    from masm.config import Settings
+
+    Settings.from_env().validate_runtime()
+except Exception:
+    runtime_settings = "invalid"
+else:
+    runtime_settings = "valid"
+
 raw_graph_flag = os.environ.get("MASM_EVIDENCE_GRAPH_ENABLED")
 if raw_graph_flag is None:
     graph_flag = "unset(default_off)"
@@ -103,6 +112,7 @@ print(json.dumps({
         if os.environ.get("MASM_RUNTIME_PROFILE") == "official-masm"
         else "not_official_masm"
     ),
+    "runtime_settings": runtime_settings,
     "source_digest": source_digest,
 }, sort_keys=True))
 """
@@ -116,8 +126,8 @@ class CandidateExpectations:
 
 
 DEFAULT_EXPECTATIONS = CandidateExpectations(
-    probe_blob="ac29d661ab93d918ad0a5ff1412548121d44cbee",
-    probe_sha256="7b9358e3027a87d8e31bc8a50a35164fb6bf06d0f57780952e9811fbaf4ccf35",
+    probe_blob="735b103ab7fbe71b6d80f82f3db62f0db26edfc8",
+    probe_sha256="6c994f05633844ddabe97e08101d3a0a611fbcfabadea6ccee812978e843f47b",
     source_digest="541fceacb6cbc80e9f5718a83247fe00e1577cd21d956b68abc9c1a894f3e3dd",
 )
 
@@ -462,6 +472,7 @@ def _verify_candidate(
         and container_digest == expectations.source_digest
     )
     runtime_profile = payload.get("runtime_profile")
+    runtime_settings = payload.get("runtime_settings")
     candidate_modules = payload.get("candidate_modules")
     graph_flag = payload.get("graph_flag")
     providers = payload.get("providers")
@@ -481,6 +492,13 @@ def _verify_candidate(
     )
     print(f"source_match={'yes' if source_matches else 'no'}", file=output)
     print(f"MASM_RUNTIME_PROFILE={runtime_profile}", file=output)
+    safe_runtime_settings = (
+        runtime_settings if runtime_settings in {"valid", "invalid"} else "invalid"
+    )
+    print(
+        f"runtime_settings={safe_runtime_settings}",
+        file=output,
+    )
     for name in _PROVIDER_VARIABLES:
         value = provider_statuses.get(name)
         print(f"{name}={value if value in {'set', 'missing'} else 'invalid'}", file=output)
@@ -497,6 +515,7 @@ def _verify_candidate(
         return 3, None
     if (
         runtime_profile != "official-masm"
+        or runtime_settings != "valid"
         or candidate_modules != "present"
         or any(provider_statuses.get(name) != "set" for name in _PROVIDER_VARIABLES)
     ):
