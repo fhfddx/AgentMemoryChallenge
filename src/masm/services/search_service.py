@@ -260,7 +260,10 @@ class SearchService:
                     continue
                 known.add(candidate.memory_id)
                 merged.append(candidate)
-        return merged, source_pairs_from_edges(edges, merged, user_id)
+        # 关系边端点可能是已被去重掉的同源父记忆；用本次用户范围内的全部已知候选
+        # （合并候选、扩展结果、扩展种子）解析来源分组，绝不跨用户。
+        known_candidates = [*merged, *expanded, *seeds]
+        return merged, source_pairs_from_edges(edges, known_candidates, user_id)
 
     @staticmethod
     def _deduplicate(candidates: Sequence[MemoryCandidate]) -> list[MemoryCandidate]:

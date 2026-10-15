@@ -85,7 +85,8 @@ def test_expand_with_provenance_returns_identical_candidates_plus_a_sidecar() ->
 
     assert list(result.candidates) == plain
     assert [item.memory_id for item in result.candidates] == [b, c]
-    assert repository.provenance_calls == [[a], [b]]
+    # 种子前沿、种子加一跳前沿、以及第二跳种子各查询一次有界溯源。
+    assert repository.provenance_calls == [[a], [a, b], [b]]
     assert [(edge.predecessor_id, edge.candidate_id) for edge in result.edges] == [
         (a, b),
         (b, c),
@@ -125,7 +126,8 @@ def test_provenance_is_empty_for_seeds_without_relations() -> None:
 
     assert result.candidates == ()
     assert result.edges == ()
-    assert repository.provenance_calls == []
+    # 种子前沿始终会被查询：两端都已被直接召回的真实关系边也必须可证。
+    assert repository.provenance_calls == [[a]]
 
 
 def test_conflict_completion_is_not_reported_as_relation_provenance() -> None:

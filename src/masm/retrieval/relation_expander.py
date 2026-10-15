@@ -113,6 +113,17 @@ class RelationExpander:
 
         seed_ids = [seed.memory_id for seed in bounded_seeds]
         edges: list[ExpansionEdge] = []
+        if collect_edges:
+            # 种子之间已存在的关系边也必须进入 sidecar：当一条持久化关系连接的两端
+            # 都已被直接召回时，扩展不会有任何一跳，否则该真实连接在图上永远不可证。
+            edges.extend(
+                _provenance_edges(
+                    self._repo.relation_edges(user_id, seed_ids, MAX_PROVENANCE_EDGES),
+                    predecessors=set(seed_ids),
+                    candidates=set(seed_ids),
+                    depth=1,
+                )
+            )
         # 冲突补全优先占用预算，剩余预算才给普通关系邻居。
         peers = self._complete_conflicts(user_id, bounded_seeds, budget)
         results: list[MemoryCandidate] = []
@@ -125,24 +136,25 @@ class RelationExpander:
             seen.add(candidate.memory_id)
             results.append(candidate)
             if len(results) >= budget:
-                return ExpansionResult(tuple(results), ())
+                return ExpansionResult(tuple(results), _bounded_edges(edges))
 
         relation_budget = budget - len(results)
         if relation_budget < 1:
-            return ExpansionResult(tuple(results), ())
+            return ExpansionResult(tuple(results), _bounded_edges(edges))
 
         direct_hop = _ordered_unique(
             self._repo.related(user_id, seed_ids, budget),
             excluded=seed_ids,
         )
         if not direct_hop:
-            return ExpansionResult(tuple(results), ())
+            return ExpansionResult(tuple(results), _bounded_edges(edges))
         if collect_edges:
+            frontier = [*seed_ids, *(item.memory_id for item in direct_hop)]
             edges.extend(
                 _provenance_edges(
-                    self._repo.relation_edges(user_id, seed_ids, MAX_PROVENANCE_EDGES),
-                    predecessors=set(seed_ids),
-                    candidates={item.memory_id for item in direct_hop},
+                    self._repo.relation_edges(user_id, frontier, MAX_PROVENANCE_EDGES),
+                    predecessors=set(frontier),
+                    candidates=set(frontier),
                     depth=1,
                 )
             )
@@ -177,10 +189,9 @@ class RelationExpander:
                         [candidate.memory_id for candidate in traversal_seeds],
                         MAX_PROVENANCE_EDGES,
                     ),
-                    predecessors={
-                        candidate.memory_id for candidate in traversal_seeds
-                    },
-                    candidates={item.memory_id for item in direct_hop}
+                    predecessors={candidate.memory_id for candidate in traversal_seeds},
+                    candidates=set(seed_ids)
+                    | {candidate.memory_id for candidate in direct_hop}
                     | {item.memory_id for item in second_hop},
                     depth=2,
                 )
@@ -270,4 +281,23 @@ def _provenance_edges(
 
 
 def _bounded_edges(edges: Sequence[ExpansionEdge]) -> tuple[ExpansionEdge, ...]:
-    return tuple(edges[:MAX_PROVENANCE_EDGES])
+    """按无向端点对 + 关系类型去重（保留最浅深度）并截断到硬上限。
+
+    多次溯源查询会重复看到同一行；sidecar 只保留一条记录，方向与深度取最先命中的那次。
+    """
+    seen: set[tuple[tuple[UUID, UUID], str]] = set()
+    bounded: list[ExpansionEdge] = []
+    for edge in edges:
+        pair = (
+            (edge.predecessor_id, edge.candidate_id)
+            if edge.predecessor_id <= edge.candidate_id
+            else (edge.candidate_id, edge.predecessor_id)
+        )
+        key = (pair, edge.relation_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        bounded.append(edge)
+        if len(bounded) >= MAX_PROVENANCE_EDGES:
+            break
+    return tuple(bounded)
