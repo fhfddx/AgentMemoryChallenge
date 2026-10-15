@@ -11,13 +11,13 @@ from collections.abc import Mapping, Sequence
 from uuid import UUID
 
 import pytest
+
+from masm.providers.fakes import FakeStructuredLLM
 from masm.retrieval.evidence_graph import (
     EvidenceGraphPlanner,
     GraphContext,
     GraphEvidenceSelector,
 )
-
-from masm.providers.fakes import FakeStructuredLLM
 from masm.retrieval.evidence_selector import EvidenceSelector
 from masm.retrieval.reranker import RankedEvidence
 from masm.schemas.content import ImageURLPart

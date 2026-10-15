@@ -3,6 +3,7 @@
 from uuid import UUID
 
 import pytest
+
 from masm.retrieval.evidence_graph import (
     MAX_GRAPH_LINKS,
     MAX_GRAPH_REQUIREMENTS,
@@ -21,7 +22,6 @@ from masm.retrieval.evidence_graph_rules import (
     shared_discriminative_unit,
     validate_proposal,
 )
-
 from masm.retrieval.reranker import RankedEvidence
 from masm.schemas.content import TextPart
 

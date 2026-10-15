@@ -3,10 +3,10 @@
 import io
 import json
 
-from masm.retrieval.evidence_graph import EvidenceGraphProposal
 from scripts.evidence_graph_probe import CASES, proposal_responses, run_probe
 
 from masm.providers.fakes import FakeStructuredLLM
+from masm.retrieval.evidence_graph import EvidenceGraphProposal
 
 
 def _rows(output: io.StringIO) -> list[dict]:
