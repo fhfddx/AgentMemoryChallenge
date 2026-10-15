@@ -993,7 +993,7 @@ def test_unrelated_candidates_are_never_added_to_fill_the_budget() -> None:
     assert outcome.selection.evidence_state == "sufficient"
 
 
-def test_complete_graph_over_the_evidence_cap_degrades_to_bounded_partial() -> None:
+def test_over_budget_partial_remains_connected() -> None:
     question = "What is the code name and when is the review?"
     notes = [f"Note {index} about the Zephyr review." for index in range(14)]
     nodes = [
@@ -1030,9 +1030,18 @@ def test_complete_graph_over_the_evidence_cap_degrades_to_bounded_partial() -> N
     # silently truncating a claimed complete path.
     assert outcome.graph.link_count == 13
     assert outcome.selection.evidence_state == "partial"
+    assert outcome.selection.evidence
     assert len(outcome.selection.evidence) <= 12
-    assert outcome.selection.evidence[0] == nodes[0]
-    assert outcome.selection.evidence[-1] == nodes[13]
+    selected_indices = {nodes.index(item) for item in outcome.selection.evidence}
+    reached = {min(selected_indices)}
+    frontier = list(reached)
+    while frontier:
+        current = frontier.pop()
+        for neighbour in (current - 1, current + 1):
+            if neighbour in selected_indices and neighbour not in reached:
+                reached.add(neighbour)
+                frontier.append(neighbour)
+    assert reached == selected_indices
 
 
 def test_connected_solution_after_512_combinations_is_sufficient() -> None:

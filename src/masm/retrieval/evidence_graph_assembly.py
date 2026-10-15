@@ -122,7 +122,15 @@ def assemble(
         _inclusion(component_nodes, chosen, support_nodes, adjacency), candidates
     )
     if len(included) > max_selected:
-        included = set(_bounded(included, chosen.values(), max_selected))
+        included = _best_bounded_partial(
+            component_nodes=component_nodes,
+            covered=covered,
+            covering=covering,
+            adjacency=adjacency,
+            candidates=candidates,
+            supports=supports,
+            max_selected=max_selected,
+        )
     return AssemblyOutcome("partial", _selected(included, candidates), len(components))
 
 
@@ -306,20 +314,82 @@ def _best_component(
     return best_index
 
 
-def _bounded(
-    included: set[int], covering_nodes: Iterable[int], max_selected: int
-) -> list[int]:
-    """超出上限时先保留每个需求的覆盖节点，再按原 rank 补入连接节点。"""
-    essential = sorted(set(covering_nodes))
-    selected = list(essential[:max_selected])
-    selected_set = set(selected)
-    for node in sorted(included):
-        if len(selected) >= max_selected:
-            break
-        if node not in selected_set:
-            selected.append(node)
-            selected_set.add(node)
-    return sorted(selected)
+def _connected_choice(
+    component_nodes: set[int],
+    chosen_nodes: Iterable[int],
+    adjacency: Mapping[int, Sequence[int]],
+) -> set[int]:
+    """Return the deterministic path union connecting the chosen covering nodes."""
+    ordered = sorted(set(chosen_nodes))
+    if not ordered:
+        return set()
+    included = {ordered[0]}
+    for left, right in zip(ordered, ordered[1:], strict=False):
+        included |= _shortest_path(adjacency, component_nodes, left, right)
+    return included
+
+
+def _is_connected(
+    nodes: set[int], adjacency: Mapping[int, Sequence[int]]
+) -> bool:
+    if not nodes:
+        return False
+    reached = {min(nodes)}
+    stack = list(reached)
+    while stack:
+        current = stack.pop()
+        for neighbour in adjacency[current]:
+            if neighbour in nodes and neighbour not in reached:
+                reached.add(neighbour)
+                stack.append(neighbour)
+    return reached == nodes
+
+
+def _best_bounded_partial(
+    *,
+    component_nodes: set[int],
+    covered: Sequence[int],
+    covering: Mapping[int, Sequence[int]],
+    adjacency: Mapping[int, Sequence[int]],
+    candidates: Sequence[CandidateView],
+    supports: Sequence[ValidatedSupport],
+    max_selected: int,
+) -> set[int]:
+    """Choose the best connected requirement subset that fits the response cap."""
+    available = {
+        requirement: [node for node in covering[requirement] if node in component_nodes]
+        for requirement in covered
+    }
+    requirements = [requirement for requirement in covered if available[requirement]]
+    direct_nodes = {
+        support.candidate_index for support in supports if support.role == "direct"
+    }
+    best: tuple[tuple[int, int, int, int, tuple[int, ...]], set[int]] | None = None
+    for subset_size in range(1, len(requirements) + 1):
+        for subset in itertools.combinations(requirements, subset_size):
+            choices = [available[requirement] for requirement in subset]
+            for combination in itertools.product(*choices):
+                chosen = set(combination)
+                raw = _connected_choice(component_nodes, chosen, adjacency)
+                deduplicated = _deduplicate(raw, candidates)
+                included = (
+                    deduplicated
+                    if chosen <= deduplicated and _is_connected(deduplicated, adjacency)
+                    else raw
+                )
+                if len(included) > max_selected:
+                    continue
+                sources = len({candidates[node].source_group for node in included})
+                key = (
+                    -len(subset),
+                    -len(included & direct_nodes),
+                    -sources,
+                    len(included),
+                    tuple(sorted(included)),
+                )
+                if best is None or key < best[0]:
+                    best = (key, included)
+    return best[1] if best is not None else set()
 
 
 def _selected(included: set[int], candidates: Sequence[CandidateView]) -> tuple[CandidateView, ...]:
