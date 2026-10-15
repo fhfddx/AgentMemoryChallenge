@@ -10,12 +10,16 @@ selector so the graph path sees byte-identical question text and the same opaque
 """
 
 import math
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
+from time import perf_counter
+from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, StrictInt
+from pydantic import BaseModel, ConfigDict, StrictInt, ValidationError
 
-from masm.providers.llm import ModelRequest, StructuredLLM
+from masm.providers.llm import ModelRequest, StructuredLLM, StructuredOutputError
+from masm.retrieval.evidence_graph_assembly import assemble
 from masm.retrieval.evidence_graph_rules import (
     MAX_GRAPH_LINKS,
     MAX_GRAPH_REQUIREMENTS,
@@ -24,7 +28,9 @@ from masm.retrieval.evidence_graph_rules import (
     LinkKind,
     RequirementKind,
     SupportRole,
+    candidate_views,
     planner_candidate_text,
+    validate_proposal,
 )
 from masm.retrieval.evidence_selector import (
     DEFAULT_MAX_CHARS_PER_CANDIDATE,
@@ -32,14 +38,20 @@ from masm.retrieval.evidence_selector import (
     MAX_OPTION_CHARS,
     MAX_OPTIONS,
     MAX_SELECTED_EVIDENCE,
+    DeterministicEvidenceSelector,
+    EvidenceSelector,
     SelectionResult,
+    _question_text,
     _signal_payload,
     _source_labels,
 )
 from masm.retrieval.reranker import RankedEvidence
-from masm.retrieval.selector_pool import DEFAULT_SELECTOR_CANDIDATES
+from masm.retrieval.selector_pool import DEFAULT_SELECTOR_CANDIDATES, build_selector_pool
+from masm.schemas.content import ContentPart
 
 PROMPT_VERSION = "evidence-graph-planner-v1"
+# 遥测只记录该固定枚举；"unknown" 表示本次没有图判定（纯图片查询或 v7 回退）。
+ReportedGraphState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
 __all__ = [
     "MAX_GRAPH_LINKS",
@@ -50,6 +62,9 @@ __all__ = [
     "EvidenceGraphPlanner",
     "EvidenceGraphProposal",
     "GraphContext",
+    "GraphDiagnostics",
+    "GraphEvidenceSelector",
+    "GraphSelection",
     "GroundedSupport",
     "ProposedLink",
     "QuestionRequirement",
@@ -221,4 +236,211 @@ class EvidenceGraphPlanner:
                 temperature=0.0,
             ),
             EvidenceGraphProposal,
+        )
+
+
+@dataclass(frozen=True)
+class GraphDiagnostics:
+    """内容安全的图路径遥测：只有固定枚举、计数与耗时。"""
+
+    enabled: bool = False
+    planner_calls: int = 0
+    candidate_count: int = 0
+    requirement_count: int = 0
+    support_count: int = 0
+    link_count: int = 0
+    component_count: int = 0
+    selected_count: int = 0
+    selected_source_count: int = 0
+    state: "ReportedGraphState" = "unknown"
+    fallback: bool = False
+    failure_category: GraphFailureCategory = "none"
+    planner_latency_ms: float = 0.0
+
+
+@dataclass(frozen=True)
+class GraphSelection:
+    """图路径结果：兼容既有 `SelectionResult` 契约 + 内容安全遥测。"""
+
+    selection: SelectionResult
+    graph: GraphDiagnostics
+
+
+def _reported_state(state: str) -> "ReportedGraphState":
+    if state == "sufficient":
+        return "sufficient"
+    if state == "partial":
+        return "partial"
+    if state == "insufficient":
+        return "insufficient"
+    return "unknown"
+
+
+class GraphEvidenceSelector:
+    """单次 planner 调用 + 确定性校验/组装，失败时回退一次冻结的 v7 selector。"""
+
+    def __init__(
+        self,
+        planner: EvidenceGraphPlanner,
+        fallback: EvidenceSelector | DeterministicEvidenceSelector,
+        *,
+        max_candidates: int = DEFAULT_SELECTOR_CANDIDATES,
+        max_selected: int = MAX_SELECTED_EVIDENCE,
+    ) -> None:
+        if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
+            raise ValueError("max_candidates must be in 1..32")
+        if not 1 <= max_selected <= min(max_candidates, MAX_SELECTED_EVIDENCE):
+            raise ValueError("max_selected must be in 1..12 and <= max_candidates")
+        self._planner = planner
+        self._fallback = fallback
+        self._max_candidates = max_candidates
+        self._max_selected = max_selected
+
+    def select(
+        self,
+        query: str | Sequence[ContentPart],
+        options: Sequence[str] | None,
+        ranked: Sequence[RankedEvidence],
+        strong_anchor_ids: Collection[UUID],
+        graph_context: GraphContext | None = None,
+    ) -> GraphSelection:
+        """返回经校验组装的原证据；valid insufficient 直接拒答且不回退。"""
+        user_id = ranked[0].user_id if ranked else ""
+        pool = build_selector_pool(
+            [item for item in ranked if item.user_id == user_id],
+            max_candidates=self._max_candidates,
+        )
+        if not pool:
+            return GraphSelection(
+                SelectionResult((), 0, 0, 0, False, True),
+                GraphDiagnostics(enabled=True),
+            )
+
+        question, visual, has_text = _question_text(query)
+        if visual and not has_text:
+            # 纯图片查询没有可供 planner 判断的文本问题：沿用既有 selector/回退路径。
+            selection = self._v7(query, options, ranked, strong_anchor_ids)
+            return GraphSelection(
+                selection,
+                GraphDiagnostics(
+                    enabled=True,
+                    candidate_count=selection.candidate_count,
+                    selected_count=len(selection.evidence),
+                    selected_source_count=selection.selected_source_count,
+                    state=_reported_state(selection.evidence_state),
+                ),
+            )
+
+        context = graph_context if graph_context is not None else GraphContext()
+        views = candidate_views(pool, max_chars=self._planner.max_chars_per_candidate)
+        started = perf_counter()
+        try:
+            proposal = self._planner.plan(question, visual, options, pool)
+        except Exception as exc:
+            category: GraphFailureCategory = (
+                "planner_invalid"
+                if isinstance(
+                    exc, (StructuredOutputError, ValidationError, ValueError, TypeError)
+                )
+                else "planner_unavailable"
+            )
+            return self._fallback_selection(
+                category,
+                (perf_counter() - started) * 1000.0,
+                query,
+                options,
+                ranked,
+                strong_anchor_ids,
+            )
+        latency_ms = (perf_counter() - started) * 1000.0
+        try:
+            outcome = validate_proposal(
+                proposal,
+                question=question,
+                candidates=views,
+                context=context,
+                max_requirements=self._planner.max_requirements,
+                max_supports=self._planner.max_supports,
+                max_links=self._planner.max_links,
+            )
+            if not outcome.valid:
+                return self._fallback_selection(
+                    "planner_invalid", latency_ms, query, options, ranked, strong_anchor_ids
+                )
+            assembled = assemble(
+                requirement_count=len(outcome.requirements),
+                supports=outcome.supports,
+                links=outcome.links,
+                candidates=views,
+                max_selected=self._max_selected,
+            )
+        except Exception:
+            return self._fallback_selection(
+                "internal_error", latency_ms, query, options, ranked, strong_anchor_ids
+            )
+
+        evidence = tuple(view.evidence for view in assembled.selected)
+        selected_sources = len({view.source_group for view in assembled.selected})
+        selection = SelectionResult(
+            evidence=evidence,
+            candidate_count=len(pool),
+            source_count=len({view.source_group for view in views}),
+            selected_source_count=selected_sources,
+            fallback=False,
+            abstained=assembled.state == "insufficient" or not evidence,
+            failure_category="none",
+            evidence_state=assembled.state,
+        )
+        return GraphSelection(
+            selection,
+            GraphDiagnostics(
+                enabled=True,
+                planner_calls=1,
+                candidate_count=len(pool),
+                requirement_count=len(outcome.requirements),
+                support_count=len(outcome.supports),
+                link_count=len(outcome.links),
+                component_count=assembled.component_count,
+                selected_count=len(evidence),
+                selected_source_count=selected_sources,
+                state=assembled.state,
+                fallback=False,
+                failure_category="none",
+                planner_latency_ms=latency_ms,
+            ),
+        )
+
+    def _v7(
+        self,
+        query: str | Sequence[ContentPart],
+        options: Sequence[str] | None,
+        ranked: Sequence[RankedEvidence],
+        strong_anchor_ids: Collection[UUID],
+    ) -> SelectionResult:
+        """调用冻结的 v7 selector；任何异常都保持其既有语义。"""
+        return self._fallback.select(query, options, ranked, strong_anchor_ids)
+
+    def _fallback_selection(
+        self,
+        category: GraphFailureCategory,
+        latency_ms: float,
+        query: str | Sequence[ContentPart],
+        options: Sequence[str] | None,
+        ranked: Sequence[RankedEvidence],
+        strong_anchor_ids: Collection[UUID],
+    ) -> GraphSelection:
+        selection = self._v7(query, options, ranked, strong_anchor_ids)
+        return GraphSelection(
+            selection,
+            GraphDiagnostics(
+                enabled=True,
+                planner_calls=1,
+                candidate_count=selection.candidate_count,
+                selected_count=len(selection.evidence),
+                selected_source_count=selection.selected_source_count,
+                state="unknown",
+                fallback=True,
+                failure_category=category,
+                planner_latency_ms=latency_ms,
+            ),
         )

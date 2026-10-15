@@ -39,8 +39,8 @@ def test_scripted_suite_passes_every_positive_and_negative_case() -> None:
     summary = rows[-1]
     assert summary["case"] == "summary"
     assert summary["case_count"] == len(CASES)
-    assert summary["positive_passed"] == summary["positive_total"] == 12
-    assert summary["negative_passed"] == summary["negative_total"] == 12
+    assert summary["positive_passed"] == summary["positive_total"] == 13
+    assert summary["negative_passed"] == summary["negative_total"] == 13
     assert summary["fallbacks"] == 0
     assert summary["failure_count"] == 0
     assert summary["candidate_eligible"] is True
@@ -121,6 +121,6 @@ def test_one_broken_negative_twin_rejects_the_whole_run() -> None:
 
     assert code == 1
     summary = rows[-1]
-    assert summary["positive_passed"] == summary["positive_total"] == 12
+    assert summary["positive_passed"] == summary["positive_total"] == 13
     assert summary["negative_passed"] == summary["negative_total"] - 1
     assert summary["candidate_eligible"] is False

@@ -470,7 +470,7 @@ CASES: tuple[Case, ...] = (
             [_requirement("Which city hosts the project workshop", "location")],
             [
                 _support(0, 0, "The project workshop was planned.", "context"),
-                _support(1, 0, "The workshop takes place every spring.", "context"),
+                _support(0, 1, "The workshop takes place every spring.", "context"),
             ],
             [
                 _link(
@@ -550,7 +550,46 @@ CASES: tuple[Case, ...] = (
         required_fragments=("第三个抽屉",),
     ),
     Case(
-        name="chinese_disconnected",
+        name="chinese_direct_negative",
+        question="我把琥珀钥匙放在哪里了？",
+        candidates=(("s0", 0, "琥珀钥匙对我很重要。"),),
+        positive=False,
+        proposal=_proposal(
+            [_requirement("我把琥珀钥匙放在哪里了", "location")],
+            [_support(0, 0, "琥珀钥匙对我很重要。", "context")],
+        ),
+        expected_state="insufficient",
+        forbidden_fragments=("第三个抽屉",),
+    ),
+    Case(
+        name="chinese_context",
+        question="我报名的课程在哪个城市举办？",
+        candidates=(("s0", 0, "我报名了陶艺工作坊。"), ("s1", 0, "陶艺工作坊在里斯本举办。")),
+        positive=True,
+        proposal=_proposal(
+            [
+                _requirement("在哪个城市举办", "location"),
+                _requirement("我报名的课程", "subject"),
+            ],
+            [
+                _support(1, 0, "我报名了陶艺工作坊。", "direct"),
+                _support(0, 1, "陶艺工作坊在里斯本举办。", "direct"),
+            ],
+            [
+                _link(
+                    0,
+                    1,
+                    "我报名了陶艺工作坊。",
+                    "陶艺工作坊在里斯本举办。",
+                    "shared_explicit_mention",
+                )
+            ],
+        ),
+        expected_state="sufficient",
+        required_fragments=("陶艺", "里斯本"),
+    ),
+    Case(
+        name="chinese_context_negative",
         question="我报名的课程，工作坊在哪个城市举办？",
         candidates=(("s0", 0, "我报名了一个工作坊。"), ("s1", 0, "这个工作坊在里斯本举办。")),
         positive=False,

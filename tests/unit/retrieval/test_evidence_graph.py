@@ -973,6 +973,48 @@ def test_unrelated_candidates_are_never_added_to_fill_the_budget() -> None:
     assert outcome.selection.evidence_state == "sufficient"
 
 
+def test_complete_graph_over_the_evidence_cap_degrades_to_bounded_partial() -> None:
+    question = "What is the code name and when is the review?"
+    notes = [f"Note {index} about the Zephyr review." for index in range(14)]
+    nodes = [
+        _evidence(index + 1, "source-a", notes[index], position=index) for index in range(14)
+    ]
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("What is the code name", "attribute"),
+                    _requirement("when is the review", "time"),
+                ],
+                supports=[
+                    _support(0, 0, notes[0], "direct"),
+                    _support(1, 13, notes[13], "direct"),
+                ],
+                links=[
+                    _link(index, index + 1, notes[index], notes[index + 1], "same_source_context")
+                    for index in range(13)
+                ],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        question,
+        None,
+        nodes,
+        _anchors(*nodes),
+        GraphContext(source_context_enabled=True),
+    )
+
+    # 14 connected items exceed the evidence cap: the verdict must degrade instead of
+    # silently truncating a claimed complete path.
+    assert outcome.graph.link_count == 13
+    assert outcome.selection.evidence_state == "partial"
+    assert len(outcome.selection.evidence) <= 12
+    assert outcome.selection.evidence[0] == nodes[0]
+    assert outcome.selection.evidence[-1] == nodes[13]
+
+
 # --- 15. Chinese -------------------------------------------------------------------------
 
 

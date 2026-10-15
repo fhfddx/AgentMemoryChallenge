@@ -202,8 +202,11 @@ class ValidationOutcome:
 class GraphContextView(Protocol):
     """校验器可见的、本请求内既有的可证明连接来源。"""
 
-    relation_source_pairs: tuple[tuple[str, str], ...]
-    source_context_enabled: bool
+    @property
+    def relation_source_pairs(self) -> tuple[tuple[str, str], ...]: ...
+
+    @property
+    def source_context_enabled(self) -> bool: ...
 
 
 def candidate_views(
