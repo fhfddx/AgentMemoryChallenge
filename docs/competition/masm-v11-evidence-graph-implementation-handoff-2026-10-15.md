@@ -275,9 +275,9 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 
    ```bash
    .venv/bin/python scripts/evidence_graph_probe.py --stability \
-     | tee evidence-graph-stability.jsonl
+     | tee /tmp/masm-evidence-graph-stability.jsonl
    status=${PIPESTATUS[0]}
-   tail -n 1 evidence-graph-stability.jsonl
+   tail -n 1 /tmp/masm-evidence-graph-stability.jsonl
    exit "$status"
    ```
 
