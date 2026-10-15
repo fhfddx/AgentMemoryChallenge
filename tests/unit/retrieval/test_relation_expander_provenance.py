@@ -51,7 +51,12 @@ class _ProvenanceRepository:
     ) -> list[RelationEdge]:
         assert user_id == _USER
         self.provenance_calls.append(list(memory_ids))
-        return self.rows[:limit]
+        allowed = set(memory_ids)
+        return [
+            row
+            for row in self.rows
+            if row.source_id in allowed and row.target_id in allowed
+        ][:limit]
 
 
 def _edge(left: UUID, right: UUID, relation_type: str = "follows") -> RelationEdge:
@@ -86,7 +91,7 @@ def test_expand_with_provenance_returns_identical_candidates_plus_a_sidecar() ->
     assert list(result.candidates) == plain
     assert [item.memory_id for item in result.candidates] == [b, c]
     # 种子前沿、种子加一跳前沿、以及第二跳种子各查询一次有界溯源。
-    assert repository.provenance_calls == [[a], [a, b], [b]]
+    assert repository.provenance_calls == [[a], [a, b], [b, c]]
     assert [(edge.predecessor_id, edge.candidate_id) for edge in result.edges] == [
         (a, b),
         (b, c),

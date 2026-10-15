@@ -26,7 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import array as pg_array
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from masm.storage.db import Database
 from masm.storage.models import (
@@ -984,55 +984,40 @@ class MemoryRepository:
         if not ids or limit < 1:
             return []
         with self._database.session() as session:
+            source_memory = aliased(Memory, name="relation_source_memory")
+            target_memory = aliased(Memory, name="relation_target_memory")
             relations = (
                 session.execute(
                     select(MemoryRelation)
+                    .join(source_memory, source_memory.id == MemoryRelation.source_id)
+                    .join(target_memory, target_memory.id == MemoryRelation.target_id)
                     .where(
                         MemoryRelation.user_id == user_id,
                         MemoryRelation.source_type == "memory",
                         MemoryRelation.target_type == "memory",
-                        or_(
-                            MemoryRelation.source_id.in_(ids),
-                            MemoryRelation.target_id.in_(ids),
-                        ),
+                        MemoryRelation.source_id.in_(ids),
+                        MemoryRelation.target_id.in_(ids),
+                        source_memory.user_id == user_id,
+                        target_memory.user_id == user_id,
                     )
                     .order_by(
                         MemoryRelation.source_id,
                         MemoryRelation.target_id,
                         MemoryRelation.relation_type,
                     )
+                    .limit(limit)
                 )
                 .scalars()
                 .all()
             )
-            endpoints = {relation.source_id for relation in relations}
-            endpoints.update(relation.target_id for relation in relations)
-            if not endpoints:
-                return []
-            owned = set(
-                session.execute(
-                    select(Memory.id).where(
-                        Memory.user_id == user_id, Memory.id.in_(list(endpoints))
-                    )
-                )
-                .scalars()
-                .all()
+        return [
+            RelationEdge(
+                source_id=relation.source_id,
+                target_id=relation.target_id,
+                relation_type=relation.relation_type,
             )
-        edges: list[RelationEdge] = []
-        for relation in relations:
-            # 双端所有权校验：即使数据库里存在损坏行，也绝不把跨用户边交给调用方。
-            if relation.source_id not in owned or relation.target_id not in owned:
-                continue
-            edges.append(
-                RelationEdge(
-                    source_id=relation.source_id,
-                    target_id=relation.target_id,
-                    relation_type=relation.relation_type,
-                )
-            )
-            if len(edges) >= limit:
-                break
-        return edges
+            for relation in relations
+        ]
 
     def delete_run(self, user_id: str, request_id: str) -> DeletedRun:
         """删除该用户该运行（request_id）的数据库记录，并把待删对象登记为 PENDING 意图。

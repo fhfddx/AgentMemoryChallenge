@@ -182,11 +182,15 @@ class RelationExpander:
             excluded={*seen, *(candidate.memory_id for candidate in direct_hop)},
         )
         if collect_edges:
+            second_frontier = [
+                *(candidate.memory_id for candidate in traversal_seeds),
+                *(candidate.memory_id for candidate in second_hop),
+            ]
             edges.extend(
                 _provenance_edges(
                     self._repo.relation_edges(
                         user_id,
-                        [candidate.memory_id for candidate in traversal_seeds],
+                        second_frontier,
                         MAX_PROVENANCE_EDGES,
                     ),
                     predecessors={candidate.memory_id for candidate in traversal_seeds},

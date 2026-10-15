@@ -220,7 +220,7 @@ def test_persisted_relation_sidecar_enables_a_cross_source_chain(
     try:
         assert [
             (edge.source_id, edge.target_id)
-            for edge in repository.relation_edges(user, [code_id], 10)
+            for edge in repository.relation_edges(user, [code_id, venue_id], 10)
         ] == [(code_id, venue_id)]
 
         llm = _PayloadPlannerLLM(
@@ -249,6 +249,45 @@ def test_persisted_relation_sidecar_enables_a_cross_source_chain(
         assert payload["graph_link_count"] == 1
         assert payload["graph_state"] == "sufficient"
         assert payload["graph_fallback"] is False
+    finally:
+        _cleanup(repository, asset_store, runs)
+
+
+def test_relation_sidecar_limit_applies_after_frontier_filter(
+    database: Database,
+    asset_store: AssetStore,
+    settings: Settings,
+    embeddings: DeterministicFakeEmbeddingProvider,
+) -> None:
+    repository = MemoryRepository(database)
+    user = _uid("bounded-sidecar")
+    runs: list[tuple[str, str]] = []
+    source_run, source_id = _seed(
+        database, asset_store, settings, embeddings, user, "Source memory."
+    )
+    runs.append((source_run, user))
+    targets: list[UUID] = []
+    for index in range(4):
+        request_id, memory_id = _seed(
+            database,
+            asset_store,
+            settings,
+            embeddings,
+            user,
+            f"Target memory {index}.",
+        )
+        runs.append((request_id, user))
+        targets.append(memory_id)
+    desired_id = max(targets)
+    try:
+        for target_id in sorted(targets):
+            _link(database, user, source_id, target_id)
+
+        edges = repository.relation_edges(user, [source_id, desired_id], 1)
+
+        assert [(edge.source_id, edge.target_id) for edge in edges] == [
+            (source_id, desired_id)
+        ]
     finally:
         _cleanup(repository, asset_store, runs)
 
