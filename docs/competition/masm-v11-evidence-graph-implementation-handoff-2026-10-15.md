@@ -269,30 +269,42 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 2. 用户授权后：在真实 Provider 上执行 `scripts/evidence_graph_probe.py --stability`（固定 26 例、
    13 个正负配对、单进程完整 5 轮；任一轮失败都返回非零，不得挑轮次）。
 
-   服务器上应使用既有秘密注入机制，不要把值写入命令、仓库或回传日志。执行前只核对下列变量已由运行环境提供：
+   服务器上应使用既有秘密注入机制，不要把值写入命令、仓库或回传日志。当前 `Dockerfile`
+   有意不复制 `scripts/`，而 Provider 配置只注入 API 容器；因此不要因容器内缺少 probe 就复制文件、
+   重建镜像或把秘密导出到宿主机。先核对 API 容器内已有
    `MASM_RUNTIME_PROFILE=official-masm`、`MASM_LLM_BASE_URL`、`MASM_LLM_API_KEY`、
-   `MASM_EMBEDDING_BASE_URL`、`MASM_EMBEDDING_API_KEY`。建议命令：
+   `MASM_EMBEDDING_BASE_URL`、`MASM_EMBEDDING_API_KEY`，再从已核验的候选 checkout 把只读 probe
+   经标准输入送入容器。运行前还必须用候选清单中的镜像 ID/源码指纹确认容器内安装的 `masm`
+   与该 checkout 一致；成功导入模块不等于版本一致。建议命令：
 
    ```bash
+   api_container=masm-v11-api-1
    if (
-     test "${MASM_RUNTIME_PROFILE:-}" = "official-masm" || {
-       printf '%s\n' 'MASM_RUNTIME_PROFILE is not official-masm' >&2
+     test -f scripts/evidence_graph_probe.py || {
+       printf '%s\n' 'candidate checkout is missing the probe script' >&2
        exit 2
      }
-     for name in \
-       MASM_LLM_BASE_URL \
-       MASM_LLM_API_KEY \
-       MASM_EMBEDDING_BASE_URL \
-       MASM_EMBEDDING_API_KEY
-     do
-       test -n "${!name:-}" || {
-         printf 'missing required variable: %s\n' "$name" >&2
+     docker exec "$api_container" sh -lc '
+       test "${MASM_RUNTIME_PROFILE:-}" = "official-masm" || {
+         printf "%s\n" "MASM_RUNTIME_PROFILE is not official-masm" >&2
          exit 2
        }
-     done
+       for name in \
+         MASM_LLM_BASE_URL \
+         MASM_LLM_API_KEY \
+         MASM_EMBEDDING_BASE_URL \
+         MASM_EMBEDDING_API_KEY
+       do
+         printenv "$name" | grep -q . || {
+           printf "missing required variable: %s\n" "$name" >&2
+           exit 2
+         }
+       done
+     ' || exit $?
 
      set -o pipefail
-     .venv/bin/python scripts/evidence_graph_probe.py --stability \
+     docker exec -i "$api_container" python - --stability \
+       < scripts/evidence_graph_probe.py \
        | tee /tmp/masm-evidence-graph-stability.jsonl
      status=${PIPESTATUS[0]}
      tail -n 1 /tmp/masm-evidence-graph-stability.jsonl
@@ -305,8 +317,12 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
    printf 'probe_exit_code=%s\n' "$probe_status"
    ```
 
-   外层 `if` 在交互式 shell 中接住子 shell 的非零状态；子 shell 内的 `exit` 不会结束 SSH 会话，即使外层开启了 `set -e`。只需回传 `probe_exit_code`
-   和最后一行 `stability_summary`；不要回传环境变量、Provider 响应或其他服务日志。
+   外层 `if` 在交互式 shell 中接住子 shell 的非零状态；子 shell 以及 API 容器内的 `exit` 都不会
+   结束 SSH 会话，即使外层开启了 `set -e`。该方式不在运行中容器内落盘 probe、不重启服务，
+   但会在同一容器内增加一个 Python 进程并发起至少 130 次真实 LLM 请求，因此只能在已接受该负载
+   和费用的维护窗口执行。只需回传 `probe_exit_code` 和最后一行 `stability_summary`；不要回传环境变量、
+   Provider 响应或其他服务日志。若 SSH 本身不稳定，应使用服务器既有的会话托管机制；前台命令不会
+   自动跨网络断线继续运行。
 3. 通过后按设计规格第 13 节做 API-only canary（记录镜像/容器 ID，仅替换 API 容器，Postgres 容器
    ID 必须不变），最多一次官方 Smoke；Full 不运行。
 4. 若需要，再补：并发 16/16、纯图片与混合多模态 Add→Search 清理核验、端到端延迟与响应字节核对。
