@@ -274,14 +274,39 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
    `MASM_EMBEDDING_BASE_URL`、`MASM_EMBEDDING_API_KEY`。建议命令：
 
    ```bash
-   .venv/bin/python scripts/evidence_graph_probe.py --stability \
-     | tee /tmp/masm-evidence-graph-stability.jsonl
-   status=${PIPESTATUS[0]}
-   tail -n 1 /tmp/masm-evidence-graph-stability.jsonl
-   exit "$status"
+   if (
+     test "${MASM_RUNTIME_PROFILE:-}" = "official-masm" || {
+       printf '%s\n' 'MASM_RUNTIME_PROFILE is not official-masm' >&2
+       exit 2
+     }
+     for name in \
+       MASM_LLM_BASE_URL \
+       MASM_LLM_API_KEY \
+       MASM_EMBEDDING_BASE_URL \
+       MASM_EMBEDDING_API_KEY
+     do
+       test -n "${!name:-}" || {
+         printf 'missing required variable: %s\n' "$name" >&2
+         exit 2
+       }
+     done
+
+     set -o pipefail
+     .venv/bin/python scripts/evidence_graph_probe.py --stability \
+       | tee /tmp/masm-evidence-graph-stability.jsonl
+     status=${PIPESTATUS[0]}
+     tail -n 1 /tmp/masm-evidence-graph-stability.jsonl
+     exit "$status"
+   ); then
+     probe_status=0
+   else
+     probe_status=$?
+   fi
+   printf 'probe_exit_code=%s\n' "$probe_status"
    ```
 
-   只需回传退出码和最后一行 `stability_summary`；不要回传环境变量、Provider 响应或其他服务日志。
+   外层 `if` 在交互式 shell 中接住子 shell 的非零状态；子 shell 内的 `exit` 不会结束 SSH 会话，即使外层开启了 `set -e`。只需回传 `probe_exit_code`
+   和最后一行 `stability_summary`；不要回传环境变量、Provider 响应或其他服务日志。
 3. 通过后按设计规格第 13 节做 API-only canary（记录镜像/容器 ID，仅替换 API 容器，Postgres 容器
    ID 必须不变），最多一次官方 Smoke；Full 不运行。
 4. 若需要，再补：并发 16/16、纯图片与混合多模态 Add→Search 清理核验、端到端延迟与响应字节核对。
