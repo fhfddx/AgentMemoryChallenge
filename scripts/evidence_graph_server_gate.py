@@ -118,7 +118,7 @@ class CandidateExpectations:
 DEFAULT_EXPECTATIONS = CandidateExpectations(
     probe_blob="ac29d661ab93d918ad0a5ff1412548121d44cbee",
     probe_sha256="7b9358e3027a87d8e31bc8a50a35164fb6bf06d0f57780952e9811fbaf4ccf35",
-    source_digest="6a0c96dd09c0eef2dfbb412828a5d46bca4cd1c5d6e7b840f272ce50775dae94",
+    source_digest="541fceacb6cbc80e9f5718a83247fe00e1577cd21d956b68abc9c1a894f3e3dd",
 )
 
 
@@ -204,6 +204,28 @@ def _package_digest(root: Path, manifest: Sequence[str]) -> tuple[bool, str | No
     except OSError:
         return False, None
     return True, digest.hexdigest()
+
+
+def _git_package_digest(
+    repository: Path,
+    manifest: Sequence[str],
+    runner: CommandRunner,
+) -> str | None:
+    digest = hashlib.sha256()
+    for relative_text in manifest:
+        result = _command(
+            runner,
+            ("git", "cat-file", "blob", f"HEAD:src/masm/{relative_text}"),
+            repository=repository,
+            input_text=b"",
+        )
+        if result is None or result.returncode != 0 or not isinstance(result.stdout, bytes):
+            return None
+        digest.update(relative_text.encode())
+        digest.update(b"\0")
+        digest.update(result.stdout)
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _container_check(manifest: Sequence[str]) -> str:
@@ -354,7 +376,8 @@ def _verify_candidate(
     if manifest is None:
         print("source_manifest=invalid", file=error)
         return 2, None
-    host_manifest_matches, host_digest = _package_digest(package_root, manifest)
+    host_manifest_matches, _ = _package_digest(package_root, manifest)
+    committed_digest = _git_package_digest(repository, manifest, runner)
     status = _command(
         runner,
         ("git", "status", "--porcelain", "--untracked-files=normal"),
@@ -393,7 +416,7 @@ def _verify_candidate(
     container_digest = payload.get("source_digest")
     source_matches = (
         source_manifest_matches
-        and host_digest == expectations.source_digest
+        and committed_digest == expectations.source_digest
         and container_digest == expectations.source_digest
     )
     runtime_profile = payload.get("runtime_profile")

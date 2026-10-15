@@ -52,6 +52,8 @@ class FakeCommandRunner:
             return subprocess.CompletedProcess(command, 0, "candidate-head\n", "")
         if command == ("git", "ls-files", "-z", "--", "src/masm"):
             return subprocess.CompletedProcess(command, 0, "src/masm/a.py\0", "")
+        if command == ("git", "cat-file", "blob", "HEAD:src/masm/a.py"):
+            return subprocess.CompletedProcess(command, 0, b"value = 1\n", None)
         if command == ("git", "status", "--porcelain", "--untracked-files=normal"):
             return subprocess.CompletedProcess(command, 0, "", "")
         if command == (
@@ -465,6 +467,81 @@ def test_real_git_boundary_returns_only_tracked_package_manifest(tmp_path: Path)
 
     assert gate._tracked_package_files(result) == ("tracked.py",)
     assert "PRIVATE_VALUE" not in result.stdout
+
+
+def test_clean_crlf_checkout_uses_committed_blob_digest_for_source_match(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    (repository / ".gitattributes").write_bytes(b"*.py text eol=crlf\n")
+    subprocess.run(("git", "init", "-q"), cwd=repository, check=True)
+    subprocess.run(
+        ("git", "config", "user.email", "server-gate-test@example.invalid"),
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "config", "user.name", "Server Gate Test"),
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(("git", "add", "."), cwd=repository, check=True)
+    subprocess.run(("git", "commit", "-qm", "fixture"), cwd=repository, check=True)
+    (repository / "src" / "masm" / "a.py").write_bytes(b"value = 1\r\n")
+    subprocess.run(
+        ("git", "add", "src/masm/a.py"),
+        cwd=repository,
+        check=True,
+    )
+    status = subprocess.run(
+        ("git", "status", "--porcelain", "--untracked-files=normal"),
+        cwd=repository,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    )
+    assert status.stdout == ""
+
+    docker_runner = FakeCommandRunner()
+
+    def git_backed_runner(
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        input_text: str | bytes | None = None,
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+        if args[0] == "git":
+            return gate._run_command(args, cwd=cwd, input_text=input_text)
+        return docker_runner(args, cwd=cwd, input_text=input_text)
+
+    probe_bytes = (repository / "scripts" / "evidence_graph_probe.py").read_bytes()
+    probe_blob = subprocess.run(
+        ("git", "rev-parse", "HEAD:scripts/evidence_graph_probe.py"),
+        cwd=repository,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    output = io.StringIO()
+
+    code = gate.run_server_gate(
+        ["--strict-exit"],
+        repository=repository,
+        output=output,
+        error=io.StringIO(),
+        command_runner=git_backed_runner,
+        expectations=gate.CandidateExpectations(
+            probe_blob=probe_blob,
+            probe_sha256=hashlib.sha256(probe_bytes).hexdigest(),
+            source_digest=_SOURCE_DIGEST,
+        ),
+    )
+
+    assert code == 0
+    assert "source_manifest_match=yes" in output.getvalue()
+    assert "source_match=yes" in output.getvalue()
 
 
 def test_actual_cli_is_shell_safe_unless_strict_exit_is_requested(tmp_path: Path) -> None:
