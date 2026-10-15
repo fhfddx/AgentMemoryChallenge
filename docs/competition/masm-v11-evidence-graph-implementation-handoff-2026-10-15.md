@@ -292,8 +292,9 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
    脚本从候选 checkout 经标准输入运行 probe，不在容器内落盘、不重启服务、不把 Provider 变量导出
    到宿主机。交互模式始终以进程状态 0 返回，真实门槛状态只看输出中的 `verification_exit_code` 和
    `probe_exit_code`，因此外层启用 `set -e` 也不会因门槛失败结束 SSH shell；自动化若确实需要非零
-   进程状态，必须显式增加 `--strict-exit`。完整的脱敏结果默认以原子独占方式写入系统临时目录且不
-   回显路径；若确需保留到已知位置，可指定一个 checkout 外、尚不存在的路径，例如
+   进程状态，必须显式增加 `--strict-exit`。完整结果文件默认在系统临时目录中独占创建且不回显路径；
+   写入或关闭失败会返回固定状态，但可能留下空文件或部分文件。若确需保留到已知位置，可指定一个
+   checkout 外、尚不存在的路径，例如
    `--output /tmp/masm-evidence-graph-stability-manual.jsonl`。脚本拒绝 checkout 内路径、已有文件和
    最终路径符号链接。终端只额外显示最后一行 `stability_summary` 和 `probe_exit_code`。只需回传这些
    状态行；不要回传环境变量、Provider 响应或其他服务日志。若容器名不同，可使用
@@ -339,13 +340,15 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 | `d0746f7` | `test: redact test database URL repr` |
 | `0348d78` | `test: add fixed provider stability gate` |
 
-代码/测试 HEAD（本次最终文档提交之前）：`0348d78`。最终文档提交和完整 HEAD 以交付消息中的实际
-`git log` 为准。
-
-最后一轮是主代理自审（本会话禁止未经用户要求的子代理委派），因此不把它等同于独立第二审。自审发现的两个 P2 均已通过先 RED 后 GREEN 的回归测试处理。
+固定 Provider stability 门槛的后续安全修复代码/测试 HEAD：`7d3ceb2`。它确保已验证 probe 以原始
+字节送入容器、默认临时目录不会落入 checkout，并把 write/flush/close 失败转换为脱敏状态。第三轮
+独立只读复审未发现新的 Critical/Important，且确认上一轮三项 Important 均已关闭。最新全量本机
+回归为 **954 passed、1 skipped、92 warnings**；Ruff、mypy（62 个源文件）和 diff-check 均通过。
+完整 HEAD 以交付消息中的实际 `git log` 为准。
 
 ### 14.3 最新资格判断
 
 本地 deterministic、数据库 integration、隔离、契约、Ruff、mypy 与 diff-check 门槛全部通过，
-因此该分支可作为“进入下一阶段 Provider 稳定性门槛”的候选。`--stability` 已把五轮固定门槛收敛为单进程、非零失败的可执行命令；它仍未通过真实 Provider 五轮固定
+因此该分支可作为“进入下一阶段 Provider 稳定性门槛”的候选。`--stability` 已把五轮固定门槛收敛为
+单进程执行；门槛状态由 `probe_exit_code` 表示，只有显式 `--strict-exit` 才把失败映射为非零进程状态。它仍未通过真实 Provider 五轮固定
 套件、API-only canary 或官方 Smoke；不得据此宣称官方分数提高，也不得直接部署。
