@@ -228,6 +228,43 @@ def _git_package_digest(
     return digest.hexdigest()
 
 
+def _worktree_matches_head(
+    repository: Path,
+    root: Path,
+    manifest: Sequence[str],
+    runner: CommandRunner,
+) -> bool:
+    for relative_text in manifest:
+        path = root.joinpath(*PurePosixPath(relative_text).parts)
+        try:
+            contents = path.read_bytes()
+        except OSError:
+            return False
+        worktree_blob = _clean_line(
+            _command(
+                runner,
+                (
+                    "git",
+                    "hash-object",
+                    f"--path=src/masm/{relative_text}",
+                    "--stdin",
+                ),
+                repository=repository,
+                input_text=contents,
+            )
+        )
+        committed_blob = _clean_line(
+            _command(
+                runner,
+                ("git", "rev-parse", f"HEAD:src/masm/{relative_text}"),
+                repository=repository,
+            )
+        )
+        if worktree_blob is None or worktree_blob != committed_blob:
+            return False
+    return True
+
+
 def _container_check(manifest: Sequence[str]) -> str:
     return _CONTAINER_CHECK_TEMPLATE.replace(
         "PACKAGE_MANIFEST_JSON",
@@ -376,8 +413,12 @@ def _verify_candidate(
     if manifest is None:
         print("source_manifest=invalid", file=error)
         return 2, None
-    host_manifest_matches, _ = _package_digest(package_root, manifest)
+    host_manifest_matches, host_digest = _package_digest(package_root, manifest)
     committed_digest = _git_package_digest(repository, manifest, runner)
+    worktree_matches_head = host_digest == committed_digest or (
+        host_manifest_matches
+        and _worktree_matches_head(repository, package_root, manifest, runner)
+    )
     status = _command(
         runner,
         ("git", "status", "--porcelain", "--untracked-files=normal"),
@@ -416,6 +457,7 @@ def _verify_candidate(
     container_digest = payload.get("source_digest")
     source_matches = (
         source_manifest_matches
+        and worktree_matches_head
         and committed_digest == expectations.source_digest
         and container_digest == expectations.source_digest
     )
