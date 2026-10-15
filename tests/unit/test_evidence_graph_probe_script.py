@@ -2,9 +2,13 @@
 
 import io
 import json
+from types import SimpleNamespace
 
+import pytest
+import scripts.evidence_graph_probe as probe
 from scripts.evidence_graph_probe import CASES, proposal_responses, run_probe
 
+from masm.config import RuntimeProfile
 from masm.providers.fakes import FakeStructuredLLM
 from masm.retrieval.evidence_graph import EvidenceGraphProposal
 
@@ -124,3 +128,127 @@ def test_one_broken_negative_twin_rejects_the_whole_run() -> None:
     assert summary["positive_passed"] == summary["positive_total"] == 13
     assert summary["negative_passed"] == summary["negative_total"] - 1
     assert summary["candidate_eligible"] is False
+
+
+def test_stability_gate_runs_all_five_rounds_before_accepting() -> None:
+    responses = [
+        response
+        for _ in range(5)
+        for response in proposal_responses()
+    ]
+    llm = FakeStructuredLLM(responses)
+    output = io.StringIO()
+
+    code = probe.run_stability_probe(llm, output)
+
+    rows = _rows(output)
+    round_results = [row for row in rows if row["case"] == "round_result"]
+    assert code == 0
+    assert len(llm.requests) == 5 * len(CASES)
+    assert [row["round"] for row in round_results] == [1, 2, 3, 4, 5]
+    assert all(row["passed"] is True for row in round_results)
+    assert rows[-1] == {
+        "case": "stability_summary",
+        "round_count": 5,
+        "rounds_passed": 5,
+        "candidate_eligible": True,
+    }
+
+
+def test_stability_gate_rejects_one_failed_round_without_stopping_early() -> None:
+    rounds = [proposal_responses() for _ in range(5)]
+    broken_index = next(
+        position
+        for position, case in enumerate(CASES)
+        if case.name == "missing_value_negative"
+    )
+    rounds[2][broken_index] = {
+        "requirements": [
+            {"question_quote": "What is the storage code", "kind": "attribute"}
+        ],
+        "supports": [
+            {
+                "requirement_index": 0,
+                "candidate_index": 0,
+                "candidate_quote": "I stored the amber key in drawer three.",
+                "role": "direct",
+            }
+        ],
+        "links": [],
+    }
+    llm = FakeStructuredLLM(
+        [response for round_responses in rounds for response in round_responses]
+    )
+    output = io.StringIO()
+
+    code = probe.run_stability_probe(llm, output)
+
+    rows = _rows(output)
+    round_results = [row for row in rows if row["case"] == "round_result"]
+    assert code == 1
+    assert len(llm.requests) == 5 * len(CASES)
+    assert [row["passed"] for row in round_results] == [True, True, False, True, True]
+    assert rows[-1] == {
+        "case": "stability_summary",
+        "round_count": 5,
+        "rounds_passed": 4,
+        "candidate_eligible": False,
+    }
+
+
+def test_stability_gate_output_never_contains_suite_content() -> None:
+    llm = FakeStructuredLLM(
+        [response for _ in range(5) for response in proposal_responses()]
+    )
+    output = io.StringIO()
+
+    probe.run_stability_probe(llm, output)
+
+    rendered = output.getvalue()
+    for secret in ("amber key", "drawer three", "Zephyr", "Porto", "Nora", "琥珀", "工作坊"):
+        assert secret not in rendered
+
+
+def test_main_stability_flag_routes_to_the_fixed_five_round_gate(
+    monkeypatch, capsys
+) -> None:
+    llm = FakeStructuredLLM(
+        [response for _ in range(5) for response in proposal_responses()]
+    )
+    llm.close = lambda: None  # type: ignore[attr-defined]
+    settings = SimpleNamespace(
+        runtime_profile=RuntimeProfile.OFFICIAL_MASM,
+        llm_model="fake-model",
+        llm_base_url="https://provider.invalid/v1",
+        llm_api_key="private-key",
+        model_timeout_seconds=30.0,
+        validate_runtime=lambda: None,
+    )
+    monkeypatch.setattr(
+        probe.Settings, "from_env", classmethod(lambda cls: settings)
+    )
+    monkeypatch.setattr(probe, "OpenAICompatibleLLM", lambda **kwargs: llm)
+
+    code = probe.main(["--stability"])
+
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert code == 0
+    assert len(llm.requests) == 5 * len(CASES)
+    assert rows[-1] == {
+        "case": "stability_summary",
+        "round_count": 5,
+        "rounds_passed": 5,
+        "candidate_eligible": True,
+    }
+
+
+def test_main_stability_gate_rejects_debug_reverse_order(monkeypatch) -> None:
+    settings = SimpleNamespace(runtime_profile=RuntimeProfile.LOCAL_FAKE)
+    monkeypatch.setattr(
+        probe.Settings, "from_env", classmethod(lambda cls: settings)
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        probe.main(["--stability", "--reverse"])
+
+    assert exc_info.value.code == 2

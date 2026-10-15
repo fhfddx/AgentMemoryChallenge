@@ -1,6 +1,6 @@
 """Paired synthetic evidence-graph suite; no database, provider body or production data access.
 
-The suite is fixed before any run: twelve positive cases and their twelve negative twins.
+The suite is fixed before any run: thirteen positive cases and their thirteen negative twins.
 A run is eligible only when every positive and every negative case passes, no case falls back
 to the frozen selector and no case reports a provider or schema failure. Passing this suite
 proves deterministic evidence-graph behaviour only; it is not an official score.
@@ -731,9 +731,47 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
     return 0 if eligible else 1
 
 
+def run_stability_probe(llm: StructuredLLM, output: TextIO) -> int:
+    """执行预声明的五轮完整门槛；任一轮失败都拒绝候选。"""
+    round_count = 5
+    rounds_passed = 0
+    for round_number in range(1, round_count + 1):
+        passed = run_probe(llm, output) == 0
+        rounds_passed += int(passed)
+        print(
+            json.dumps(
+                {"case": "round_result", "round": round_number, "passed": passed},
+                sort_keys=True,
+            ),
+            file=output,
+            flush=True,
+        )
+    eligible = rounds_passed == round_count
+    print(
+        json.dumps(
+            {
+                "case": "stability_summary",
+                "round_count": round_count,
+                "rounds_passed": rounds_passed,
+                "candidate_eligible": eligible,
+            },
+            sort_keys=True,
+        ),
+        file=output,
+        flush=True,
+    )
+    return 0 if eligible else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reverse", action="store_true", help="Reverse the fixed case order")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--reverse", action="store_true", help="Reverse the fixed case order")
+    mode.add_argument(
+        "--stability",
+        action="store_true",
+        help="Run the fixed suite five complete rounds as one eligibility gate",
+    )
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
     settings = Settings.from_env()
@@ -750,6 +788,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_attempts=1,
         )
         try:
+            if args.stability:
+                return run_stability_probe(llm, sys.stdout)
             return run_probe(llm, sys.stdout, reverse=args.reverse)
         finally:
             llm.close()
