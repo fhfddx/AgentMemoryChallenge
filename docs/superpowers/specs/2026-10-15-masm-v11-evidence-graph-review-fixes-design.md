@@ -18,6 +18,8 @@ Close the independently reproduced correctness, isolation, boundedness, and fail
 
 Planner unavailability, malformed output, failed validation, or internal graph assembly failure may invoke frozen v7 once. That call receives the already user-scoped graph pool, whose size is at most 32, so v7 cannot perform its 32-to-48 deep retry. A valid `insufficient` graph remains an abstention and never falls back.
 
+Pure-image routing is not a graph failure: it bypasses the planner and preserves frozen-v7 behavior over the full user-scoped ranked input, including a strong anchor beyond the 32-item graph pool.
+
 ### 3. All valid support combinations are examined
 
 The caps permit at most four requirements and 24 supports. The largest balanced Cartesian product is `6^4 = 1296`, which is small and deterministic. Assembly therefore enumerates the complete bounded product instead of replacing products above 512 with the first support for each requirement.
@@ -55,4 +57,6 @@ Every engine created through `Database.create` enables SQLAlchemy parameter hidi
 5. Opposing supports in the same stored conflict group are both selected and can be `sufficient` without a planner-declared link.
 6. Provenance queries are SQL-bounded, cross-user safe, and preserve old `expand()` ordering/caps.
 7. SQL exception text does not contain a bound-value canary.
-8. Focused tests, full pytest, Ruff, mypy, and `git diff --check` pass locally.
+8. A pure-image query makes zero planner calls and can retain a user-scoped strong anchor beyond the graph pool.
+9. Test-database fixture representations do not expose an accepted connection string on assertion failure.
+10. Focused tests, full pytest, Ruff, mypy, and `git diff --check` pass locally.

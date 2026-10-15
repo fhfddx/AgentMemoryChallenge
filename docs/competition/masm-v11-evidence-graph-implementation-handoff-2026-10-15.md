@@ -148,8 +148,8 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 
 | 命令 | 实际结果 |
 | --- | --- |
-| focused 图/相关测试（9 个文件） | **`150 passed, 2 warnings`**，exit 0 |
-| `python -m pytest -q`（全量） | **`932 passed, 1 skipped, 92 warnings`**，exit 0 |
+| focused 图/相关测试（9 个文件） | **`152 passed, 2 warnings`**，exit 0 |
+| `python -m pytest -q`（全量） | **`934 passed, 1 skipped, 92 warnings`**，exit 0 |
 | `python -m ruff check .` | `All checks passed!`，exit 0 |
 | `python -m mypy src` | `Success: no issues found in 60 source files`，exit 0 |
 | `git diff --check 6ad49ad3e99b725821e5e9d1b053d2a0148fe319..HEAD` | 空输出，exit 0 |
@@ -191,7 +191,7 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 | 16 | 非法 schema/quote/index 与超限 | `test_evidence_graph_rules.py` + `test_structurally_invalid_proposals_fall_back_once`（6 类结构失败） |
 | 17 | planner 回退 | `test_planner_transport_failure_falls_back_to_the_frozen_selector_once`、`test_structurally_invalid_proposals_fall_back_once` |
 | 18 | valid-insufficient 不回退 | `test_valid_insufficient_graph_never_falls_back` |
-| 19 | 纯图片不回归 | `test_pure_image_query_keeps_the_existing_path` |
+| 19 | 纯图片不回归 | `test_pure_image_query_keeps_the_existing_path`、`test_pure_image_query_preserves_user_scoped_anchor_beyond_graph_pool` |
 | 20 | 遥测不泄漏 | `test_evidence_graph_wiring.py::test_graph_diagnostics_are_content_free`、`test_suite_output_never_contains_question_or_candidate_text`、`test_diagnostics_sanitize_unrecognized_enums` |
 | — | 属性式（确定性顺序、环、菱形、置换、12 项上限） | `test_cycles_and_diamonds_terminate_with_one_component`、`test_selection_is_stable_when_unrelated_candidates_are_permuted`、`test_complete_graph_over_the_evidence_cap_degrades_to_bounded_partial` |
 | — | 真实 repository/Search（渲染一致、跨用户边拒绝） | `tests/integration/test_evidence_graph_pipeline.py` 全部用例 |
@@ -285,6 +285,8 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 | P2 | 合法支持组合超过 512 时只检查各需求第一个节点，可能错过后续唯一连通解 | 利用 4 requirements/24 supports 硬上限，完整枚举最大 `6^4 = 1296` 种组合 |
 | P2 | `relation_edges()` 无 SQL `LIMIT`，且读取任一端命中的全部高出度边，外部 frontier 边可挤掉目标边 | SQL 同时要求双端位于 traversal set、双端属于请求用户，再稳定排序和 limit；第二跳传入 bridge + discovered endpoint |
 | P2 | SQLAlchemy 异常可打印绑定参数；pytest 失败可通过 `Settings.__repr__` 打印数据库地址和 API keys | `Database.create(..., hide_parameters=True)`；`Settings.database_url`/`api_keys` 设为 `repr=False`，均有 canary 回归测试 |
+| P2 | 把纯图片直通 v7 也截断到 32 项 graph pool，会丢失更深但合法的 strong image anchor | 纯图片不属于 planner 失败；零 planner 调用地保留完整 user-scoped ranked 输入，只有真实 graph 失败回退受 32 项限制 |
+| P2 | 测试数据库 URL 即使通过 `masm_test` 校验，仍可在 pytest 失败值表示中完整出现 | 校验后返回行为等同 `str` 但 `repr` 固定脱敏的值，canary 同时固定字符串兼容性和脱敏 |
 
 以上修复没有新增 public schema、migration、planner rationale/answer/state/selected indices，也没有修改
 默认关闭、local-fake、渲染、删除、多模态、响应预算或 16 并发实现。
@@ -301,9 +303,13 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 | `739f0aa` | `fix: preserve both sides of stored conflicts` |
 | `c3b5421` | `fix: bound relation provenance in SQL` |
 | `8102c2f` | `fix: redact sensitive values from failures` |
+| `aff3fa5` | `fix: preserve pure image selector behavior` |
+| `d0746f7` | `test: redact test database URL repr` |
 
-代码 HEAD（本次交接文档提交之前）：`8102c2f`。最终文档提交和完整 HEAD 以交付消息中的实际
+代码/测试 HEAD（本次最终文档提交之前）：`d0746f7`。最终文档提交和完整 HEAD 以交付消息中的实际
 `git log` 为准。
+
+最后一轮是主代理自审（本会话禁止未经用户要求的子代理委派），因此不把它等同于独立第二审。自审发现的两个 P2 均已通过先 RED 后 GREEN 的回归测试处理。
 
 ### 14.3 最新资格判断
 

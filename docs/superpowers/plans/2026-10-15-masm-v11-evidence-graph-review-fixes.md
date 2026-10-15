@@ -87,7 +87,7 @@ Expected: FAIL with three provider requests because v7 deep-retries over the unb
 
 - [ ] **Step 3: Pass the scoped bounded pool to every v7 fallback branch**
 
-Pure-image routing also uses the scoped bounded pool. Preserve valid-insufficient no-fallback behavior.
+Every planner-failure branch uses the scoped bounded pool. Pure-image routing is not a planner failure and preserves the frozen-v7 path over the complete user-scoped ranked input. Preserve valid-insufficient no-fallback behavior.
 
 - [ ] **Step 4: Verify GREEN and fallback regressions**
 
