@@ -14,6 +14,18 @@ def test_masm_test_url_accepted() -> None:
     assert require_masm_test_database(url) == url
 
 
+def test_accepted_database_url_repr_is_redacted() -> None:
+    """pytest 显示字符串 fixture 时不得打印连接信息。"""
+    url = "postgresql+psycopg://private-user:private-password@localhost/masm_test"
+
+    accepted = require_masm_test_database(url)
+
+    assert str(accepted) == url
+    assert url not in repr(accepted)
+    assert "private-user" not in repr(accepted)
+    assert "private-password" not in repr(accepted)
+
+
 def test_production_database_rejected() -> None:
     """production 数据库名被拒绝。"""
     with pytest.raises(RuntimeError):

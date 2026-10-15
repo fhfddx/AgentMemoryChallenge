@@ -24,6 +24,13 @@ from masm.storage.repositories import MemoryRepository
 DEFAULT_TEST_DATABASE_URL = "postgresql+psycopg://postgres@localhost:5433/masm_test"
 
 
+class _RedactedDatabaseURL(str):
+    """允许当作普通连接串使用，但避免 pytest 失败表示泄漏凭据。"""
+
+    def __repr__(self) -> str:
+        return "'<redacted-database-url>'"
+
+
 def require_masm_test_database(url: str) -> str:
     """校验连接串指向的数据库名称严格等于 masm_test，否则抛出 RuntimeError。
 
@@ -32,7 +39,7 @@ def require_masm_test_database(url: str) -> str:
     name = make_url(url).database
     if name != "masm_test":
         raise RuntimeError(f"测试数据库名称必须为 masm_test，当前为 {name!r}")
-    return url
+    return _RedactedDatabaseURL(url)
 
 
 @pytest.fixture(scope="session")
