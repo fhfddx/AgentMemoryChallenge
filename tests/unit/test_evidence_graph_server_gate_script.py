@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -35,15 +36,15 @@ class FakeCommandRunner:
         self.source_digest = source_digest
         self.providers = providers or dict(_PROVIDERS)
         self.stability_code = stability_code
-        self.stability_inputs: list[str] = []
+        self.stability_inputs: list[bytes] = []
 
     def __call__(
         self,
         args: Sequence[str],
         *,
         cwd: Path,
-        input_text: str | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+        input_text: str | bytes | None = None,
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         command = tuple(args)
         if command == ("git", "rev-parse", "HEAD:scripts/evidence_graph_probe.py"):
             return subprocess.CompletedProcess(command, 0, "probe-blob\n", "")
@@ -87,7 +88,7 @@ class FakeCommandRunner:
             "-",
             "--stability",
         ):
-            assert input_text is not None
+            assert isinstance(input_text, bytes)
             self.stability_inputs.append(input_text)
             stdout = (
                 '{"case":"summary","candidate_eligible":true}\n'
@@ -280,7 +281,7 @@ def test_explicit_stability_run_uses_verified_probe_and_writes_sanitized_output(
     )
 
     assert code == 0
-    assert runner.stability_inputs == ["print('synthetic probe')\n"]
+    assert runner.stability_inputs == [b"print('synthetic probe')\n"]
     assert result_path.read_text(encoding="utf-8").splitlines()[-1] == (
         '{"case":"stability_summary","round_count":5,'
         '"rounds_passed":5,"candidate_eligible":true}'
@@ -392,24 +393,25 @@ def test_real_command_runner_delivers_stdin_and_discards_child_stderr(
     tmp_path: Path,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
+    probe_bytes = b"verified\nprobe\n"
     result = gate._run_command(
         (
             sys.executable,
             "-c",
             (
-                "import sys; "
-                "received = sys.stdin.read(); "
-                "print(received); "
+                "import hashlib, sys; "
+                "print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()); "
                 "sys.stderr.write('private-provider-body')"
             ),
         ),
         cwd=tmp_path,
-        input_text="verified-probe",
+        input_text=probe_bytes,
     )
 
     captured = capfd.readouterr()
     assert result.returncode == 0
-    assert result.stdout.strip() == "verified-probe"
+    rendered = result.stdout.decode() if isinstance(result.stdout, bytes) else result.stdout
+    assert rendered.strip() == hashlib.sha256(probe_bytes).hexdigest()
     assert result.stderr is None
     assert "private-provider-body" not in captured.out
     assert "private-provider-body" not in captured.err
@@ -470,3 +472,64 @@ def test_actual_cli_is_shell_safe_unless_strict_exit_is_requested(tmp_path: Path
     assert strict.returncode == 2
     assert "verification_exit_code=2" in interactive.stdout
     assert "verification_exit_code=2" in strict.stdout
+
+
+def test_default_temp_directory_inside_checkout_is_rejected_before_provider_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository(tmp_path)
+    checkout_temp = repository / "tmp"
+    checkout_temp.mkdir()
+    monkeypatch.setattr(gate.tempfile, "tempdir", str(checkout_temp))
+    runner = FakeCommandRunner()
+    output = io.StringIO()
+
+    code = gate.run_server_gate(
+        ["--stability", "--strict-exit"],
+        repository=repository,
+        output=output,
+        error=io.StringIO(),
+        command_runner=runner,
+        expectations=_expectations(),
+    )
+
+    assert code == 2
+    assert runner.stability_inputs == []
+    assert "probe_exit_code=2" in output.getvalue()
+
+
+def test_flush_and_close_failures_are_converted_to_shell_safe_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingResult:
+        def write(self, _: str) -> int:
+            return 0
+
+        def flush(self) -> None:
+            raise OSError("private-filesystem-detail")
+
+        def close(self) -> None:
+            raise OSError("private-filesystem-detail")
+
+    repository = _repository(tmp_path)
+    runner = FakeCommandRunner()
+    output = io.StringIO()
+    error = io.StringIO()
+    monkeypatch.setattr(gate, "_open_result_file", lambda *_: FailingResult())
+
+    code = gate.run_server_gate(
+        ["--stability", "--strict-exit"],
+        repository=repository,
+        output=output,
+        error=error,
+        command_runner=runner,
+        expectations=_expectations(),
+    )
+
+    assert code == 2
+    assert len(runner.stability_inputs) == 1
+    assert "stability_output=write_failed" in error.getvalue()
+    assert "private-filesystem-detail" not in error.getvalue()
+    assert "probe_exit_code=2" in output.getvalue()

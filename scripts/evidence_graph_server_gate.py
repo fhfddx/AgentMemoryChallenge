@@ -128,16 +128,25 @@ class CommandRunner(Protocol):
         args: Sequence[str],
         *,
         cwd: Path,
-        input_text: str | None = None,
-    ) -> subprocess.CompletedProcess[str]: ...
+        input_text: str | bytes | None = None,
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]: ...
 
 
 def _run_command(
     args: Sequence[str],
     *,
     cwd: Path,
-    input_text: str | None = None,
-) -> subprocess.CompletedProcess[str]:
+    input_text: str | bytes | None = None,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    if isinstance(input_text, bytes):
+        return subprocess.run(
+            list(args),
+            cwd=cwd,
+            input=input_text,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
     return subprocess.run(
         list(args),
         cwd=cwd,
@@ -151,12 +160,15 @@ def _run_command(
 
 
 def _tracked_package_files(
-    result: subprocess.CompletedProcess[str] | None,
+    result: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes] | None,
 ) -> tuple[str, ...] | None:
     if result is None or result.returncode != 0:
         return None
+    stdout = _stdout_text(result)
+    if stdout is None:
+        return None
     relative_files: list[str] = []
-    for entry in result.stdout.split("\0"):
+    for entry in stdout.split("\0"):
         if not entry:
             continue
         path = PurePosixPath(entry)
@@ -203,24 +215,57 @@ def _container_check(manifest: Sequence[str]) -> str:
 
 def _open_result_file(repository: Path, requested: Path | None) -> TextIO | None:
     try:
+        repository_root = repository.resolve(strict=True)
         if requested is None:
+            temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+            if temp_root.is_relative_to(repository_root):
+                return None
             descriptor, _ = tempfile.mkstemp(
                 prefix="masm-evidence-graph-stability-",
                 suffix=".jsonl",
+                dir=temp_root,
                 text=True,
             )
-            return os.fdopen(descriptor, "w", encoding="utf-8")
+            return _open_descriptor(descriptor)
 
-        repository_root = repository.resolve(strict=True)
         unresolved = requested if requested.is_absolute() else repository / requested
         resolved = unresolved.parent.resolve(strict=True) / unresolved.name
         if resolved.is_relative_to(repository_root):
             return None
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(resolved, flags, 0o600)
-        return os.fdopen(descriptor, "w", encoding="utf-8")
+        return _open_descriptor(descriptor)
     except OSError:
         return None
+
+
+def _open_descriptor(descriptor: int) -> TextIO | None:
+    try:
+        return os.fdopen(descriptor, "w", encoding="utf-8")
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        return None
+
+
+def _close_result_file(result_file: TextIO) -> bool:
+    try:
+        result_file.close()
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _write_result_file(result_file: TextIO, rendered: str) -> bool:
+    write_succeeded = True
+    try:
+        result_file.write(rendered)
+        result_file.flush()
+    except (OSError, UnicodeError, ValueError):
+        write_succeeded = False
+    return _close_result_file(result_file) and write_succeeded
 
 
 def _command(
@@ -228,23 +273,39 @@ def _command(
     args: Sequence[str],
     *,
     repository: Path,
-    input_text: str | None = None,
-) -> subprocess.CompletedProcess[str] | None:
+    input_text: str | bytes | None = None,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes] | None:
     try:
         return runner(args, cwd=repository, input_text=input_text)
     except OSError:
         return None
 
 
-def _clean_line(result: subprocess.CompletedProcess[str] | None) -> str | None:
+def _stdout_text(
+    result: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes],
+) -> str | None:
+    if isinstance(result.stdout, bytes):
+        try:
+            return result.stdout.decode("utf-8")
+        except UnicodeError:
+            return None
+    return result.stdout
+
+
+def _clean_line(
+    result: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes] | None,
+) -> str | None:
     if result is None or result.returncode != 0:
         return None
-    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    stdout = _stdout_text(result)
+    if stdout is None:
+        return None
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     return lines[-1] if lines else None
 
 
 def _container_payload(
-    result: subprocess.CompletedProcess[str] | None,
+    result: subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes] | None,
 ) -> Mapping[str, object] | None:
     rendered = _clean_line(result)
     if rendered is None:
@@ -264,7 +325,7 @@ def _verify_candidate(
     error: TextIO,
     runner: CommandRunner,
     expectations: CandidateExpectations,
-) -> tuple[int, str | None]:
+) -> tuple[int, bytes | None]:
     probe_path = repository / "scripts" / "evidence_graph_probe.py"
     package_root = repository / "src" / "masm"
     if not probe_path.is_file() or not package_root.is_dir():
@@ -272,8 +333,7 @@ def _verify_candidate(
         return 2, None
     try:
         probe_bytes = probe_path.read_bytes()
-        probe_text = probe_bytes.decode("utf-8")
-    except (OSError, UnicodeError):
+    except OSError:
         print("probe_worktree=unreadable", file=error)
         return 2, None
 
@@ -321,7 +381,11 @@ def _verify_candidate(
         print("container_check=failed", file=error)
         return 2, None
 
-    checkout_clean = not status.stdout.strip()
+    status_stdout = _stdout_text(status)
+    if status_stdout is None:
+        print("verification_error=invalid_output", file=error)
+        return 2, None
+    checkout_clean = not status_stdout.strip()
     probe_matches = probe_blob == expectations.probe_blob
     probe_worktree_matches = hashlib.sha256(probe_bytes).hexdigest() == expectations.probe_sha256
     container_manifest_matches = payload.get("package_manifest") == "match"
@@ -372,7 +436,7 @@ def _verify_candidate(
         or any(provider_statuses.get(name) != "set" for name in _PROVIDER_VARIABLES)
     ):
         return 2, None
-    return 0, probe_text
+    return 0, probe_bytes
 
 
 def _run_stability(
@@ -383,7 +447,7 @@ def _run_stability(
     output: TextIO,
     error: TextIO,
     runner: CommandRunner,
-    probe_text: str,
+    probe_bytes: bytes,
 ) -> int:
     result_file = _open_result_file(repository, result_path)
     if result_file is None:
@@ -394,24 +458,25 @@ def _run_stability(
         runner,
         ("docker", "exec", "-i", container, "python", "-", "--stability"),
         repository=repository,
-        input_text=probe_text,
+        input_text=probe_bytes,
     )
     if result is None:
-        result_file.close()
+        _close_result_file(result_file)
         print("stability_exec=failed", file=error)
         print("probe_exit_code=2", file=output)
         return 2
-    try:
-        result_file.write(result.stdout)
-        result_file.flush()
-    except OSError:
-        result_file.close()
+    rendered = _stdout_text(result)
+    if rendered is None:
+        _close_result_file(result_file)
+        print("stability_output=invalid", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    if not _write_result_file(result_file, rendered):
         print("stability_output=write_failed", file=error)
         print("probe_exit_code=2", file=output)
         return 2
-    result_file.close()
 
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    lines = [line for line in rendered.splitlines() if line.strip()]
     summary: Mapping[str, object] | None = None
     if lines:
         try:
@@ -487,7 +552,7 @@ def run_server_gate(
         output=output,
         error=error,
         runner=command_runner,
-        probe_text=verified_probe,
+        probe_bytes=verified_probe,
     )
     return stability_code if args.strict_exit else 0
 
