@@ -14,7 +14,7 @@ class Database:
     @classmethod
     def create(cls, database_url: str) -> "Database":
         """根据连接串创建 Database。"""
-        return cls(create_engine(database_url))
+        return cls(create_engine(database_url, hide_parameters=True))
 
     @property
     def engine(self) -> Engine:

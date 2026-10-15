@@ -42,8 +42,8 @@ class Settings:
     仅包含公共配置；连接串与密钥通过环境变量注入，绝不进入源码或日志。
     """
 
-    database_url: str
-    api_keys: tuple[str, ...] = ()
+    database_url: str = field(repr=False)
+    api_keys: tuple[str, ...] = field(default=(), repr=False)
     asset_dir: Path = Path("artifacts/assets")
     max_image_bytes: int = 10485760  # 单图解码后上限 10 MiB
     max_add_image_bytes: int = 31457280  # 单次 Add 图片总量上限 30 MiB
