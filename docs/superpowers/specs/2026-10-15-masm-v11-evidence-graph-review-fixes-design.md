@@ -1,7 +1,7 @@
 # MASM v1.1 Evidence Graph Review Fixes Design
 
-**Date:** 2026-10-15  
-**Status:** Approved for implementation by the user's instruction to optimize the reviewed candidate  
+**Date:** 2026-10-15
+**Status:** Approved for implementation by the user's instruction to optimize the reviewed candidate
 **Parent design:** `docs/superpowers/specs/2026-10-15-masm-v11-evidence-graph-search-design.md`
 
 ## Goal

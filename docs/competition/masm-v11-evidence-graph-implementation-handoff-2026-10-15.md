@@ -11,6 +11,9 @@
 
 本文只描述本轮本地实现、测试证据与限制。它不是部署许可，也不代表任何官方得分。
 
+> **Codex 独立复核更新：** 第 14 节记录了 `fff7bd4` 之后的独立审查、RED→GREEN 修复和
+> 最新本地门槛；其中的提交、测试计数与剩余风险取代本文较早的 DeepSeek 完成结论。
+
 ## 1. 范围与不变契约
 
 实现的是默认关闭的 query-time grounded evidence graph：模型只提出问题需求、候选原文引用与
@@ -94,7 +97,8 @@ EvidenceGraphPlanner(llm, *, max_candidates, max_chars_per_candidate,
     .plan(question, visual, options, pool) -> EvidenceGraphProposal      # 每次 Search 恰好一次
 
 GraphEvidenceSelector(planner, fallback, *, max_candidates=32, max_selected=12)
-    .select(query, options, ranked, strong_anchor_ids, graph_context) -> GraphSelection
+    .select(query, options, ranked, strong_anchor_ids, graph_context,
+            *, request_user_id) -> GraphSelection
 
 # evidence_graph_rules.py
 normalize_text / grounded_quote / discriminative_units / shared_discriminative_unit
@@ -114,10 +118,12 @@ RelationExpander.expand(user_id, seeds, limit) -> list[MemoryCandidate]   # 行�
 MemoryRepository.relation_edges(user_id, memory_ids, limit) -> list[RelationEdge]
 ```
 
-**只接受三类可证明连接：** 同来源相邻上下文（要求本请求启用了来源上下文且
+**planner 只接受三类可证明连接：** 同来源相邻上下文（要求本请求启用了来源上下文且
 `|Δsource_position| == 1`）、provenance sidecar 中真实存在的持久化关系来源对、满足
 discriminative-unit 规则的显式跨来源 mention。strong anchor、相似度、排名接近、option、
-共享泛化主题一律不作为连接证明；`strong_anchor_ids` 在 graph 路径中只用于 v7 回退。
+共享泛化主题一律不作为连接证明；`strong_anchor_ids` 在 graph 路径中只用于 v7 回退。除此之外，
+组装器可从同一需求下已 grounding 的正/负支持和相同非空存储 `conflict_group_id` 确定性派生内部
+冲突边；planner 不能声明这种边，`graph_link_count` 也不把它计为 planner link。
 
 **三态由确定性代码推导：** 覆盖要求必须有 validated `direct`/`negative`（`bridge`/`context`
 只连接不覆盖）；多要求必须落在同一连通分量；`sufficient` 且证据 ≤ 12；否则 `partial`，只返回
@@ -142,19 +148,18 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 
 | 命令 | 实际结果 |
 | --- | --- |
-| focused 图/相关测试（10 个文件） | `144 passed`，exit 0 |
-| `python -m pytest -q`（全量） | **`924 passed, 1 skipped, 92 warnings`**，exit 0 |
+| focused 图/相关测试（9 个文件） | **`150 passed, 2 warnings`**，exit 0 |
+| `python -m pytest -q`（全量） | **`932 passed, 1 skipped, 92 warnings`**，exit 0 |
 | `python -m ruff check .` | `All checks passed!`，exit 0 |
-| `python -m mypy src scripts/evidence_graph_probe.py` | `Success: no issues found in 61 source files`，exit 0 |
-| `git diff --check` | 空输出，exit 0 |
+| `python -m mypy src` | `Success: no issues found in 60 source files`，exit 0 |
+| `git diff --check 6ad49ad3e99b725821e5e9d1b053d2a0148fe319..HEAD` | 空输出，exit 0 |
 
 跳过项是既有的 Windows POSIX 权限语义测试（`test_cloud_smoke_recovery_manifest.py:114`），
 与本次改动无关。92 条告警全部是既有依赖/`asyncio` 弃用告警。
 
-focused 命令与全量命令使用的解释器：
+最新 focused 命令与全量命令使用的解释器：
 `C:\Users\23952\.codex\worktrees\masm-v11-multihop\AgentMemoryChallenge\.venv\Scripts\python.exe`
-（Python 3.14.5，pytest 8.4.2，ruff 0.17.0，mypy 1.20.2）。缓存目录写到 `%TEMP%`，
-pytest 使用 `-p no:cacheprovider --basetemp=<临时目录>`，工作树内不产生缓存或字节码改动。
+（Python 3.14.5，pytest 8.4.2，ruff 0.17.0，mypy 1.20.2）。
 
 分阶段记录：
 
@@ -225,6 +230,9 @@ pytest 使用 `-p no:cacheprovider --basetemp=<临时目录>`，工作树内不�
   唯一前缀隔离，这不是本次改动引入的残留。
 - 容器在本报告定稿后停止（`docker stop masm-v11-evidence-graph-pg`，tmpfs 数据随
   `AutoRemove` 一并删除），只停止本轮启动的这一个容器。
+- Codex 复核另行启动 `masm-v11-review-fixes-pg`（同一镜像，仅回环端口 5434、数据库名
+  `masm_test`、tmpfs、AutoRemove），用于最新 integration/full 门槛；完成后已停止并自动移除。
+  既有 `masm-v11-testdb` 仍保持原先的 Exited 状态且未被启动、修改或删除。
 
 ## 11. 未运行事项声明
 
@@ -251,8 +259,9 @@ pytest 使用 `-p no:cacheprovider --basetemp=<临时目录>`，工作树内不�
    任意候选”都能被该边连接。这是设计规格第 7.3 节的要求，但其召回影响未在真实数据上评估。
 7. **`audit_metadata()` 未新增图开关字段**：为避免改动既有精确断言的运行档位测试，本轮选择不加；
    部署侧可从环境变量与 `/search` 遥测确认模式。
-8. **冲突组不算作 provenance 连接**：`_complete_conflicts` 补充的同伴只作为候选返回，不产生
-   sidecar 边（它不属于规格允许的三类连接）。若官方需要冲突组连接语义，需要新的规格决定。
+8. **冲突组只产生内部确定性连接**：`_complete_conflicts` 仍不伪造 relation sidecar；只有同一需求
+   下通过 quote/user 校验的正负支持且存储 `conflict_group_id` 相同，组装器才派生内部边。该边不扩展
+   planner schema，也不计入 `graph_link_count`。
 
 ## 13. 建议下一步
 
@@ -262,3 +271,42 @@ pytest 使用 `-p no:cacheprovider --basetemp=<临时目录>`，工作树内不�
 3. 通过后按设计规格第 13 节做 API-only canary（记录镜像/容器 ID，仅替换 API 容器，Postgres 容器
    ID 必须不变），最多一次官方 Smoke；Full 不运行。
 4. 若需要，再补：并发 16/16、纯图片与混合多模态 Add→Search 清理核验、端到端延迟与响应字节核对。
+
+## 14. Codex 独立复核与修复（`fff7bd4` 之后）
+
+### 14.1 实际发现与处理
+
+| 严重度 | 独立复现 | 处理 |
+| --- | --- | --- |
+| P1 | planner 失败时把 40 个原始 ranked 交给 v7，触发 32→48 深层重试，总计 3 次 provider 调用 | 所有失败分支只把同一份 user-scoped、最多 32 项的 graph pool 交给 v7；回归测试固定为 graph 1 次 + v7 1 次 |
+| P1 | 同一存储冲突组的正/负支持若无 planner link，只返回一侧却报告 sufficient | 从已 grounding 的正/负支持和存储冲突组派生内部确定性邻接；双方必须共同进入解释，planner link 计数仍为 0 |
+| P1 | 14 节点完整链超出 12 项上限时保留首尾却删除桥节点，返回断开的 partial | 超预算时枚举可覆盖的需求子集与支持选择，只返回预算内的确定性连通路径并按覆盖/直接支持/来源/大小/rank 排序 |
+| P2 | selector 从 `ranked[0].user_id` 推断请求用户；foreign-first 可反转作用域 | `SearchService` 显式传 `request_user_id`，selector 在建池前过滤，validator 再独立核对候选 user |
+| P2 | 合法支持组合超过 512 时只检查各需求第一个节点，可能错过后续唯一连通解 | 利用 4 requirements/24 supports 硬上限，完整枚举最大 `6^4 = 1296` 种组合 |
+| P2 | `relation_edges()` 无 SQL `LIMIT`，且读取任一端命中的全部高出度边，外部 frontier 边可挤掉目标边 | SQL 同时要求双端位于 traversal set、双端属于请求用户，再稳定排序和 limit；第二跳传入 bridge + discovered endpoint |
+| P2 | SQLAlchemy 异常可打印绑定参数；pytest 失败可通过 `Settings.__repr__` 打印数据库地址和 API keys | `Database.create(..., hide_parameters=True)`；`Settings.database_url`/`api_keys` 设为 `repr=False`，均有 canary 回归测试 |
+
+以上修复没有新增 public schema、migration、planner rationale/answer/state/selected indices，也没有修改
+默认关闭、local-fake、渲染、删除、多模态、响应预算或 16 并发实现。
+
+### 14.2 复核提交
+
+| 提交 | 内容 |
+| --- | --- |
+| `c219adc` | `docs: plan evidence graph review fixes` |
+| `009d81e` | `fix: enforce evidence graph request user scope` |
+| `6ca7477` | `fix: bound evidence graph fallback to one v7 call` |
+| `823e517` | `fix: enumerate bounded evidence graph combinations` |
+| `c7eac89` | `fix: keep bounded partial evidence connected` |
+| `739f0aa` | `fix: preserve both sides of stored conflicts` |
+| `c3b5421` | `fix: bound relation provenance in SQL` |
+| `8102c2f` | `fix: redact sensitive values from failures` |
+
+代码 HEAD（本次交接文档提交之前）：`8102c2f`。最终文档提交和完整 HEAD 以交付消息中的实际
+`git log` 为准。
+
+### 14.3 最新资格判断
+
+本地 deterministic、数据库 integration、隔离、契约、Ruff、mypy 与 diff-check 门槛全部通过，
+因此该分支可作为“进入下一阶段 Provider 稳定性门槛”的候选。它仍未通过真实 Provider 五轮固定
+套件、API-only canary 或官方 Smoke；不得据此宣称官方分数提高，也不得直接部署。
