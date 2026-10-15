@@ -417,6 +417,26 @@ def test_real_command_runner_delivers_stdin_and_discards_child_stderr(
     assert "private-provider-body" not in captured.err
 
 
+def test_container_check_imports_actual_candidate_module_contract() -> None:
+    repository = Path(gate.__file__).resolve().parents[1]
+    tracked = gate._run_command(
+        ("git", "ls-files", "-z", "--", "src/masm"),
+        cwd=repository,
+    )
+    manifest = gate._tracked_package_files(tracked)
+    assert manifest is not None
+
+    result = gate._run_command(
+        (sys.executable, "-"),
+        cwd=repository,
+        input_text=gate._container_check(manifest),
+    )
+    payload = gate._container_payload(result)
+
+    assert payload is not None
+    assert payload["candidate_modules"] == "present"
+
+
 def test_real_git_boundary_returns_only_tracked_package_manifest(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     package = repository / "src" / "masm"

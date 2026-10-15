@@ -69,7 +69,7 @@ except (OSError, ValueError):
 
 try:
     from masm.retrieval.evidence_graph import EvidenceGraphPlanner
-    from masm.retrieval.evidence_graph_assembly import assemble_evidence
+    from masm.retrieval.evidence_graph_assembly import assemble
     from masm.retrieval.evidence_graph_rules import validate_proposal
 except Exception:
     candidate_modules = "missing"
