@@ -12,12 +12,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol, TextIO, cast
 
 _PROVIDER_VARIABLES = (
@@ -27,8 +29,7 @@ _PROVIDER_VARIABLES = (
     "MASM_EMBEDDING_API_KEY",
 )
 _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-_DEFAULT_RESULT_PATH = Path("/tmp/masm-evidence-graph-stability.jsonl")
-_CONTAINER_CHECK = r"""
+_CONTAINER_CHECK_TEMPLATE = r"""
 import hashlib
 import json
 import os
@@ -37,18 +38,34 @@ from pathlib import Path
 import masm
 
 root = Path(masm.__file__).resolve().parent
-digest = hashlib.sha256()
-files = (
-    path for path in root.rglob("*")
-    if path.is_file()
-    and "__pycache__" not in path.parts
-    and path.suffix != ".pyc"
-)
-for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
-    digest.update(path.relative_to(root).as_posix().encode())
-    digest.update(b"\0")
-    digest.update(path.read_bytes())
-    digest.update(b"\0")
+manifest = PACKAGE_MANIFEST_JSON
+manifest_set = set(manifest)
+actual_files = set()
+package_manifest = "match"
+source_digest = None
+try:
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if path.is_symlink():
+            raise ValueError("symlink")
+        if path.is_file() and "__pycache__" not in relative.parts and path.suffix != ".pyc":
+            actual_files.add(relative.as_posix())
+    if actual_files != manifest_set:
+        package_manifest = "mismatch"
+    else:
+        digest = hashlib.sha256()
+        for relative_text in manifest:
+            relative = Path(*relative_text.split("/"))
+            path = root / relative
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("invalid manifest file")
+            digest.update(relative_text.encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        source_digest = digest.hexdigest()
+except (OSError, ValueError):
+    package_manifest = "mismatch"
 
 try:
     from masm.retrieval.evidence_graph import EvidenceGraphPlanner
@@ -76,6 +93,7 @@ provider_names = (
 print(json.dumps({
     "candidate_modules": candidate_modules,
     "graph_flag": graph_flag,
+    "package_manifest": package_manifest,
     "providers": {
         name: "set" if os.environ.get(name) else "missing"
         for name in provider_names
@@ -85,7 +103,7 @@ print(json.dumps({
         if os.environ.get("MASM_RUNTIME_PROFILE") == "official-masm"
         else "not_official_masm"
     ),
-    "source_digest": digest.hexdigest(),
+    "source_digest": source_digest,
 }, sort_keys=True))
 """
 
@@ -93,11 +111,13 @@ print(json.dumps({
 @dataclass(frozen=True)
 class CandidateExpectations:
     probe_blob: str
+    probe_sha256: str
     source_digest: str
 
 
 DEFAULT_EXPECTATIONS = CandidateExpectations(
     probe_blob="ac29d661ab93d918ad0a5ff1412548121d44cbee",
+    probe_sha256="7b9358e3027a87d8e31bc8a50a35164fb6bf06d0f57780952e9811fbaf4ccf35",
     source_digest="6a0c96dd09c0eef2dfbb412828a5d46bca4cd1c5d6e7b840f272ce50775dae94",
 )
 
@@ -130,19 +150,77 @@ def _run_command(
     )
 
 
-def _source_digest(root: Path) -> str:
-    digest = hashlib.sha256()
-    files = (
-        path
-        for path in root.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+def _tracked_package_files(
+    result: subprocess.CompletedProcess[str] | None,
+) -> tuple[str, ...] | None:
+    if result is None or result.returncode != 0:
+        return None
+    relative_files: list[str] = []
+    for entry in result.stdout.split("\0"):
+        if not entry:
+            continue
+        path = PurePosixPath(entry)
+        if path.is_absolute() or path.parts[:2] != ("src", "masm") or len(path.parts) < 3:
+            return None
+        relative = PurePosixPath(*path.parts[2:])
+        if ".." in relative.parts or ".env" in relative.parts:
+            return None
+        relative_files.append(relative.as_posix())
+    return tuple(sorted(relative_files)) if relative_files else None
+
+
+def _package_digest(root: Path, manifest: Sequence[str]) -> tuple[bool, str | None]:
+    try:
+        actual_files: set[str] = set()
+        for path in root.rglob("*"):
+            relative = path.relative_to(root)
+            if path.is_symlink():
+                return False, None
+            if path.is_file() and "__pycache__" not in relative.parts and path.suffix != ".pyc":
+                actual_files.add(relative.as_posix())
+        if actual_files != set(manifest):
+            return False, None
+        digest = hashlib.sha256()
+        for relative_text in manifest:
+            path = root.joinpath(*PurePosixPath(relative_text).parts)
+            if path.is_symlink() or not path.is_file():
+                return False, None
+            digest.update(relative_text.encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    except OSError:
+        return False, None
+    return True, digest.hexdigest()
+
+
+def _container_check(manifest: Sequence[str]) -> str:
+    return _CONTAINER_CHECK_TEMPLATE.replace(
+        "PACKAGE_MANIFEST_JSON",
+        json.dumps(list(manifest)),
     )
-    for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
-        digest.update(path.relative_to(root).as_posix().encode())
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
+
+
+def _open_result_file(repository: Path, requested: Path | None) -> TextIO | None:
+    try:
+        if requested is None:
+            descriptor, _ = tempfile.mkstemp(
+                prefix="masm-evidence-graph-stability-",
+                suffix=".jsonl",
+                text=True,
+            )
+            return os.fdopen(descriptor, "w", encoding="utf-8")
+
+        repository_root = repository.resolve(strict=True)
+        unresolved = requested if requested.is_absolute() else repository / requested
+        resolved = unresolved.parent.resolve(strict=True) / unresolved.name
+        if resolved.is_relative_to(repository_root):
+            return None
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(resolved, flags, 0o600)
+        return os.fdopen(descriptor, "w", encoding="utf-8")
+    except OSError:
+        return None
 
 
 def _command(
@@ -186,12 +264,18 @@ def _verify_candidate(
     error: TextIO,
     runner: CommandRunner,
     expectations: CandidateExpectations,
-) -> int:
+) -> tuple[int, str | None]:
     probe_path = repository / "scripts" / "evidence_graph_probe.py"
     package_root = repository / "src" / "masm"
     if not probe_path.is_file() or not package_root.is_dir():
         print("candidate_checkout=invalid", file=error)
-        return 2
+        return 2, None
+    try:
+        probe_bytes = probe_path.read_bytes()
+        probe_text = probe_bytes.decode("utf-8")
+    except (OSError, UnicodeError):
+        print("probe_worktree=unreadable", file=error)
+        return 2, None
 
     probe_blob = _clean_line(
         _command(
@@ -200,9 +284,17 @@ def _verify_candidate(
             repository=repository,
         )
     )
-    host_head = _clean_line(
-        _command(runner, ("git", "rev-parse", "HEAD"), repository=repository)
+    manifest = _tracked_package_files(
+        _command(
+            runner,
+            ("git", "ls-files", "-z", "--", "src/masm"),
+            repository=repository,
+        )
     )
+    if manifest is None:
+        print("source_manifest=invalid", file=error)
+        return 2, None
+    host_manifest_matches, host_digest = _package_digest(package_root, manifest)
     status = _command(
         runner,
         ("git", "status", "--porcelain", "--untracked-files=normal"),
@@ -219,21 +311,25 @@ def _verify_candidate(
         runner,
         ("docker", "exec", "-i", container, "python", "-"),
         repository=repository,
-        input_text=_CONTAINER_CHECK,
+        input_text=_container_check(manifest),
     )
     payload = _container_payload(container_result)
-    if host_head is None or status is None or status.returncode != 0 or image is None:
+    if status is None or status.returncode != 0 or image is None:
         print("verification_error=command_failed", file=error)
-        return 2
+        return 2, None
     if payload is None:
         print("container_check=failed", file=error)
-        return 2
+        return 2, None
 
     checkout_clean = not status.stdout.strip()
     probe_matches = probe_blob == expectations.probe_blob
+    probe_worktree_matches = hashlib.sha256(probe_bytes).hexdigest() == expectations.probe_sha256
+    container_manifest_matches = payload.get("package_manifest") == "match"
+    source_manifest_matches = host_manifest_matches and container_manifest_matches
     container_digest = payload.get("source_digest")
     source_matches = (
-        _source_digest(package_root) == expectations.source_digest
+        source_manifest_matches
+        and host_digest == expectations.source_digest
         and container_digest == expectations.source_digest
     )
     runtime_profile = payload.get("runtime_profile")
@@ -242,10 +338,18 @@ def _verify_candidate(
     providers = payload.get("providers")
     provider_statuses = providers if isinstance(providers, dict) else {}
 
-    print(f"host_head={host_head}", file=output)
-    print(f"container_image={image}", file=output)
+    print("repository_revision=present", file=output)
+    print("container_image=present", file=output)
     print(f"checkout_clean={'yes' if checkout_clean else 'no'}", file=output)
     print(f"probe_blob_match={'yes' if probe_matches else 'no'}", file=output)
+    print(
+        f"probe_worktree_match={'yes' if probe_worktree_matches else 'no'}",
+        file=output,
+    )
+    print(
+        f"source_manifest_match={'yes' if source_manifest_matches else 'no'}",
+        file=output,
+    )
     print(f"source_match={'yes' if source_matches else 'no'}", file=output)
     print(f"MASM_RUNTIME_PROFILE={runtime_profile}", file=output)
     for name in _PROVIDER_VARIABLES:
@@ -254,29 +358,38 @@ def _verify_candidate(
     print(f"candidate_modules={candidate_modules}", file=output)
     print(f"graph_flag={graph_flag}", file=output)
 
-    if not checkout_clean or not probe_matches or not source_matches:
-        return 3
+    if (
+        not checkout_clean
+        or not probe_matches
+        or not probe_worktree_matches
+        or not source_manifest_matches
+        or not source_matches
+    ):
+        return 3, None
     if (
         runtime_profile != "official-masm"
         or candidate_modules != "present"
         or any(provider_statuses.get(name) != "set" for name in _PROVIDER_VARIABLES)
     ):
-        return 2
-    return 0
+        return 2, None
+    return 0, probe_text
 
 
 def _run_stability(
     *,
     repository: Path,
     container: str,
-    result_path: Path,
+    result_path: Path | None,
     output: TextIO,
     error: TextIO,
     runner: CommandRunner,
+    probe_text: str,
 ) -> int:
-    probe_text = (repository / "scripts" / "evidence_graph_probe.py").read_text(
-        encoding="utf-8"
-    )
+    result_file = _open_result_file(repository, result_path)
+    if result_file is None:
+        print("stability_output=invalid", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
     result = _command(
         runner,
         ("docker", "exec", "-i", container, "python", "-", "--stability"),
@@ -284,15 +397,19 @@ def _run_stability(
         input_text=probe_text,
     )
     if result is None:
+        result_file.close()
         print("stability_exec=failed", file=error)
         print("probe_exit_code=2", file=output)
         return 2
     try:
-        result_path.write_text(result.stdout, encoding="utf-8")
+        result_file.write(result.stdout)
+        result_file.flush()
     except OSError:
+        result_file.close()
         print("stability_output=write_failed", file=error)
         print("probe_exit_code=2", file=output)
         return 2
+    result_file.close()
 
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     summary: Mapping[str, object] | None = None
@@ -336,7 +453,7 @@ def run_server_gate(
         action="store_true",
         help="Return the verification or probe status instead of shell-safe zero",
     )
-    parser.add_argument("--output", type=Path, default=_DEFAULT_RESULT_PATH)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args(list(argv))
     if not _CONTAINER_NAME.fullmatch(args.container):
         print("container_name=invalid", file=error)
@@ -345,7 +462,7 @@ def run_server_gate(
             print("stability_not_started=yes", file=output)
         return 2 if args.strict_exit else 0
 
-    verification_code = _verify_candidate(
+    verification_code, verified_probe = _verify_candidate(
         repository=repository,
         container=args.container,
         output=output,
@@ -360,6 +477,9 @@ def run_server_gate(
         return verification_code if args.strict_exit else 0
     if not args.stability:
         return 0
+    if verified_probe is None:
+        print("stability_not_started=yes", file=output)
+        return 2 if args.strict_exit else 0
     stability_code = _run_stability(
         repository=repository,
         container=args.container,
@@ -367,6 +487,7 @@ def run_server_gate(
         output=output,
         error=error,
         runner=command_runner,
+        probe_text=verified_probe,
     )
     return stability_code if args.strict_exit else 0
 

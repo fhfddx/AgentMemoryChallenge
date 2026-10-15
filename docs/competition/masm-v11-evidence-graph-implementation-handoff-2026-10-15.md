@@ -292,11 +292,13 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
    脚本从候选 checkout 经标准输入运行 probe，不在容器内落盘、不重启服务、不把 Provider 变量导出
    到宿主机。交互模式始终以进程状态 0 返回，真实门槛状态只看输出中的 `verification_exit_code` 和
    `probe_exit_code`，因此外层启用 `set -e` 也不会因门槛失败结束 SSH shell；自动化若确实需要非零
-   进程状态，必须显式增加 `--strict-exit`。完整的脱敏结果默认写到
-   `/tmp/masm-evidence-graph-stability.jsonl`，终端只额外显示最后一行 `stability_summary` 和
-   `probe_exit_code`。只需回传这些状态行；不要回传环境变量、Provider 响应或其他服务日志。若容器名
-   不同，可使用 `--container NAME`；若 SSH 本身不稳定，应使用服务器既有的会话托管机制，前台命令
-   不会自动跨网络断线继续运行。
+   进程状态，必须显式增加 `--strict-exit`。完整的脱敏结果默认以原子独占方式写入系统临时目录且不
+   回显路径；若确需保留到已知位置，可指定一个 checkout 外、尚不存在的路径，例如
+   `--output /tmp/masm-evidence-graph-stability-manual.jsonl`。脚本拒绝 checkout 内路径、已有文件和
+   最终路径符号链接。终端只额外显示最后一行 `stability_summary` 和 `probe_exit_code`。只需回传这些
+   状态行；不要回传环境变量、Provider 响应或其他服务日志。若容器名不同，可使用
+   `--container NAME`；若 SSH 本身不稳定，应使用服务器既有的会话托管机制，前台命令不会自动跨网络
+   断线继续运行。
 3. 通过后按设计规格第 13 节做 API-only canary（记录镜像/容器 ID，仅替换 API 容器，Postgres 容器
    ID 必须不变），最多一次官方 Smoke；Full 不运行。
 4. 若需要，再补：并发 16/16、纯图片与混合多模态 Add→Search 清理核验、端到端延迟与响应字节核对。
