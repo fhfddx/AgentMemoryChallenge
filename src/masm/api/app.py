@@ -98,6 +98,7 @@ def create_app(
         reranker=runtime.reranker,
         relevance_gate=runtime.relevance_gate,
         selector=runtime.evidence_selector,
+        graph_selector=runtime.evidence_graph,
         renderer=EvidenceRenderer(
             repository,
             application.state.asset_store,

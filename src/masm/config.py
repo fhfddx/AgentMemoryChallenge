@@ -71,6 +71,11 @@ class Settings:
     selector_max_selected: int = 12
     selector_max_chars_per_candidate: int = 1200
     selector_timeout_seconds: float = 30.0
+    evidence_graph_enabled: bool = False
+    evidence_graph_max_requirements: int = 4
+    evidence_graph_max_supports: int = 24
+    evidence_graph_max_links: int = 24
+    evidence_graph_timeout_seconds: float = 30.0
 
     @property
     def is_official(self) -> bool:
@@ -108,6 +113,25 @@ class Settings:
             or not 0.0 < self.selector_timeout_seconds <= self.model_timeout_seconds
         ):
             raise ValueError("证据筛选超时必须为正数且不超过模型超时")
+        if not 1 <= self.evidence_graph_max_requirements <= 4:
+            raise ValueError("证据图需求上限必须在 1..4 内")
+        if not 1 <= self.evidence_graph_max_supports <= 24:
+            raise ValueError("证据图支持上限必须在 1..24 内")
+        if not 1 <= self.evidence_graph_max_links <= 24:
+            raise ValueError("证据图链接上限必须在 1..24 内")
+        if (
+            not math.isfinite(self.evidence_graph_timeout_seconds)
+            or not 0.0 < self.evidence_graph_timeout_seconds <= self.model_timeout_seconds
+        ):
+            raise ValueError("证据图超时必须为正数且不超过模型超时")
+        if self.evidence_graph_enabled:
+            # 依赖必须在启动时显式满足：绝不静默打开或静默忽略证据图模式。
+            if self.runtime_profile is not RuntimeProfile.OFFICIAL_MASM:
+                raise ValueError("证据图模式要求 official-masm 档位")
+            if not self.selector_enabled:
+                raise ValueError("证据图模式要求启用证据筛选回退")
+            if not self.source_context_enabled:
+                raise ValueError("证据图模式要求启用来源上下文")
         if not self.is_official:
             return
 
@@ -171,4 +195,13 @@ class Settings:
                 "MASM_SELECTOR_MAX_CHARS_PER_CANDIDATE", 1200
             ),
             selector_timeout_seconds=_float_env("MASM_SELECTOR_TIMEOUT_SECONDS", 30.0),
+            evidence_graph_enabled=os.getenv("MASM_EVIDENCE_GRAPH_ENABLED", "0") == "1",
+            evidence_graph_max_requirements=_int_env(
+                "MASM_EVIDENCE_GRAPH_MAX_REQUIREMENTS", 4
+            ),
+            evidence_graph_max_supports=_int_env("MASM_EVIDENCE_GRAPH_MAX_SUPPORTS", 24),
+            evidence_graph_max_links=_int_env("MASM_EVIDENCE_GRAPH_MAX_LINKS", 24),
+            evidence_graph_timeout_seconds=_float_env(
+                "MASM_EVIDENCE_GRAPH_TIMEOUT_SECONDS", 30.0
+            ),
         )

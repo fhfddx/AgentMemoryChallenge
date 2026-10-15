@@ -51,6 +51,7 @@ from masm.storage.types import (
     MemoryBundle,
     MemoryCandidate,
     ObjectDeletionOutcome,
+    RelationEdge,
     SourceMessageSnapshot,
     StoredAssetSnapshot,
     ValidatedActions,
@@ -971,6 +972,67 @@ class MemoryRepository:
             )
             for memory in memories
         ]
+
+    def relation_edges(
+        self, user_id: str, memory_ids: Sequence[UUID], limit: int
+    ) -> list[RelationEdge]:
+        """只读读取关系边溯源；SQL 阶段即按 user_id 过滤，且两端都必须是该用户的记忆。
+
+        这是给证据图 provenance sidecar 用的内部读接口，不改变任何关系写入语义。
+        """
+        ids = list(memory_ids)
+        if not ids or limit < 1:
+            return []
+        with self._database.session() as session:
+            relations = (
+                session.execute(
+                    select(MemoryRelation)
+                    .where(
+                        MemoryRelation.user_id == user_id,
+                        MemoryRelation.source_type == "memory",
+                        MemoryRelation.target_type == "memory",
+                        or_(
+                            MemoryRelation.source_id.in_(ids),
+                            MemoryRelation.target_id.in_(ids),
+                        ),
+                    )
+                    .order_by(
+                        MemoryRelation.source_id,
+                        MemoryRelation.target_id,
+                        MemoryRelation.relation_type,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            endpoints = {relation.source_id for relation in relations}
+            endpoints.update(relation.target_id for relation in relations)
+            if not endpoints:
+                return []
+            owned = set(
+                session.execute(
+                    select(Memory.id).where(
+                        Memory.user_id == user_id, Memory.id.in_(list(endpoints))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        edges: list[RelationEdge] = []
+        for relation in relations:
+            # 双端所有权校验：即使数据库里存在损坏行，也绝不把跨用户边交给调用方。
+            if relation.source_id not in owned or relation.target_id not in owned:
+                continue
+            edges.append(
+                RelationEdge(
+                    source_id=relation.source_id,
+                    target_id=relation.target_id,
+                    relation_type=relation.relation_type,
+                )
+            )
+            if len(edges) >= limit:
+                break
+        return edges
 
     def delete_run(self, user_id: str, request_id: str) -> DeletedRun:
         """删除该用户该运行（request_id）的数据库记录，并把待删对象登记为 PENDING 意图。

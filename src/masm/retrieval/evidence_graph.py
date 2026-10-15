@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, StrictInt, ValidationError
 from masm.providers.llm import ModelRequest, StructuredLLM, StructuredOutputError
 from masm.retrieval.evidence_graph_assembly import assemble
 from masm.retrieval.evidence_graph_rules import (
+    MAX_GRAPH_CONTEXT_PAIRS,
     MAX_GRAPH_LINKS,
     MAX_GRAPH_REQUIREMENTS,
     MAX_GRAPH_SUPPORTS,
@@ -45,9 +46,11 @@ from masm.retrieval.evidence_selector import (
     _signal_payload,
     _source_labels,
 )
+from masm.retrieval.relation_expander import ExpansionEdge
 from masm.retrieval.reranker import RankedEvidence
 from masm.retrieval.selector_pool import DEFAULT_SELECTOR_CANDIDATES, build_selector_pool
 from masm.schemas.content import ContentPart
+from masm.storage.types import MemoryCandidate
 
 PROMPT_VERSION = "evidence-graph-planner-v1"
 # 遥测只记录该固定枚举；"unknown" 表示本次没有图判定（纯图片查询或 v7 回退）。
@@ -69,6 +72,7 @@ __all__ = [
     "ProposedLink",
     "QuestionRequirement",
     "SelectionResult",
+    "source_pairs_from_edges",
     "GraphFailureCategory",
     "LinkKind",
     "RequirementKind",
@@ -140,6 +144,41 @@ class GraphContext:
 
     relation_source_pairs: tuple[tuple[str, str], ...] = ()
     source_context_enabled: bool = False
+
+
+def source_pairs_from_edges(
+    edges: Sequence[ExpansionEdge],
+    candidates: Sequence[MemoryCandidate],
+    user_id: str,
+) -> tuple[tuple[str, str], ...]:
+    """把持久化关系边转换为来源分组对；跨用户或未知端点一律丢弃。
+
+    planner 只能看到不透明来源标签，只有确定性校验器能看到这些真实来源对。
+    """
+    by_id = {
+        item.memory_id: item for item in candidates if item.user_id == user_id
+    }
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for edge in edges:
+        left = by_id.get(edge.predecessor_id)
+        right = by_id.get(edge.candidate_id)
+        if left is None or right is None:
+            continue
+        if not left.request_id or not right.request_id:
+            continue
+        pair = (
+            (left.request_id, right.request_id)
+            if left.request_id <= right.request_id
+            else (right.request_id, left.request_id)
+        )
+        if pair in seen:
+            continue
+        seen.add(pair)
+        pairs.append(pair)
+        if len(pairs) >= MAX_GRAPH_CONTEXT_PAIRS:
+            break
+    return tuple(pairs)
 
 
 class EvidenceGraphPlanner:

@@ -16,6 +16,7 @@ from masm.providers.multimodal_embeddings import GroundedMultimodalEmbeddingProv
 from masm.providers.openai_embeddings import OpenAICompatibleEmbeddingProvider
 from masm.providers.reranker import LexicalReranker
 from masm.retrieval.baseline import BaselineRetriever, load_channel_weights
+from masm.retrieval.evidence_graph import EvidenceGraphPlanner, GraphEvidenceSelector
 from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
@@ -38,6 +39,7 @@ class RuntimeComponents:
     reranker: EvidenceReranker | None
     relevance_gate: RelevanceGate | None
     evidence_selector: EvidenceSelector | DeterministicEvidenceSelector | None
+    evidence_graph: GraphEvidenceSelector | None = None
 
     def close(self) -> None:
         """关闭运行时自身创建的模型与 Embedding HTTP 连接池。"""
@@ -122,6 +124,7 @@ def build_runtime(
     reranker: EvidenceReranker | None = None
     relevance_gate: RelevanceGate | None = None
     evidence_selector: EvidenceSelector | DeterministicEvidenceSelector | None = None
+    evidence_graph: GraphEvidenceSelector | None = None
 
     if profile is RuntimeProfile.LOCAL_FAKE:
         evidence_selector = DeterministicEvidenceSelector()
@@ -154,6 +157,22 @@ def build_runtime(
                 max_chars_per_candidate=settings.selector_max_chars_per_candidate,
                 timeout_seconds=settings.selector_timeout_seconds,
             )
+            if settings.evidence_graph_enabled:
+                # 图路径复用同一个 v7 selector 作为唯一回退；默认档位完全不构造它。
+                evidence_graph = GraphEvidenceSelector(
+                    EvidenceGraphPlanner(
+                        selected_llm,
+                        max_candidates=settings.selector_max_candidates,
+                        max_chars_per_candidate=settings.selector_max_chars_per_candidate,
+                        max_requirements=settings.evidence_graph_max_requirements,
+                        max_supports=settings.evidence_graph_max_supports,
+                        max_links=settings.evidence_graph_max_links,
+                        timeout_seconds=settings.evidence_graph_timeout_seconds,
+                    ),
+                    evidence_selector,
+                    max_candidates=settings.selector_max_candidates,
+                    max_selected=settings.selector_max_selected,
+                )
 
     return RuntimeComponents(
         profile=profile,
@@ -166,4 +185,5 @@ def build_runtime(
         reranker=reranker,
         relevance_gate=relevance_gate,
         evidence_selector=evidence_selector,
+        evidence_graph=evidence_graph,
     )

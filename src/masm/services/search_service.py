@@ -10,10 +10,16 @@ from uuid import uuid4
 
 from masm.retrieval.baseline import BaselineRetriever, ParsedQuery
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
+from masm.retrieval.evidence_graph import (
+    GraphContext,
+    GraphDiagnostics,
+    GraphEvidenceSelector,
+    source_pairs_from_edges,
+)
 from masm.retrieval.evidence_renderer import EvidenceRenderer
 from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
-from masm.retrieval.relation_expander import RelationExpander
+from masm.retrieval.relation_expander import ExpansionEdge, RelationExpander
 from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker, RankedEvidence
 from masm.retrieval.response_packer import ResponsePacker
@@ -36,6 +42,7 @@ class SearchService:
         reranker: EvidenceReranker | None = None,
         relevance_gate: RelevanceGate | None = None,
         selector: EvidenceSelector | DeterministicEvidenceSelector | None = None,
+        graph_selector: GraphEvidenceSelector | None = None,
         renderer: EvidenceRenderer | None = None,
         packer: ResponsePacker | None = None,
         runtime_profile: str = "unknown",
@@ -48,6 +55,7 @@ class SearchService:
         self._reranker = reranker
         self._relevance_gate = relevance_gate
         self._selector = selector
+        self._graph_selector = graph_selector
         self._renderer = renderer
         self._packer = packer
         self._runtime_profile = runtime_profile
@@ -70,8 +78,11 @@ class SearchService:
         if self._relevance_gate is not None:
             candidates = self._relevance_gate.filter(candidates)
         strong_anchor_ids = {item.memory_id for item in candidates}
+        relation_pairs: tuple[tuple[str, str], ...] = ()
         if self._expander is not None and candidates:
-            candidates = self._with_expansion(request.user_id, candidates, top_k)
+            candidates, relation_pairs = self._with_expansion(
+                request.user_id, candidates, top_k
+            )
         candidate_count = len(candidates)
         if self._expander is not None or self._reranker is not None:
             candidates = self._deduplicate(candidates)
@@ -80,8 +91,26 @@ class SearchService:
         if self._source_context is not None:
             ranked = self._source_context.enrich(request.user_id, ranked)
         selection = None
+        graph_diagnostics: GraphDiagnostics | None = None
         selector_latency_ms = 0.0
-        if self._selector is not None:
+        if self._graph_selector is not None:
+            # 图模式：模型只提出需求/引用/链接，确定性代码校验、组装并推导三态。
+            selector_started = perf_counter()
+            outcome = self._graph_selector.select(
+                request.query,
+                request.options,
+                ranked,
+                strong_anchor_ids,
+                GraphContext(
+                    relation_source_pairs=relation_pairs,
+                    source_context_enabled=self._source_context is not None,
+                ),
+            )
+            selector_latency_ms = (perf_counter() - selector_started) * 1000.0
+            selection = outcome.selection
+            graph_diagnostics = outcome.graph
+            ranked = list(selection.evidence)
+        elif self._selector is not None:
             selector_started = perf_counter()
             selection = self._selector.select(
                 request.query, request.options, ranked, strong_anchor_ids
@@ -126,6 +155,35 @@ class SearchService:
                 selector_failure_category=(selection.failure_category if selection else "none"),
                 selector_evidence_state=(selection.evidence_state if selection else "unknown"),
                 selector_latency_ms=selector_latency_ms,
+                graph_enabled=graph_diagnostics is not None,
+                graph_planner_calls=graph_diagnostics.planner_calls if graph_diagnostics else 0,
+                graph_candidate_count=(
+                    graph_diagnostics.candidate_count if graph_diagnostics else 0
+                ),
+                graph_requirement_count=(
+                    graph_diagnostics.requirement_count if graph_diagnostics else 0
+                ),
+                graph_support_count=(
+                    graph_diagnostics.support_count if graph_diagnostics else 0
+                ),
+                graph_link_count=graph_diagnostics.link_count if graph_diagnostics else 0,
+                graph_component_count=(
+                    graph_diagnostics.component_count if graph_diagnostics else 0
+                ),
+                graph_selected_count=(
+                    graph_diagnostics.selected_count if graph_diagnostics else 0
+                ),
+                graph_selected_source_count=(
+                    graph_diagnostics.selected_source_count if graph_diagnostics else 0
+                ),
+                graph_state=graph_diagnostics.state if graph_diagnostics else "unknown",
+                graph_fallback=graph_diagnostics.fallback if graph_diagnostics else False,
+                graph_failure_category=(
+                    graph_diagnostics.failure_category if graph_diagnostics else "none"
+                ),
+                graph_planner_latency_ms=(
+                    graph_diagnostics.planner_latency_ms if graph_diagnostics else 0.0
+                ),
             )
         )
         return response
@@ -159,7 +217,7 @@ class SearchService:
 
     def _with_expansion(
         self, user_id: str, candidates: Sequence[MemoryCandidate], top_k: int
-    ) -> list[MemoryCandidate]:
+    ) -> tuple[list[MemoryCandidate], tuple[tuple[str, str], ...]]:
         assert self._expander is not None
         repository = getattr(self._retriever, "repository", None)
         seeds = list(candidates)[: self._expander.max_seeds]
@@ -175,7 +233,14 @@ class SearchService:
             # 治理关系只挂在 context 节点：消息命中时用同源父节点作一跳种子。
             seeds = [parents.get(item.request_id, item) for item in seeds]
             seeds = list({item.memory_id: item for item in seeds}.values())
-        expanded = self._expander.expand(user_id, seeds, top_k)
+        edges: tuple[ExpansionEdge, ...] = ()
+        if self._graph_selector is not None:
+            # 只有图模式才额外读取持久化关系边溯源；默认路径的调用与顺序完全不变。
+            expansion = self._expander.expand_with_provenance(user_id, seeds, top_k)
+            expanded = list(expansion.candidates)
+            edges = expansion.edges
+        else:
+            expanded = self._expander.expand(user_id, seeds, top_k)
         merged: list[MemoryCandidate] = list(candidates)
         known = {candidate.memory_id for candidate in merged}
         for candidate in expanded:
@@ -195,7 +260,7 @@ class SearchService:
                     continue
                 known.add(candidate.memory_id)
                 merged.append(candidate)
-        return merged
+        return merged, source_pairs_from_edges(edges, merged, user_id)
 
     @staticmethod
     def _deduplicate(candidates: Sequence[MemoryCandidate]) -> list[MemoryCandidate]:

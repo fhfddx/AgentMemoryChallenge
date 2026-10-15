@@ -144,6 +144,15 @@ class SourceMessageSnapshot:
 
 
 @dataclass(frozen=True)
+class RelationEdge:
+    """一条同用户、两端都是该用户记忆的已持久化关系边（只读溯源用）。"""
+
+    source_id: UUID
+    target_id: UUID
+    relation_type: str
+
+
+@dataclass(frozen=True)
 class DeletedRun:
     """一次运行删除的**数据库阶段**结果。
 

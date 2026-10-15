@@ -12,6 +12,11 @@ _CHANNELS = frozenset({"lexical", "text_vector", "image_vector", "metadata"})
 _PROFILES = frozenset({"local-fake", "official-baseline", "official-masm"})
 # selector 证据状态是固定枚举；任何其他取值都折叠为 unknown，绝不透传可控文本。
 _EVIDENCE_STATES = frozenset({"sufficient", "partial", "insufficient", "unknown"})
+# 证据图只记录固定枚举与计数；失败类别同样只允许固定取值。
+_GRAPH_STATES = _EVIDENCE_STATES
+_GRAPH_FAILURES = frozenset(
+    {"none", "planner_unavailable", "planner_invalid", "internal_error"}
+)
 _TAG_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 
 
@@ -37,6 +42,19 @@ class SearchDiagnostics:
     selector_failure_category: str = "none"
     selector_evidence_state: str = "unknown"
     selector_latency_ms: float = 0.0
+    graph_enabled: bool = False
+    graph_planner_calls: int = 0
+    graph_candidate_count: int = 0
+    graph_requirement_count: int = 0
+    graph_support_count: int = 0
+    graph_link_count: int = 0
+    graph_component_count: int = 0
+    graph_selected_count: int = 0
+    graph_selected_source_count: int = 0
+    graph_state: str = "unknown"
+    graph_fallback: bool = False
+    graph_failure_category: str = "none"
+    graph_planner_latency_ms: float = 0.0
 
 
 def emit_search_diagnostics(value: SearchDiagnostics) -> None:
@@ -75,6 +93,25 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
             else "unknown"
         ),
         "selector_latency_ms": round(max(0.0, float(value.selector_latency_ms)), 2),
+        "graph_enabled": bool(value.graph_enabled),
+        "graph_planner_calls": max(0, int(value.graph_planner_calls)),
+        "graph_candidate_count": max(0, int(value.graph_candidate_count)),
+        "graph_requirement_count": max(0, int(value.graph_requirement_count)),
+        "graph_support_count": max(0, int(value.graph_support_count)),
+        "graph_link_count": max(0, int(value.graph_link_count)),
+        "graph_component_count": max(0, int(value.graph_component_count)),
+        "graph_selected_count": max(0, int(value.graph_selected_count)),
+        "graph_selected_source_count": max(0, int(value.graph_selected_source_count)),
+        "graph_state": (
+            value.graph_state if value.graph_state in _GRAPH_STATES else "unknown"
+        ),
+        "graph_fallback": bool(value.graph_fallback),
+        "graph_failure_category": (
+            value.graph_failure_category
+            if value.graph_failure_category in _GRAPH_FAILURES
+            else "unknown"
+        ),
+        "graph_planner_latency_ms": round(max(0.0, float(value.graph_planner_latency_ms)), 2),
     }
     _LOGGER.info(
         json.dumps(payload, sort_keys=True, separators=(",", ":")),
