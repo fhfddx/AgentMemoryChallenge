@@ -36,10 +36,11 @@ def _evidence(
     position: int = 0,
     granularity: str = "message",
     source_context: str | None = None,
+    user_id: str = _USER,
 ) -> RankedEvidence:
     return RankedEvidence(
         memory_id=UUID(int=number),
-        user_id=_USER,
+        user_id=user_id,
         content=content,  # type: ignore[arg-type]
         score=1.0 / number,
         rank=number,
@@ -101,6 +102,7 @@ def _validate(
         question=question,
         candidates=views,
         context=context if context is not None else GraphContext(),
+        expected_user_id=_USER,
         max_requirements=max_requirements,
         max_supports=max_supports,
         max_links=max_links,
@@ -212,6 +214,31 @@ def test_candidate_views_label_sources_by_first_appearance() -> None:
 
 
 # --- structural validation ---------------------------------------------------------------
+
+
+def test_validator_rejects_foreign_candidate_views_for_the_request_user() -> None:
+    mine = _evidence(1, "source-a", "I stored the amber key in drawer three.")
+    foreign = _evidence(
+        2,
+        "source-b",
+        "Foreign memory text.",
+        user_id="other-user",
+    )
+    proposal = _proposal(
+        requirements=[_requirement("Where did I store the amber key", "location")],
+        supports=[_support(0, 0, "I stored the amber key in drawer three.", "direct")],
+    )
+
+    outcome = validate_proposal(
+        proposal,
+        question="Where did I store the amber key?",
+        candidates=_views(mine, foreign),
+        context=GraphContext(),
+        expected_user_id=_USER,
+    )
+
+    assert outcome.valid is False
+    assert outcome.failure_category == "planner_invalid"
 
 
 def test_too_many_requirements_supports_or_links_invalidate_the_whole_proposal() -> None:

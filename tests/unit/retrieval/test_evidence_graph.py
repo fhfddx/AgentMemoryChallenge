@@ -17,6 +17,7 @@ from masm.retrieval.evidence_graph import (
     EvidenceGraphPlanner,
     GraphContext,
     GraphEvidenceSelector,
+    GraphSelection,
 )
 from masm.retrieval.evidence_selector import EvidenceSelector
 from masm.retrieval.reranker import RankedEvidence
@@ -86,11 +87,30 @@ def _link(left: int, right: int, left_quote: str, right_quote: str, kind: str) -
     }
 
 
-def _selector(llm: FakeStructuredLLM, *, max_candidates: int = 32) -> GraphEvidenceSelector:
-    return GraphEvidenceSelector(
+class _RequestScopedSelector:
+    """Keep unit cases concise while exercising the required production user scope."""
+
+    def __init__(self, selector: GraphEvidenceSelector) -> None:
+        self._selector = selector
+
+    def select(
+        self,
+        *args: object,
+        request_user_id: str = _USER,
+        **kwargs: object,
+    ) -> GraphSelection:
+        return self._selector.select(  # type: ignore[arg-type]
+            *args,
+            request_user_id=request_user_id,
+            **kwargs,
+        )
+
+
+def _selector(llm: FakeStructuredLLM, *, max_candidates: int = 32) -> _RequestScopedSelector:
+    return _RequestScopedSelector(GraphEvidenceSelector(
         EvidenceGraphPlanner(llm, max_candidates=max_candidates),
         EvidenceSelector(llm, max_candidates=max_candidates),
-    )
+    ))
 
 
 def _anchors(*items: RankedEvidence) -> set[UUID]:
@@ -1351,6 +1371,33 @@ def test_candidates_from_another_user_never_enter_the_graph_pool() -> None:
     assert outcome.graph.candidate_count == 1
     assert outcome.selection.evidence == (mine,)
     assert "Foreign memory text." not in json.dumps(llm.requests[0].payload, ensure_ascii=False)
+
+
+def test_request_user_scope_is_not_inferred_from_first_ranked_candidate() -> None:
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Where did I store the amber key", "location")],
+                supports=[_support(0, 0, "I stored the amber key in drawer three.", "direct")],
+            )
+        ]
+    )
+    foreign = _evidence(1, "source-b", "Foreign memory text.", user_id="other-user")
+    mine = _evidence(2, "source-a", "I stored the amber key in drawer three.")
+
+    outcome = _selector(llm).select(
+        "Where did I store the amber key?",
+        None,
+        [foreign, mine],
+        _anchors(foreign, mine),
+        GraphContext(),
+        request_user_id=_USER,
+    )
+
+    assert outcome.graph.candidate_count == 1
+    assert outcome.selection.evidence == (mine,)
+    rendered = json.dumps(llm.requests[0].payload, ensure_ascii=False)
+    assert "Foreign memory text." not in rendered
 
 
 # --- property-style determinism ----------------------------------------------------------

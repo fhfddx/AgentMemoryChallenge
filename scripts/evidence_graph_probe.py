@@ -684,6 +684,7 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
                     relation_source_pairs=case.context_pairs,
                     source_context_enabled=case.source_context,
                 ),
+                request_user_id=_USER,
             )
         except Exception:
             failure_count += 1

@@ -342,11 +342,18 @@ class GraphEvidenceSelector:
         ranked: Sequence[RankedEvidence],
         strong_anchor_ids: Collection[UUID],
         graph_context: GraphContext | None = None,
+        *,
+        request_user_id: str,
     ) -> GraphSelection:
         """返回经校验组装的原证据；valid insufficient 直接拒答且不回退。"""
-        user_id = ranked[0].user_id if ranked else ""
+        scoped_ranked = [item for item in ranked if item.user_id == request_user_id]
+        scoped_anchor_ids = {
+            item.memory_id
+            for item in scoped_ranked
+            if item.memory_id in strong_anchor_ids
+        }
         pool = build_selector_pool(
-            [item for item in ranked if item.user_id == user_id],
+            scoped_ranked,
             max_candidates=self._max_candidates,
         )
         if not pool:
@@ -358,7 +365,7 @@ class GraphEvidenceSelector:
         question, visual, has_text = _question_text(query)
         if visual and not has_text:
             # 纯图片查询没有可供 planner 判断的文本问题：沿用既有 selector/回退路径。
-            selection = self._v7(query, options, ranked, strong_anchor_ids)
+            selection = self._v7(query, options, scoped_ranked, scoped_anchor_ids)
             return GraphSelection(
                 selection,
                 GraphDiagnostics(
@@ -388,8 +395,8 @@ class GraphEvidenceSelector:
                 (perf_counter() - started) * 1000.0,
                 query,
                 options,
-                ranked,
-                strong_anchor_ids,
+                scoped_ranked,
+                scoped_anchor_ids,
             )
         latency_ms = (perf_counter() - started) * 1000.0
         try:
@@ -398,13 +405,19 @@ class GraphEvidenceSelector:
                 question=question,
                 candidates=views,
                 context=context,
+                expected_user_id=request_user_id,
                 max_requirements=self._planner.max_requirements,
                 max_supports=self._planner.max_supports,
                 max_links=self._planner.max_links,
             )
             if not outcome.valid:
                 return self._fallback_selection(
-                    "planner_invalid", latency_ms, query, options, ranked, strong_anchor_ids
+                    "planner_invalid",
+                    latency_ms,
+                    query,
+                    options,
+                    scoped_ranked,
+                    scoped_anchor_ids,
                 )
             assembled = assemble(
                 requirement_count=len(outcome.requirements),
@@ -415,7 +428,12 @@ class GraphEvidenceSelector:
             )
         except Exception:
             return self._fallback_selection(
-                "internal_error", latency_ms, query, options, ranked, strong_anchor_ids
+                "internal_error",
+                latency_ms,
+                query,
+                options,
+                scoped_ranked,
+                scoped_anchor_ids,
             )
 
         evidence = tuple(view.evidence for view in assembled.selected)

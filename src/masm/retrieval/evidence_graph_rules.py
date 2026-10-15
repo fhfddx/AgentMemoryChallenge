@@ -277,11 +277,14 @@ def validate_proposal(
     question: str,
     candidates: Sequence[CandidateView],
     context: GraphContextView,
+    expected_user_id: str,
     max_requirements: int = MAX_GRAPH_REQUIREMENTS,
     max_supports: int = MAX_GRAPH_SUPPORTS,
     max_links: int = MAX_GRAPH_LINKS,
 ) -> ValidationOutcome:
     """结构错误使整份 proposal 失效；个别无法证明的条目只被丢弃。"""
+    if any(candidate.user_id != expected_user_id for candidate in candidates):
+        return _INVALID
     normalized_question = normalize_text(question)
     if not 1 <= len(proposal.requirements) <= max_requirements:
         return _INVALID

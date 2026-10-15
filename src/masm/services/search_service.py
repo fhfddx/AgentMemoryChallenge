@@ -105,6 +105,7 @@ class SearchService:
                     relation_source_pairs=relation_pairs,
                     source_context_enabled=self._source_context is not None,
                 ),
+                request_user_id=request.user_id,
             )
             selector_latency_ms = (perf_counter() - selector_started) * 1000.0
             selection = outcome.selection
