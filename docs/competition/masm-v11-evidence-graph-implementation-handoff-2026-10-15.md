@@ -32,7 +32,7 @@
 
 | # | 提交 | 内容 |
 | --- | --- | --- |
-| C1 | `ac63ca9` `test: specify grounded evidence graph behavior` | 冻结基线上的 RED 规格：图行为、grounding/结构规则、固定 24 例（12 配对）合成套件与探针 |
+| C1 | `ac63ca9` `test: specify grounded evidence graph behavior` | 冻结基线上的 RED 规格：图行为、grounding/结构规则、固定 26 例（13 配对）合成套件与探针 |
 | C2 | `2ab5bba` `feat: add grounded evidence graph planner and validator` | 严格 proposal schema、单次 planner 调用、`GraphContext`、归一化/grounding/discriminative-unit/结构校验 |
 | C3 | `5420b43` `feat: assemble evidence from validated graph paths` | 连通分量、最短路径、三态推导、12 项上限降级、`GraphEvidenceSelector`（含纯图片直连与一次性回退） |
 | C4 | `07acc3c` `feat: wire opt-in evidence graph search` | 配置开关与启动校验、provenance sidecar、只读 `relation_edges`、Search/runtime/app 接线、固定枚举遥测 |
@@ -148,10 +148,10 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 
 | 命令 | 实际结果 |
 | --- | --- |
-| focused 图/相关测试（9 个文件） | **`152 passed, 2 warnings`**，exit 0 |
-| `python -m pytest -q`（全量） | **`934 passed, 1 skipped, 92 warnings`**，exit 0 |
+| focused 图/相关测试（9 个文件） | **`157 passed, 2 warnings`**，exit 0 |
+| `python -m pytest -q`（全量） | **`939 passed, 1 skipped, 92 warnings`**，exit 0 |
 | `python -m ruff check .` | `All checks passed!`，exit 0 |
-| `python -m mypy src` | `Success: no issues found in 60 source files`，exit 0 |
+| `python -m mypy src scripts/evidence_graph_probe.py` | `Success: no issues found in 61 source files`，exit 0 |
 | `git diff --check 6ad49ad3e99b725821e5e9d1b053d2a0148fe319..HEAD` | 空输出，exit 0 |
 
 跳过项是既有的 Windows POSIX 权限语义测试（`test_cloud_smoke_recovery_manifest.py:114`），
@@ -195,7 +195,7 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 | 20 | 遥测不泄漏 | `test_evidence_graph_wiring.py::test_graph_diagnostics_are_content_free`、`test_suite_output_never_contains_question_or_candidate_text`、`test_diagnostics_sanitize_unrecognized_enums` |
 | — | 属性式（确定性顺序、环、菱形、置换、12 项上限） | `test_cycles_and_diamonds_terminate_with_one_component`、`test_selection_is_stable_when_unrelated_candidates_are_permuted`、`test_complete_graph_over_the_evidence_cap_degrades_to_bounded_partial` |
 | — | 真实 repository/Search（渲染一致、跨用户边拒绝） | `tests/integration/test_evidence_graph_pipeline.py` 全部用例 |
-| — | 固定合成套件（≥20 例、正负配对、fake provider） | `scripts/evidence_graph_probe.py` + `tests/unit/test_evidence_graph_probe_script.py`（24 例 / 12 配对） |
+| — | 固定合成套件（≥20 例、正负配对、fake provider） | `scripts/evidence_graph_probe.py` + `tests/unit/test_evidence_graph_probe_script.py`（26 例 / 13 配对） |
 
 ## 8. 隔离、隐私与遥测
 
@@ -243,7 +243,7 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 
 ## 12. 已知限制与尚未满足的门槛
 
-1. **gate 5（真实 Provider 稳定性）未做**：固定套件 5 轮全通过、零 provider/schema 失败需要用户
+1. **gate 5（真实 Provider 稳定性）未做**：固定 26 例套件 5 轮全通过、零 provider/schema 失败需要用户
    授权后另行执行；本轮只证明了 fake provider 下的确定性。
 2. **gate 6（真实 Add→Search 探针）部分完成**：真实数据库的 Add→Search 路径已覆盖直接事实、
    跨来源链、断链、跨用户边与渲染一致；图片/多模态清理、原子检索与完整删除残留核验仍需按
@@ -266,8 +266,22 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 ## 13. 建议下一步
 
 1. Codex 独立复核 diff 与证据（本文件不构成通过结论）。
-2. 用户授权后：在真实 Provider 上执行 `scripts/evidence_graph_probe.py`（固定 24 例、正负配对、
-   一次性 5 轮、全通过才合格；不得挑轮次）。
+2. 用户授权后：在真实 Provider 上执行 `scripts/evidence_graph_probe.py --stability`（固定 26 例、
+   13 个正负配对、单进程完整 5 轮；任一轮失败都返回非零，不得挑轮次）。
+
+   服务器上应使用既有秘密注入机制，不要把值写入命令、仓库或回传日志。执行前只核对下列变量已由运行环境提供：
+   `MASM_RUNTIME_PROFILE=official-masm`、`MASM_LLM_BASE_URL`、`MASM_LLM_API_KEY`、
+   `MASM_EMBEDDING_BASE_URL`、`MASM_EMBEDDING_API_KEY`。建议命令：
+
+   ```bash
+   .venv/bin/python scripts/evidence_graph_probe.py --stability \
+     | tee evidence-graph-stability.jsonl
+   status=${PIPESTATUS[0]}
+   tail -n 1 evidence-graph-stability.jsonl
+   exit "$status"
+   ```
+
+   只需回传退出码和最后一行 `stability_summary`；不要回传环境变量、Provider 响应或其他服务日志。
 3. 通过后按设计规格第 13 节做 API-only canary（记录镜像/容器 ID，仅替换 API 容器，Postgres 容器
    ID 必须不变），最多一次官方 Smoke；Full 不运行。
 4. 若需要，再补：并发 16/16、纯图片与混合多模态 Add→Search 清理核验、端到端延迟与响应字节核对。
@@ -287,6 +301,7 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 | P2 | SQLAlchemy 异常可打印绑定参数；pytest 失败可通过 `Settings.__repr__` 打印数据库地址和 API keys | `Database.create(..., hide_parameters=True)`；`Settings.database_url`/`api_keys` 设为 `repr=False`，均有 canary 回归测试 |
 | P2 | 把纯图片直通 v7 也截断到 32 项 graph pool，会丢失更深但合法的 strong image anchor | 纯图片不属于 planner 失败；零 planner 调用地保留完整 user-scoped ranked 输入，只有真实 graph 失败回退受 32 项限制 |
 | P2 | 测试数据库 URL 即使通过 `masm_test` 校验，仍可在 pytest 失败值表示中完整出现 | 校验后返回行为等同 `str` 但 `repr` 固定脱敏的值，canary 同时固定字符串兼容性和脱敏 |
+| P2 | 真实 Provider 门槛只能单轮运行，缺少一次性五轮聚合，手工循环容易挑轮次或提前停止 | 新增 `--stability`：单进程固定运行五轮完整套件，不因单轮失败提前退出，只有 5/5 轮全部通过才返回 0；与调试用 `--reverse` 互斥 |
 
 以上修复没有新增 public schema、migration、planner rationale/answer/state/selected indices，也没有修改
 默认关闭、local-fake、渲染、删除、多模态、响应预算或 16 并发实现。
@@ -305,8 +320,9 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 | `8102c2f` | `fix: redact sensitive values from failures` |
 | `aff3fa5` | `fix: preserve pure image selector behavior` |
 | `d0746f7` | `test: redact test database URL repr` |
+| `0348d78` | `test: add fixed provider stability gate` |
 
-代码/测试 HEAD（本次最终文档提交之前）：`d0746f7`。最终文档提交和完整 HEAD 以交付消息中的实际
+代码/测试 HEAD（本次最终文档提交之前）：`0348d78`。最终文档提交和完整 HEAD 以交付消息中的实际
 `git log` 为准。
 
 最后一轮是主代理自审（本会话禁止未经用户要求的子代理委派），因此不把它等同于独立第二审。自审发现的两个 P2 均已通过先 RED 后 GREEN 的回归测试处理。
@@ -314,5 +330,5 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 ### 14.3 最新资格判断
 
 本地 deterministic、数据库 integration、隔离、契约、Ruff、mypy 与 diff-check 门槛全部通过，
-因此该分支可作为“进入下一阶段 Provider 稳定性门槛”的候选。它仍未通过真实 Provider 五轮固定
+因此该分支可作为“进入下一阶段 Provider 稳定性门槛”的候选。`--stability` 已把五轮固定门槛收敛为单进程、非零失败的可执行命令；它仍未通过真实 Provider 五轮固定
 套件、API-only canary 或官方 Smoke；不得据此宣称官方分数提高，也不得直接部署。

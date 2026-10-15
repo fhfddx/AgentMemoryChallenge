@@ -1,10 +1,11 @@
 """Deterministic three-state assembly over a validated evidence graph.
 
 The model never supplies a global verdict. Coverage comes from validated direct/negative
-supports, connectivity comes from validated links only, and the returned evidence is the
-smallest connected set that keeps every covered requirement interpretable. Unrelated
-candidates are never added to fill the response budget, and a claimed complete path is never
-truncated: when it does not fit the evidence cap the verdict degrades to partial.
+supports. Connectivity comes from validated proposal links plus deterministic stored-conflict
+adjacency derived from validated supports. The returned evidence is the smallest connected set
+that keeps every covered requirement interpretable. Unrelated candidates are never added to fill
+the response budget, and a claimed complete path is never truncated: when it does not fit the
+evidence cap the verdict degrades to partial.
 """
 
 import itertools
