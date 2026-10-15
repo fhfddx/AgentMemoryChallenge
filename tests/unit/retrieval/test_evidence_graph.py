@@ -1442,6 +1442,26 @@ def test_pure_image_query_keeps_the_existing_path() -> None:
     assert outcome.selection.evidence == (anchor,)
 
 
+def test_pure_image_query_preserves_user_scoped_anchor_beyond_graph_pool() -> None:
+    llm = FakeStructuredLLM([])
+    ranked = [
+        _evidence(index, f"source-{index}", f"Image candidate {index}.")
+        for index in range(1, 34)
+    ]
+    deep_anchor = ranked[-1]
+
+    outcome = _selector(llm).select(
+        _IMAGE_QUERY,
+        None,
+        ranked,
+        _anchors(deep_anchor),
+        GraphContext(),
+    )
+
+    assert llm.requests == []
+    assert outcome.selection.evidence == (deep_anchor,)
+
+
 def test_unexpected_internal_failure_fails_closed_to_the_frozen_selector(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
