@@ -352,3 +352,48 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 因此该分支可作为“进入下一阶段 Provider 稳定性门槛”的候选。`--stability` 已把五轮固定门槛收敛为
 单进程执行；门槛状态由 `probe_exit_code` 表示，只有显式 `--strict-exit` 才把失败映射为非零进程状态。它仍未通过真实 Provider 五轮固定
 套件、API-only canary 或官方 Smoke；不得据此宣称官方分数提高，也不得直接部署。
+
+## 15. 服务器门槛第一次运行的结论与 pin 修复（2026-10-17）
+
+### 15.1 首次运行结果
+
+服务器 checkout `/root/AgentMemoryChallenge` 位于 `d022b8a`（不是候选清单要求的提交），只读核验返回
+`verification_exit_code=2`，因此 `--stability` 未启动，没有产生任何真实 Provider 调用。该退出码对应
+`_verify_candidate` 的**前置失败分支**（`candidate_checkout` / `probe_worktree` / `source_manifest` /
+`verification_error=command_failed` / `container_check=failed` / `verification_error=invalid_output`），
+原因行被运维侧过滤表达式漏掉，需从服务器上的 `/tmp/masm-eg-verify.txt` 读取。
+
+### 15.2 独立发现：pin 与门禁比对口径不一致
+
+即使前置失败被修复，`d022b8a` 的 `source_digest` 仍会失败，因为门禁比较的是**已提交字节（git blob）
+摘要**与**容器内已安装文件摘要**，而当时的 pin 既不是两者之一：
+
+| 对象 | 值 |
+| --- | --- |
+| `d022b8a` 的旧 pin | `541fceac…3e3dd`（与任何一端口径都不符） |
+| 本地 `dc38ede` 的 pin（Windows worktree 字节，含 CRLF） | `8b81c490…5c9b8da` |
+| 已提交 blob 摘要 = 容器内已安装摘要（平台无关） | `d1e1ce2b…b8b6b79` |
+
+本地复现：`core.autocrlf=true` 时 `src/masm` 有 55/60 个文件带 CRLF，`_package_digest`（worktree 字节）
+因此与 `_git_package_digest`（`git cat-file blob`）不等；容器模板计算的是已安装文件的 LF 字节。
+
+### 15.3 修复（`6142f30`）
+
+- `source_digest` 改钉**平台无关的 blob 摘要** `d1e1ce2b…b8b6b79`；
+- 新增 `_probe_bytes_match()`：送进容器的 probe 在比较前做 CRLF→LF 归一化，Windows 与 Linux
+  checkout 都能通过，而任何内容改动仍然失败（已提交内容另由 `probe_blob` 独立钉住）；
+- 测试改为断言平台无关口径：`_git_package_digest` 等于 pin、CRLF worktree 仍等于 HEAD
+  （`_worktree_matches_head`）、LF/CRLF probe 均匹配且被篡改的 probe 不匹配。
+
+RED：`-k "platform_independent or line_ending or pins_the_committed"` → 3 failed（缺 `_probe_bytes_match`
+且 pin 不等于 blob 摘要）。GREEN：该测试文件 `28 passed`；全量 `973 passed, 1 skipped, 92 warnings`；
+Ruff 通过；mypy 62 个源文件通过。
+
+### 15.4 复跑前置条件
+
+1. 服务器 checkout 必须包含 `6142f30`（或更新的同分支提交）；该提交尚未推送，需由用户推送/传输。
+2. `src/masm` 在 `d022b8a..6142f30` 之间没有任何改动，因此**不需要重建镜像**：容器内已安装摘要
+   本来就等于新 pin，只需更新 checkout 与 probe。
+3. 复跑前先读 `/tmp/masm-eg-verify.txt` 确认 `verification_exit_code=2` 的具体原因（容器名、运行档位或
+   Provider 变量），再执行 `--stability`。
+
