@@ -780,6 +780,48 @@ python3 scripts/evidence_graph_server_gate.py --container masm-v11-api-1 --stabi
 预计每轮 25/26（仅豁免的 `chinese_context_negative` 失败且失败在安全方向）、非豁免用例全 ≥4/5、
 `forbidden_evidence_total=0` → 合格。若仍不合格，按预注册声明该候选淘汰，下一次尝试必须来自新提交。
 
+## 24. 资格证书：预注册判据下合格（`e80eb59`）
+
+### 24.1 运行事实
+
+候选镜像 `masm-v11-final-candidate:e80eb59`，只替换 `masm-v11-api-1`
+（`API_REPLACED` / `DB_UNCHANGED` / `health=healthy` / `restarts=0`），只读核验
+`verification_exit_code=0`（`source_match=yes`、`candidate_modules=present`、`runtime_settings=valid`、
+四个 Provider 变量 `set`），随后按第 22 节预注册判据跑**一次**五轮门槛：
+
+| 判据条目 | 结果 |
+| --- | --- |
+| `verification_exit_code=0` | ✅ |
+| `round_count=5` | ✅ |
+| 每轮 ≥25/26 | ✅ `rounds_meeting_minimum=5` |
+| 非豁免用例逐例 ≥4/5 | ✅ `cases_meeting_minimum=24` / `cases_total=24` |
+| 每轮 `forbidden_evidence_selected=0` | ✅ `forbidden_evidence_total=0` |
+
+`criterion=amended`、`amended_candidate_eligible=true`、门禁进程退出码 `0`。
+
+**如实记录两点**：
+1. `probe_exit_code=1` —— 冻结全绿信号并非全绿：豁免用例 `chinese_context_negative` 在**安全方向**
+   失败（拒答 + 空证据，从不返回被禁片段）。合格结论依据的是第 22 节**运行前预注册并经用户批准**的
+   修正判据，不是原始冻结判据；
+2. 豁免的两个用例中，`missing_value_negative` 本轮 5/5 通过（R3b 生效），只有
+   `chinese_context_negative` 0/5。
+
+### 24.2 实现链条的最终验证状态
+
+真实 Provider 运行确认生效的确定性规则：R1（同来源相邻建边）、R2（跨来源共享区分单元，池内稀有度 ≤2）、
+R2b（已证明连接的上下文补全）、Rule A（未被需求主张且无证据覆盖的问题内容不得判完整）、
+Rule B（子句/绑定标记门控的需求单元落地）、R3（侧车关系由代码建边）、R3b（绑定介词）、
+R4（代码可确立覆盖）。确定性套件（fake provider）26/26；全量 1004 passed / 1 skipped。
+
+### 24.3 后续（按设计第 13 节）
+
+资格门槛已通过，因此按设计下一步是**把图路径真正打开**（专用 override 中
+`MASM_EVIDENCE_GRAPH_ENABLED=1` 与 `MASM_SOURCE_CONTEXT_ENABLED=1` 同时开启，仅替换 API），
+观察线上遥测（`graph_state`、`graph_fallback`、`graph_failure_category`、
+`graph_planner_failure_reason`、`graph_link_count`、响应字节与延迟），并保留回滚 override。
+官方 Smoke 最多一次、Full 永不执行，且由用户决定是否执行。
+
+
 
 
 
