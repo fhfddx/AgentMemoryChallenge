@@ -821,6 +821,51 @@ R4（代码可确立覆盖）。确定性套件（fake provider）26/26；全量
 `graph_planner_failure_reason`、`graph_link_count`、响应字节与延迟），并保留回滚 override。
 官方 Smoke 最多一次、Full 永不执行，且由用户决定是否执行。
 
+## 25. Canary 打开后的第一个发现：图遥测被日志白名单整体丢弃
+
+### 25.1 现象与根因
+
+按设计打开两个开关（`MASM_EVIDENCE_GRAPH_ENABLED=1`、`MASM_SOURCE_CONTEXT_ENABLED=1`，只替换 API）后：
+`API_REPLACED` / `DB_UNCHANGED` / `healthy` / `restarts=0`，容器内 `graph_flag=1`、`context_flag=1`、
+`selector=1`、`official-masm`。随后用 canary 自身的 `/add` + `/search` 造真实流量：
+`add_status=200`、两问 `search_status=200`、two-attributes 命中 1 条、无关问题命中 0 条（拒答方向正确）。
+
+但 `search.completed` 的**原始行**里只有 `selector_*`，**一个 `graph_*` 字段都没有**：
+
+```
+{"event": "search.completed", "status": "INFO", "request_tag": "...", "runtime_profile": "official-masm",
+ "candidate_count": 0, ..., "selector_abstained": true, "selector_evidence_state": "unknown",
+ "selector_latency_ms": 0.03}
+```
+
+根因：`search_service` 正确填充了图字段、`emit_search_diagnostics` 也正确序列化，但
+`observability/logging.py` 的**字段白名单** `ALLOWED_LOG_FIELDS` 自 v1.0 起只列了 `selector_*`，
+图路径新增的 14 个字段从未加入 → 脱敏格式化器把它们**整体丢弃**。也就是说：图路径在线上**完全不可观测**，
+而这正是 canary 存在的意义（合成套件与门禁都看不到这一点）。
+
+### 25.2 修复
+
+`ALLOWED_LOG_FIELDS` 增补 14 个图字段（`enabled`、`planner_calls`、`candidate_count`、
+`requirement_count`、`support_count`、`link_count`、`component_count`、`selected_count`、
+`selected_source_count`、`state`、`fallback`、`failure_category`、`planner_failure_reason`、
+`planner_latency_ms`）。它们全部是固定枚举、计数或延迟，因此字段级白名单与值级脱敏规则都不需要放宽。
+
+RED→GREEN：`test_graph_diagnostics_survive_redaction` 先失败（`redact_fields` 丢掉了全部图字段）。
+全量（临时 `masm_test`）：1004 passed / 1 skipped（唯一失败是当时过期的 source digest pin）；
+ruff、mypy 干净。
+
+### 25.3 复验步骤（服务器）
+
+由修复提交重建镜像 → 用同一 override（flags 打开）`up -d --no-deps --force-recreate api` → 重跑
+`/add` + 两条 `/search` → 再读遥测；这次 `graph_*` 字段应出现在日志行里，据此判定
+`graph_state` 分布、`graph_fallback`/`failure_category`/`planner_failure_reason` 与 planner 延迟量级。
+
+### 25.4 pin
+
+`source_digest` 重新钉为 `76d092e0277d3622e9b9f7a68f72a9c731d9d1ef433ef77d60ed86d124cff41b`；
+probe 未改动，`probe_blob`/`probe_sha256` 不变。
+
+
 
 
 
