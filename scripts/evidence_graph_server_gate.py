@@ -148,6 +148,24 @@ _ALLOWED_DIAGNOSTIC_STATE_TRANSITIONS = frozenset(
     for expected in ("sufficient", "partial", "insufficient")
     for actual in _ALLOWED_DIAGNOSTIC_STATES
 )
+# 结构失败原因是固定枚举，只用于诊断定位。
+_ALLOWED_DIAGNOSTIC_PLANNER_FAILURE_REASONS = frozenset(
+    {
+        "none",
+        "schema_invalid",
+        "planner_unavailable",
+        "internal_error",
+        "candidate_scope_mismatch",
+        "empty_requirements",
+        "requirement_count_exceeded",
+        "requirement_quote_not_grounded",
+        "support_count_exceeded",
+        "support_index_out_of_range",
+        "link_count_exceeded",
+        "link_index_out_of_range",
+        "link_self_reference",
+    }
+)
 _ALLOWED_PROVIDER_CHECK_CATEGORIES = frozenset(
     {
         "success",
@@ -851,6 +869,7 @@ def _diagnostic_summary(rendered: str) -> Mapping[str, object] | None:
     for name, allowed_keys in (
         ("failure_reasons", _ALLOWED_DIAGNOSTIC_FAILURE_REASONS),
         ("state_transitions", _ALLOWED_DIAGNOSTIC_STATE_TRANSITIONS),
+        ("planner_failure_reasons", _ALLOWED_DIAGNOSTIC_PLANNER_FAILURE_REASONS),
     ):
         raw = summary.get(name)
         if not isinstance(raw, dict):

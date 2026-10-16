@@ -27,6 +27,7 @@ from masm.retrieval.evidence_graph_rules import (
     MAX_GRAPH_SUPPORTS,
     GraphFailureCategory,
     LinkKind,
+    PlannerFailureReason,
     RequirementKind,
     SupportRole,
     ValidatedLink,
@@ -310,6 +311,7 @@ class GraphDiagnostics:
     state: "ReportedGraphState" = "unknown"
     fallback: bool = False
     failure_category: GraphFailureCategory = "none"
+    planner_failure_reason: PlannerFailureReason = "none"
     planner_latency_ms: float = 0.0
 
 
@@ -429,6 +431,7 @@ class GraphEvidenceSelector:
                 options,
                 pool,
                 pool_anchor_ids,
+                "schema_invalid" if category == "planner_invalid" else "planner_unavailable",
             )
         latency_ms = (perf_counter() - started) * 1000.0
         try:
@@ -450,6 +453,7 @@ class GraphEvidenceSelector:
                     options,
                     pool,
                     pool_anchor_ids,
+                    outcome.reason,
                 )
             links = _merge_links(
                 outcome.links,
@@ -479,6 +483,7 @@ class GraphEvidenceSelector:
                 options,
                 pool,
                 pool_anchor_ids,
+                "internal_error",
             )
 
         evidence = tuple(view.evidence for view in assembled.selected)
@@ -530,6 +535,7 @@ class GraphEvidenceSelector:
         options: Sequence[str] | None,
         ranked: Sequence[RankedEvidence],
         strong_anchor_ids: Collection[UUID],
+        reason: PlannerFailureReason = "none",
     ) -> GraphSelection:
         selection = self._v7(query, options, ranked, strong_anchor_ids)
         return GraphSelection(
@@ -543,6 +549,7 @@ class GraphEvidenceSelector:
                 state="unknown",
                 fallback=True,
                 failure_category=category,
+                planner_failure_reason=reason,
                 planner_latency_ms=latency_ms,
             ),
         )

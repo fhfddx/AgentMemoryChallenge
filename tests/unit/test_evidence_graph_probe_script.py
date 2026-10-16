@@ -94,6 +94,7 @@ def test_suite_output_never_contains_question_or_candidate_text() -> None:
             "abstained",
             "fallback",
             "failure_category",
+            "planner_failure_reason",
             "selected_count",
             "selected_source_count",
             "planner_schema_valid",
@@ -108,6 +109,7 @@ def test_suite_output_never_contains_question_or_candidate_text() -> None:
             "fallbacks",
             "failure_count",
             "failure_reasons",
+            "planner_failure_reasons",
             "state_transitions",
             "candidate_eligible",
         }

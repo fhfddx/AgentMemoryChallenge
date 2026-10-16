@@ -182,6 +182,9 @@ class SearchService:
                 graph_failure_category=(
                     graph_diagnostics.failure_category if graph_diagnostics else "none"
                 ),
+                graph_planner_failure_reason=(
+                    graph_diagnostics.planner_failure_reason if graph_diagnostics else "none"
+                ),
                 graph_planner_latency_ms=(
                     graph_diagnostics.planner_latency_ms if graph_diagnostics else 0.0
                 ),

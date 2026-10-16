@@ -97,14 +97,16 @@ class FakeCommandRunner:
                 stdout = (
                     '{"case":"private-case-name","positive":true,"passed":false,'
                     '"evidence_state":"sufficient","fallback":true,'
-                    '"failure_category":"planner_invalid"}\n'
+                    '"failure_category":"planner_invalid",'
+                    '"planner_failure_reason":"empty_requirements"}\n'
                     '{"case":"another-private-case","positive":false,"passed":true,'
                     '"evidence_state":"insufficient","fallback":false,'
-                    '"failure_category":"none"}\n'
+                    '"failure_category":"none","planner_failure_reason":"none"}\n'
                     '{"case":"summary","case_count":2,"positive_total":1,'
                     '"positive_passed":0,"negative_total":1,"negative_passed":1,'
                     '"fallbacks":1,"failure_count":1,'
                     '"failure_reasons":{"graph_failure":1,"passed":1},'
+                    '"planner_failure_reasons":{"empty_requirements":1,"none":1},'
                     '"state_transitions":{"insufficient->insufficient":1,'
                     '"sufficient->unknown":1},"candidate_eligible":false}\n'
                 )
@@ -491,6 +493,7 @@ def test_explicit_diagnostic_runs_one_round_and_prints_only_safe_aggregates(
         "failure_categories": {"none": 1, "planner_invalid": 1},
         "failure_count": 1,
         "failure_reasons": {"graph_failure": 1, "passed": 1},
+        "planner_failure_reasons": {"empty_requirements": 1, "none": 1},
         "fallbacks": 1,
         "negative_passed": 1,
         "negative_total": 1,

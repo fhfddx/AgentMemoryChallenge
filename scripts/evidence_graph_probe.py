@@ -735,6 +735,7 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
     fallbacks = 0
     failure_count = 0
     failure_reasons: dict[str, int] = {}
+    planner_failure_reasons: dict[str, int] = {}
     state_transitions: dict[str, int] = {}
     for case in cases:
         ranked = _ranked(case)
@@ -780,6 +781,10 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
         reason = _failure_reason(case, outcome)
         ok = reason == "passed"
         failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+        planner_reason = outcome.graph.planner_failure_reason
+        planner_failure_reasons[planner_reason] = (
+            planner_failure_reasons.get(planner_reason, 0) + 1
+        )
         actual_state = (
             "unknown" if outcome.graph.fallback else outcome.selection.evidence_state
         )
@@ -798,6 +803,7 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
             "abstained": outcome.selection.abstained,
             "fallback": outcome.graph.fallback,
             "failure_category": outcome.graph.failure_category,
+            "planner_failure_reason": outcome.graph.planner_failure_reason,
             "planner_schema_valid": (
                 len(planner_records) == 1 and planner_records[0].succeeded
             ),
@@ -824,6 +830,7 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
         "fallbacks": fallbacks,
         "failure_count": failure_count,
         "failure_reasons": dict(sorted(failure_reasons.items())),
+        "planner_failure_reasons": dict(sorted(planner_failure_reasons.items())),
         "state_transitions": dict(sorted(state_transitions.items())),
         "candidate_eligible": eligible,
     }, sort_keys=True), file=output, flush=True)

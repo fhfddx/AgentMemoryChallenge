@@ -42,6 +42,22 @@ LinkKind = Literal[
 GraphFailureCategory = Literal[
     "none", "planner_unavailable", "planner_invalid", "internal_error"
 ]
+# 结构失败的原因：固定枚举，只用于诊断（不含任何模型文本）。
+PlannerFailureReason = Literal[
+    "none",
+    "schema_invalid",
+    "planner_unavailable",
+    "internal_error",
+    "candidate_scope_mismatch",
+    "empty_requirements",
+    "requirement_count_exceeded",
+    "requirement_quote_not_grounded",
+    "support_count_exceeded",
+    "support_index_out_of_range",
+    "link_count_exceeded",
+    "link_index_out_of_range",
+    "link_self_reference",
+]
 
 # 只影响确定性连接判定的最小多语言词表；不引入任何 NLP 依赖。
 _STOPWORDS = frozenset(
@@ -248,6 +264,7 @@ class ValidationOutcome:
     requirements: tuple[str, ...]
     supports: tuple[ValidatedSupport, ...]
     links: tuple[ValidatedLink, ...]
+    reason: PlannerFailureReason = "none"
 
 
 class GraphContextView(Protocol):
@@ -319,7 +336,9 @@ def _bounded_pairs(
     return frozenset(pairs)
 
 
-_INVALID = ValidationOutcome(False, "planner_invalid", (), (), ())
+def _invalid(reason: PlannerFailureReason) -> ValidationOutcome:
+    """结构失败：整份 proposal 失效，同时给出固定枚举的原因用于诊断。"""
+    return ValidationOutcome(False, "planner_invalid", (), (), (), reason)
 
 
 def _adjacent_same_source(
@@ -396,30 +415,34 @@ def validate_proposal(
 ) -> ValidationOutcome:
     """结构错误使整份 proposal 失效；个别无法证明的条目只被丢弃。"""
     if any(candidate.user_id != expected_user_id for candidate in candidates):
-        return _INVALID
+        return _invalid("candidate_scope_mismatch")
     normalized_question = normalize_text(question)
-    if not 1 <= len(proposal.requirements) <= max_requirements:
-        return _INVALID
+    if not proposal.requirements:
+        return _invalid("empty_requirements")
+    if len(proposal.requirements) > max_requirements:
+        return _invalid("requirement_count_exceeded")
     quotes: list[str] = []
     for requirement in proposal.requirements:
         quote = normalize_text(requirement.question_quote)
         if not quote or quote not in normalized_question:
-            return _INVALID
+            return _invalid("requirement_quote_not_grounded")
         quotes.append(quote)
-    if len(proposal.supports) > max_supports or len(proposal.links) > max_links:
-        return _INVALID
+    if len(proposal.supports) > max_supports:
+        return _invalid("support_count_exceeded")
+    if len(proposal.links) > max_links:
+        return _invalid("link_count_exceeded")
     for support in proposal.supports:
         if not 0 <= support.requirement_index < len(proposal.requirements):
-            return _INVALID
+            return _invalid("support_index_out_of_range")
         if not 0 <= support.candidate_index < len(candidates):
-            return _INVALID
+            return _invalid("support_index_out_of_range")
     for link in proposal.links:
         if link.left_candidate_index == link.right_candidate_index:
-            return _INVALID
+            return _invalid("link_self_reference")
         if not 0 <= link.left_candidate_index < len(candidates):
-            return _INVALID
+            return _invalid("link_index_out_of_range")
         if not 0 <= link.right_candidate_index < len(candidates):
-            return _INVALID
+            return _invalid("link_index_out_of_range")
 
     supports: list[ValidatedSupport] = []
     seen_supports: set[tuple[int, int, str, str]] = set()

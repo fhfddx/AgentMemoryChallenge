@@ -17,6 +17,24 @@ _GRAPH_STATES = _EVIDENCE_STATES
 _GRAPH_FAILURES = frozenset(
     {"none", "planner_unavailable", "planner_invalid", "internal_error"}
 )
+# 结构失败原因同样是固定枚举：任何其他取值折叠为 unknown。
+_GRAPH_PLANNER_FAILURE_REASONS = frozenset(
+    {
+        "none",
+        "schema_invalid",
+        "planner_unavailable",
+        "internal_error",
+        "candidate_scope_mismatch",
+        "empty_requirements",
+        "requirement_count_exceeded",
+        "requirement_quote_not_grounded",
+        "support_count_exceeded",
+        "support_index_out_of_range",
+        "link_count_exceeded",
+        "link_index_out_of_range",
+        "link_self_reference",
+    }
+)
 _TAG_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 
 
@@ -54,6 +72,7 @@ class SearchDiagnostics:
     graph_state: str = "unknown"
     graph_fallback: bool = False
     graph_failure_category: str = "none"
+    graph_planner_failure_reason: str = "none"
     graph_planner_latency_ms: float = 0.0
 
 
@@ -109,6 +128,11 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
         "graph_failure_category": (
             value.graph_failure_category
             if value.graph_failure_category in _GRAPH_FAILURES
+            else "unknown"
+        ),
+        "graph_planner_failure_reason": (
+            value.graph_planner_failure_reason
+            if value.graph_planner_failure_reason in _GRAPH_PLANNER_FAILURE_REASONS
             else "unknown"
         ),
         "graph_planner_latency_ms": round(max(0.0, float(value.graph_planner_latency_ms)), 2),

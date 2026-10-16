@@ -1660,6 +1660,105 @@ def _invalid_proposals() -> list[dict[str, object]]:
     ]
 
 
+@pytest.mark.parametrize(
+    ("response", "reason"),
+    [
+        ({"requirements": [], "supports": [], "links": []}, "empty_requirements"),
+        (
+            {
+                "requirements": [{"question_quote": "not in the question", "kind": "location"}],
+                "supports": [],
+                "links": [],
+            },
+            "requirement_quote_not_grounded",
+        ),
+        (
+            {
+                "requirements": [
+                    {"question_quote": "Where did I store the amber key", "kind": "location"}
+                ],
+                "supports": [
+                    _support(0, 99, "I stored the amber key in drawer three.", "direct")
+                ],
+                "links": [],
+            },
+            "support_index_out_of_range",
+        ),
+        (
+            {
+                "requirements": [
+                    {"question_quote": "Where did I store the amber key", "kind": "location"}
+                ],
+                "supports": [],
+                "links": [_link(0, 0, "x", "y", "same_source_context")],
+            },
+            "link_self_reference",
+        ),
+        (
+            {
+                "requirements": [
+                    {"question_quote": "Where did I store the amber key", "kind": "location"}
+                ],
+                "supports": [],
+                "links": [
+                    _link(0, 1, "x", "y", "same_source_context") for _ in range(25)
+                ],
+            },
+            "link_count_exceeded",
+        ),
+        (
+            {"requirements": [], "supports": [], "links": [], "rationale": "free text"},
+            "schema_invalid",
+        ),
+    ],
+)
+def test_structural_failures_report_a_fixed_reason(
+    response: Mapping[str, object], reason: str
+) -> None:
+    llm = FakeStructuredLLM(
+        [dict(response), {"evidence_state": "sufficient", "selected_indices": [0]}]
+    )
+    direct = _evidence(1, "source-a", "I stored the amber key in drawer three.")
+    second = _evidence(2, "source-b", "The amber key is in drawer three.")
+
+    outcome = _selector(llm).select(
+        "Where did I store the amber key?",
+        None,
+        [direct, second],
+        _anchors(direct, second),
+        GraphContext(),
+    )
+
+    assert outcome.graph.fallback is True
+    assert outcome.graph.failure_category == "planner_invalid"
+    assert outcome.graph.planner_failure_reason == reason
+
+
+def test_successful_proposals_report_no_failure_reason() -> None:
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Where did I store the amber key", "location")],
+                supports=[
+                    _support(0, 0, "I stored the amber key in drawer three.", "direct")
+                ],
+            )
+        ]
+    )
+    direct = _evidence(1, "source-a", "I stored the amber key in drawer three.")
+
+    outcome = _selector(llm).select(
+        "Where did I store the amber key?",
+        None,
+        [direct],
+        _anchors(direct),
+        GraphContext(),
+    )
+
+    assert outcome.graph.fallback is False
+    assert outcome.graph.planner_failure_reason == "none"
+
+
 @pytest.mark.parametrize("response", _invalid_proposals())
 def test_structurally_invalid_proposals_fall_back_once(response: Mapping[str, object]) -> None:
     llm = FakeStructuredLLM(
