@@ -32,11 +32,13 @@ class FakeCommandRunner:
         source_digest: str = _SOURCE_DIGEST,
         providers: dict[str, str] | None = None,
         runtime_settings: str = "valid",
+        runtime_setting_issues: list[str] | None = None,
         stability_code: int = 0,
     ) -> None:
         self.source_digest = source_digest
         self.providers = providers or dict(_PROVIDERS)
         self.runtime_settings = runtime_settings
+        self.runtime_setting_issues = runtime_setting_issues or []
         self.stability_code = stability_code
         self.stability_inputs: list[bytes] = []
 
@@ -91,6 +93,7 @@ class FakeCommandRunner:
                 "providers": self.providers,
                 "runtime_profile": "official-masm",
                 "runtime_settings": self.runtime_settings,
+                "runtime_setting_issues": self.runtime_setting_issues,
                 "source_digest": self.source_digest,
             }
             return subprocess.CompletedProcess(command, 0, json.dumps(payload) + "\n", "")
@@ -281,7 +284,13 @@ def test_missing_provider_configuration_blocks_stability_without_values(
 def test_invalid_runtime_settings_block_stability_without_details(
     tmp_path: Path,
 ) -> None:
-    runner = FakeCommandRunner(runtime_settings="invalid")
+    runner = FakeCommandRunner(
+        runtime_settings="invalid",
+        runtime_setting_issues=[
+            "MASM_MAX_TOP_K:malformed_integer",
+            "private-provider-body",
+        ],
+    )
     output = io.StringIO()
     error = io.StringIO()
 
@@ -297,9 +306,32 @@ def test_invalid_runtime_settings_block_stability_without_details(
     assert code == 2
     assert runner.stability_inputs == []
     assert "runtime_settings=invalid" in output.getvalue()
+    assert "runtime_setting_issue=MASM_MAX_TOP_K:malformed_integer" in output.getvalue()
     assert "stability_not_started=yes" in output.getvalue()
     assert "private-malformed-value" not in output.getvalue()
+    assert "private-provider-body" not in output.getvalue()
     assert "private-malformed-value" not in error.getvalue()
+    assert "private-provider-body" not in error.getvalue()
+
+
+def test_valid_runtime_ignores_stale_issue_payload(tmp_path: Path) -> None:
+    runner = FakeCommandRunner(
+        runtime_setting_issues=["MASM_MAX_TOP_K:malformed_integer"]
+    )
+    output = io.StringIO()
+
+    code = gate.run_server_gate(
+        ["--strict-exit"],
+        repository=_repository(tmp_path),
+        output=output,
+        error=io.StringIO(),
+        command_runner=runner,
+        expectations=_expectations(),
+    )
+
+    assert code == 0
+    assert "runtime_settings=valid" in output.getvalue()
+    assert "runtime_setting_issue=" not in output.getvalue()
 
 
 def test_explicit_stability_run_uses_verified_probe_and_writes_sanitized_output(
@@ -488,7 +520,8 @@ def test_container_check_sanitizes_malformed_numeric_setting(
     )
     manifest = gate._tracked_package_files(tracked)
     assert manifest is not None
-    monkeypatch.setenv("MASM_MAX_IMAGE_BYTES", "private-malformed-value")
+    monkeypatch.setenv("MASM_MAX_TOP_K", "private-malformed-integer")
+    monkeypatch.setenv("MASM_MIN_TEXT_SIMILARITY", "private-malformed-float")
 
     result = gate._run_command(
         (sys.executable, "-"),
@@ -499,7 +532,39 @@ def test_container_check_sanitizes_malformed_numeric_setting(
 
     assert payload is not None
     assert payload["runtime_settings"] == "invalid"
-    assert "private-malformed-value" not in str(result.stdout)
+    assert payload["runtime_setting_issues"] == [
+        "MASM_MAX_TOP_K:malformed_integer",
+        "MASM_MIN_TEXT_SIMILARITY:malformed_float",
+    ]
+    assert "private-malformed-integer" not in str(result.stdout)
+    assert "private-malformed-float" not in str(result.stdout)
+
+
+def test_container_check_maps_runtime_validation_to_fixed_issue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = Path(gate.__file__).resolve().parents[1]
+    tracked = gate._run_command(
+        ("git", "ls-files", "-z", "--", "src/masm"),
+        cwd=repository,
+    )
+    manifest = gate._tracked_package_files(tracked)
+    assert manifest is not None
+    monkeypatch.setenv("MASM_MODEL_TIMEOUT_SECONDS", "30")
+    monkeypatch.setenv("MASM_SELECTOR_TIMEOUT_SECONDS", "31")
+
+    result = gate._run_command(
+        (sys.executable, "-"),
+        cwd=repository,
+        input_text=gate._container_check(manifest),
+    )
+    payload = gate._container_payload(result)
+
+    assert payload is not None
+    assert payload["runtime_settings"] == "invalid"
+    assert payload["runtime_setting_issues"] == [
+        "configuration:selector_timeout_out_of_range"
+    ]
 
 
 def test_real_git_boundary_returns_only_tracked_package_manifest(tmp_path: Path) -> None:

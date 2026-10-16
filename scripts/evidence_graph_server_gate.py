@@ -28,6 +28,106 @@ _PROVIDER_VARIABLES = (
     "MASM_EMBEDDING_BASE_URL",
     "MASM_EMBEDDING_API_KEY",
 )
+_INTEGER_SETTING_NAMES = (
+    "MASM_MAX_IMAGE_BYTES",
+    "MASM_MAX_ADD_IMAGE_BYTES",
+    "MASM_MAX_SEARCH_RESPONSE_BYTES",
+    "MASM_MAX_TOP_K",
+    "MASM_MAX_CONCURRENT_REQUESTS",
+    "MASM_MAX_REQUESTS_PER_MINUTE",
+    "MASM_EMBEDDING_DIMENSIONS",
+    "MASM_MODEL_MAX_ATTEMPTS",
+    "MASM_SELECTOR_MAX_CANDIDATES",
+    "MASM_SELECTOR_MAX_SELECTED",
+    "MASM_SELECTOR_MAX_CHARS_PER_CANDIDATE",
+    "MASM_EVIDENCE_GRAPH_MAX_REQUIREMENTS",
+    "MASM_EVIDENCE_GRAPH_MAX_SUPPORTS",
+    "MASM_EVIDENCE_GRAPH_MAX_LINKS",
+)
+_FLOAT_SETTING_NAMES = (
+    "MASM_MODEL_TIMEOUT_SECONDS",
+    "MASM_MIN_TEXT_SIMILARITY",
+    "MASM_MIN_IMAGE_SIMILARITY",
+    "MASM_MIN_LEXICAL_RANK",
+    "MASM_SELECTOR_TIMEOUT_SECONDS",
+    "MASM_EVIDENCE_GRAPH_TIMEOUT_SECONDS",
+)
+_VALIDATION_ISSUE_BY_MESSAGE = {
+    "Embedding 维度必须为正整数": "configuration:embedding_dimensions_out_of_range",
+    "模型超时必须为正数": "configuration:model_timeout_out_of_range",
+    "模型尝试次数只能为 1 或 2": "configuration:model_max_attempts_out_of_range",
+    "请求并发上限必须为正整数": "configuration:max_concurrent_requests_out_of_range",
+    "每分钟请求上限必须为正整数": "configuration:max_requests_per_minute_out_of_range",
+    "文本相似度阈值必须是 [-1, 1] 内的有限值": (
+        "configuration:min_text_similarity_out_of_range"
+    ),
+    "图片相似度阈值必须是 [-1, 1] 内的有限值": (
+        "configuration:min_image_similarity_out_of_range"
+    ),
+    "全文排名阈值必须是 (0, 1] 内的有限值": (
+        "configuration:min_lexical_rank_out_of_range"
+    ),
+    "证据筛选候选上限必须在 1..32 内": (
+        "configuration:selector_max_candidates_out_of_range"
+    ),
+    "证据返回上限必须在 1..12 内且不大于候选上限": (
+        "configuration:selector_max_selected_out_of_range"
+    ),
+    "证据候选文字上限必须在 1..4096 内": (
+        "configuration:selector_max_chars_per_candidate_out_of_range"
+    ),
+    "证据筛选超时必须为正数且不超过模型超时": (
+        "configuration:selector_timeout_out_of_range"
+    ),
+    "证据图需求上限必须在 1..4 内": (
+        "configuration:evidence_graph_max_requirements_out_of_range"
+    ),
+    "证据图支持上限必须在 1..24 内": (
+        "configuration:evidence_graph_max_supports_out_of_range"
+    ),
+    "证据图链接上限必须在 1..24 内": (
+        "configuration:evidence_graph_max_links_out_of_range"
+    ),
+    "证据图超时必须为正数且不超过模型超时": (
+        "configuration:evidence_graph_timeout_out_of_range"
+    ),
+    "证据图模式要求 official-masm 档位": (
+        "configuration:evidence_graph_requires_official_masm"
+    ),
+    "证据图模式要求启用证据筛选回退": (
+        "configuration:evidence_graph_requires_selector"
+    ),
+    "证据图模式要求启用来源上下文": (
+        "configuration:evidence_graph_requires_source_context"
+    ),
+    "正式档位模型配置不完整": (
+        "configuration:official_provider_configuration_incomplete"
+    ),
+    "正式档位 LLM 必须为 gpt-4o-mini": "configuration:llm_model_mismatch",
+    "正式档位 Embedding 必须为 text-embedding-v4": (
+        "configuration:embedding_model_mismatch"
+    ),
+    "正式档位 Embedding 维度必须为 1024": (
+        "configuration:official_embedding_dimensions_mismatch"
+    ),
+    "正式档位 LLM Base URL 必须使用 HTTPS": (
+        "configuration:llm_base_url_not_https"
+    ),
+    "正式档位 Embedding Base URL 必须使用 HTTPS": (
+        "configuration:embedding_base_url_not_https"
+    ),
+}
+_VALIDATION_SETTING_ISSUES = frozenset(_VALIDATION_ISSUE_BY_MESSAGE.values()) | {
+    "configuration:parse_error",
+    "configuration:validation_error",
+    "configuration:invalid",
+}
+_ALLOWED_RUNTIME_SETTING_ISSUES = frozenset(
+    {f"{name}:malformed_integer" for name in _INTEGER_SETTING_NAMES}
+    | {f"{name}:malformed_float" for name in _FLOAT_SETTING_NAMES}
+    | {"MASM_RUNTIME_PROFILE:invalid_choice"}
+    | _VALIDATION_SETTING_ISSUES
+)
 _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _CONTAINER_CHECK_TEMPLATE = r"""
 import hashlib
@@ -76,14 +176,56 @@ except Exception:
 else:
     candidate_modules = "present"
 
-try:
-    from masm.config import Settings
+integer_setting_names = INTEGER_SETTING_NAMES_JSON
+float_setting_names = FLOAT_SETTING_NAMES_JSON
+runtime_setting_issues = []
+for name in integer_setting_names:
+    raw = os.environ.get(name)
+    if raw is not None and raw != "":
+        try:
+            int(raw)
+        except (TypeError, ValueError):
+            runtime_setting_issues.append(f"{name}:malformed_integer")
+for name in float_setting_names:
+    raw = os.environ.get(name)
+    if raw is not None and raw != "":
+        try:
+            float(raw)
+        except (TypeError, ValueError):
+            runtime_setting_issues.append(f"{name}:malformed_float")
 
-    Settings.from_env().validate_runtime()
-except Exception:
+runtime_profile_value = os.environ.get("MASM_RUNTIME_PROFILE", "local-fake")
+if runtime_profile_value not in {"local-fake", "official-baseline", "official-masm"}:
+    runtime_setting_issues.append("MASM_RUNTIME_PROFILE:invalid_choice")
+
+validation_issue_by_message = VALIDATION_ISSUE_BY_MESSAGE_JSON
+
+if runtime_setting_issues:
     runtime_settings = "invalid"
 else:
-    runtime_settings = "valid"
+    try:
+        from masm.config import Settings
+
+        settings = Settings.from_env()
+    except Exception:
+        runtime_settings = "invalid"
+        runtime_setting_issues.append("configuration:parse_error")
+    else:
+        try:
+            settings.validate_runtime()
+        except ValueError as exc:
+            runtime_settings = "invalid"
+            runtime_setting_issues.append(
+                validation_issue_by_message.get(
+                    str(exc),
+                    "configuration:validation_error",
+                )
+            )
+        except Exception:
+            runtime_settings = "invalid"
+            runtime_setting_issues.append("configuration:validation_error")
+        else:
+            runtime_settings = "valid"
 
 raw_graph_flag = os.environ.get("MASM_EVIDENCE_GRAPH_ENABLED")
 if raw_graph_flag is None:
@@ -112,6 +254,7 @@ print(json.dumps({
         if os.environ.get("MASM_RUNTIME_PROFILE") == "official-masm"
         else "not_official_masm"
     ),
+    "runtime_setting_issues": runtime_setting_issues,
     "runtime_settings": runtime_settings,
     "source_digest": source_digest,
 }, sort_keys=True))
@@ -276,9 +419,23 @@ def _worktree_matches_head(
 
 
 def _container_check(manifest: Sequence[str]) -> str:
-    return _CONTAINER_CHECK_TEMPLATE.replace(
-        "PACKAGE_MANIFEST_JSON",
-        json.dumps(list(manifest)),
+    return (
+        _CONTAINER_CHECK_TEMPLATE.replace(
+            "PACKAGE_MANIFEST_JSON",
+            json.dumps(list(manifest)),
+        )
+        .replace(
+            "INTEGER_SETTING_NAMES_JSON",
+            json.dumps(_INTEGER_SETTING_NAMES),
+        )
+        .replace(
+            "FLOAT_SETTING_NAMES_JSON",
+            json.dumps(_FLOAT_SETTING_NAMES),
+        )
+        .replace(
+            "VALIDATION_ISSUE_BY_MESSAGE_JSON",
+            json.dumps(_VALIDATION_ISSUE_BY_MESSAGE),
+        )
     )
 
 
@@ -473,6 +630,20 @@ def _verify_candidate(
     )
     runtime_profile = payload.get("runtime_profile")
     runtime_settings = payload.get("runtime_settings")
+    raw_runtime_setting_issues = payload.get("runtime_setting_issues")
+    safe_runtime_setting_issues = []
+    if isinstance(raw_runtime_setting_issues, list):
+        safe_runtime_setting_issues = list(
+            dict.fromkeys(
+                issue
+                for issue in raw_runtime_setting_issues
+                if isinstance(issue, str) and issue in _ALLOWED_RUNTIME_SETTING_ISSUES
+            )
+        )
+    if runtime_settings == "valid":
+        safe_runtime_setting_issues = []
+    elif not safe_runtime_setting_issues:
+        safe_runtime_setting_issues = ["configuration:invalid"]
     candidate_modules = payload.get("candidate_modules")
     graph_flag = payload.get("graph_flag")
     providers = payload.get("providers")
@@ -499,6 +670,8 @@ def _verify_candidate(
         f"runtime_settings={safe_runtime_settings}",
         file=output,
     )
+    for issue in safe_runtime_setting_issues:
+        print(f"runtime_setting_issue={issue}", file=output)
     for name in _PROVIDER_VARIABLES:
         value = provider_statuses.get(name)
         print(f"{name}={value if value in {'set', 'missing'} else 'invalid'}", file=output)
