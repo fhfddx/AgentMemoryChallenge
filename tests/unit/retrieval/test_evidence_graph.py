@@ -361,6 +361,149 @@ def test_two_sources_connect_only_through_a_discriminative_mention() -> None:
     assert connected.selection.evidence == (first, second)
 
 
+# --- 2b. connections the deterministic layer proves without the model ---------------------
+
+
+def test_same_source_adjacent_candidates_connect_without_a_planner_link() -> None:
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("What is the project code name", "attribute"),
+                    _requirement("when is the review", "time"),
+                ],
+                supports=[
+                    _support(0, 0, "The project code name is Zephyr.", "direct"),
+                    _support(1, 1, "The project review date is April 18.", "direct"),
+                ],
+            )
+        ]
+    )
+    first = _evidence(1, "source-a", "The project code name is Zephyr.", position=0)
+    second = _evidence(2, "source-a", "The project review date is April 18.", position=1)
+
+    outcome = _selector(llm).select(
+        "What is the project code name and when is the review?",
+        None,
+        [first, second],
+        _anchors(first, second),
+        GraphContext(source_context_enabled=True),
+    )
+
+    # 同来源相邻位置本身就是可证明连接：模型没有提出链接也必须连通。
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == (first, second)
+
+
+def test_cross_source_shared_mention_connects_without_a_planner_link() -> None:
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Which city hosts the workshop", "location")],
+                supports=[
+                    _support(0, 1, "The Zephyr workshop is held in Lisbon.", "direct"),
+                ],
+            )
+        ]
+    )
+    attended = _evidence(1, "source-a", "Nora attended the Zephyr workshop.")
+    hosted = _evidence(2, "source-b", "The Zephyr workshop is held in Lisbon.")
+
+    outcome = _selector(llm).select(
+        "Which city hosts the workshop that Nora attended?",
+        None,
+        [attended, hosted],
+        _anchors(attended, hosted),
+        GraphContext(),
+    )
+
+    # 两段候选正文共享问题中不存在的区分单元（Zephyr），代码可直接建边。
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == (attended, hosted)
+
+
+def test_generic_or_question_bound_units_never_create_cross_source_edges() -> None:
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Which city hosts the project workshop", "location")],
+                supports=[
+                    _support(0, 1, "The workshop is in Lisbon.", "direct"),
+                    _support(0, 0, "The project workshop was planned.", "context"),
+                ],
+            )
+        ]
+    )
+    planned = _evidence(1, "source-a", "The project workshop was planned.")
+    hosted = _evidence(2, "source-b", "The workshop is in Lisbon.")
+
+    outcome = _selector(llm).select(
+        "Which city hosts the project workshop?",
+        None,
+        [planned, hosted],
+        _anchors(planned, hosted),
+        GraphContext(),
+    )
+
+    assert outcome.graph.link_count == 0
+    assert outcome.selection.evidence == (hosted,)
+
+
+def test_source_context_json_boilerplate_never_creates_edges() -> None:
+    def _context(text: str) -> str:
+        return json.dumps(
+            {
+                "matched_position": 0,
+                "messages": [
+                    {"position": 0, "role": "user", "text": text, "timestamp": None}
+                ],
+                "omitted_positions": [],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("What is the check-in code", "attribute"),
+                    _requirement("where is the venue", "location"),
+                ],
+                supports=[
+                    _support(0, 0, _context("The check-in code is K7-42."), "direct"),
+                    _support(1, 1, _context("The venue is the old cinema."), "direct"),
+                ],
+            )
+        ]
+    )
+    code = _evidence(
+        1,
+        "source-a",
+        "The check-in code is K7-42.",
+        source_context=_context("The check-in code is K7-42."),
+    )
+    venue = _evidence(
+        2,
+        "source-b",
+        "The venue is the old cinema.",
+        source_context=_context("The venue is the old cinema."),
+    )
+
+    outcome = _selector(llm).select(
+        "What is the check-in code and where is the venue?",
+        None,
+        [code, venue],
+        _anchors(code, venue),
+        GraphContext(source_context_enabled=True),
+    )
+
+    # 来源上下文是 JSON：结构键与 JSON 字面量不是区分单元，不得把两个来源连起来。
+    assert outcome.graph.link_count == 0
+    assert outcome.selection.evidence_state == "partial"
+    assert len(outcome.selection.evidence) == 1
+
+
 # --- 3. explicit cross-source chain ------------------------------------------------------
 
 

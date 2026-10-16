@@ -9,7 +9,7 @@ short numbers and punctuation never connect anything, so an unprovable bridge fa
 
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID
@@ -69,6 +69,13 @@ _GENERIC_CJK_UNITS = frozenset(
 _CJK_FUNCTION_CHARS = frozenset(
     "的了是在我你他她它们这那个和与及或有没不也都就很会要把被从到对为以之其而但吗呢吧啊呀嘛着过又再还只让给用上下里中外前后时些"
 )
+# 来源上下文的 JSON 结构键与 JSON 字面量：它们在不同来源之间必然重复，绝不构成区分单元。
+_STRUCTURAL_TOKENS = frozenset(
+    {
+        "assistant", "false", "matched", "message", "messages", "null", "omitted",
+        "position", "positions", "role", "text", "timestamp", "true", "user",
+    }
+)
 
 _LATIN_TOKEN = re.compile(r"[a-z0-9][a-z0-9'\-]*")
 _CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
@@ -87,8 +94,8 @@ def grounded_quote(quote: str, text: str) -> bool:
 
 
 def _is_content_token(token: str) -> bool:
-    """既非停用词/泛化名词，也非过短数字：可以作为区分单元的一部分。"""
-    if token in _STOPWORDS or token in _GENERIC_LATIN_UNITS:
+    """既非停用词/泛化名词/结构键，也非过短数字：可以作为区分单元的一部分。"""
+    if token in _STOPWORDS or token in _GENERIC_LATIN_UNITS or token in _STRUCTURAL_TOKENS:
         return False
     if _DIGITS.fullmatch(token):
         return len(token) >= 4
@@ -137,17 +144,41 @@ def discriminative_units(text: str) -> frozenset[str]:
     return frozenset(units)
 
 
-def shared_discriminative_unit(left_quote: str, right_quote: str, question: str) -> str | None:
-    """返回两段引用共享、且未被问题本身提及的最短区分单元。"""
+def shared_discriminative_unit(
+    left_quote: str,
+    right_quote: str,
+    question: str,
+    *,
+    unit_frequencies: Mapping[str, int] | None = None,
+    max_frequency: int | None = None,
+) -> str | None:
+    """返回两段引用共享、且未被问题本身提及的最短区分单元。
+
+    ``unit_frequencies``/``max_frequency`` 可进一步要求该单元在本次候选池内足够稀有：
+    重复措辞（例如每个来源都写的“Grounded support”）不得把无关来源连起来。
+    """
     shared = discriminative_units(left_quote) & discriminative_units(right_quote)
     if not shared:
         return None
     normalized_question = normalize_text(question)
     candidates = [unit for unit in shared if unit not in normalized_question]
+    if unit_frequencies is not None and max_frequency is not None:
+        candidates = [
+            unit for unit in candidates if unit_frequencies.get(unit, 0) <= max_frequency
+        ]
     if not candidates:
         return None
     normalized_left = normalize_text(left_quote)
     return min(candidates, key=lambda unit: (len(unit), normalized_left.find(unit), unit))
+
+
+def unit_frequencies(pool: Sequence["CandidateView"]) -> dict[str, int]:
+    """统计每个区分单元在候选池中出现在多少个候选里（文档频率）。"""
+    counts: dict[str, int] = {}
+    for view in pool:
+        for unit in discriminative_units(view.text):
+            counts[unit] = counts.get(unit, 0) + 1
+    return counts
 
 
 def planner_candidate_text(item: RankedEvidence, max_chars: int) -> str:
@@ -269,6 +300,67 @@ def _bounded_pairs(
 
 
 _INVALID = ValidationOutcome(False, "planner_invalid", (), (), ())
+
+
+def _adjacent_same_source(
+    left: CandidateView, right: CandidateView, *, source_context_enabled: bool
+) -> bool:
+    if not source_context_enabled:
+        return False
+    if not left.request_id or left.request_id != right.request_id:
+        return False
+    if left.source_position is None or right.source_position is None:
+        return False
+    return abs(left.source_position - right.source_position) == 1
+
+
+def derived_links(
+    question: str,
+    candidates: Sequence[CandidateView],
+    *,
+    source_context_enabled: bool,
+) -> tuple[ValidatedLink, ...]:
+    """确定性代码直接证明的两类连接，不依赖模型是否愿意提出链接。
+
+    1. 同来源相邻上下文：同一非空来源、位置相差 1，且本请求可用来源上下文（规格连接类型 1）；
+    2. 跨来源显式 mention：两组候选正文共享问题中不存在的区分单元（规格连接类型 3），
+       且该单元在本次候选池中足够稀有（文档频率不超过 2），避免重复措辞连成一片。
+
+    模型提议的链接仍照旧独立校验；这里只是不把可证明的连接交给模型决定。
+    """
+    frequencies = unit_frequencies(candidates)
+    links: list[ValidatedLink] = []
+    for position, left in enumerate(candidates):
+        for right in candidates[position + 1:]:
+            if _adjacent_same_source(left, right, source_context_enabled=source_context_enabled):
+                links.append(
+                    ValidatedLink(
+                        left_index=left.index,
+                        right_index=right.index,
+                        kind="same_source_context",
+                    )
+                )
+                continue
+            if left.source_group == right.source_group:
+                continue
+            if (
+                shared_discriminative_unit(
+                    left.text,
+                    right.text,
+                    question,
+                    unit_frequencies=frequencies,
+                    max_frequency=2,
+                )
+                is not None
+            ):
+                links.append(
+                    ValidatedLink(
+                        left_index=left.index,
+                        right_index=right.index,
+                        kind="shared_explicit_mention",
+                    )
+                )
+    return tuple(links)
 
 
 def validate_proposal(

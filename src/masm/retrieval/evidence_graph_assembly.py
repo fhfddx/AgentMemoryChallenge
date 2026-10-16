@@ -17,6 +17,7 @@ from masm.retrieval.evidence_graph_rules import (
     CandidateView,
     ValidatedLink,
     ValidatedSupport,
+    discriminative_units,
 )
 
 GraphState = Literal["sufficient", "partial", "insufficient"]
@@ -40,6 +41,7 @@ def assemble(
     links: Sequence[ValidatedLink],
     candidates: Sequence[CandidateView],
     max_selected: int = 12,
+    question_units: frozenset[str] = frozenset(),
 ) -> AssemblyOutcome:
     """从已校验的支持与链接推导三态并选出证据。"""
     if requirement_count < 1:
@@ -102,15 +104,22 @@ def assemble(
         component_index = _single_component(chosen.values(), component_of)
         if component_index is None:
             continue
-        included = _deduplicate(
-            _inclusion(
-                set(components[component_index]),
-                chosen,
-                support_nodes,
-                adjacency,
-                interpretive_pairs,
+        included = _complete_with_linked_context(
+            _deduplicate(
+                _inclusion(
+                    set(components[component_index]),
+                    chosen,
+                    support_nodes,
+                    adjacency,
+                    interpretive_pairs,
+                ),
+                candidates,
             ),
-            candidates,
+            component_nodes=set(components[component_index]),
+            adjacency=adjacency,
+            candidates=candidates,
+            question_units=question_units,
+            max_selected=max_selected,
         )
         if len(included) > max_selected:
             continue
@@ -132,15 +141,22 @@ def assemble(
         for requirement in covered
         if any(node in component_nodes for node in covering[requirement])
     }
-    included = _deduplicate(
-        _inclusion(
-            component_nodes,
-            chosen,
-            support_nodes,
-            adjacency,
-            interpretive_pairs,
+    included = _complete_with_linked_context(
+        _deduplicate(
+            _inclusion(
+                component_nodes,
+                chosen,
+                support_nodes,
+                adjacency,
+                interpretive_pairs,
+            ),
+            candidates,
         ),
-        candidates,
+        component_nodes=component_nodes,
+        adjacency=adjacency,
+        candidates=candidates,
+        question_units=question_units,
+        max_selected=max_selected,
     )
     if len(included) > max_selected:
         included = _best_bounded_partial(
@@ -154,6 +170,48 @@ def assemble(
             max_selected=max_selected,
         )
     return AssemblyOutcome("partial", _selected(included, candidates), len(components))
+
+
+def _grounded_units(nodes: set[int], candidates: Sequence[CandidateView]) -> frozenset[str]:
+    units: set[str] = set()
+    for node in nodes:
+        units |= discriminative_units(candidates[node].text)
+    return frozenset(units)
+
+
+def _complete_with_linked_context(
+    included: set[int],
+    *,
+    component_nodes: set[int],
+    adjacency: Mapping[int, Sequence[int]],
+    candidates: Sequence[CandidateView],
+    question_units: frozenset[str],
+    max_selected: int,
+) -> set[int]:
+    """补入已证明连接、且能覆盖问题中尚未落地区分单元的邻居（确定性、有上限）。
+
+    候选必须与已选节点处于同一连通分量、由已校验或代码证明的边相连，并且真的能覆盖问题里
+    还没有任何引文覆盖的区分单元；因此不会引入无关候选，也不会为凑数而扩张。
+    """
+    if not question_units:
+        return included
+    missing = set(question_units) - set(_grounded_units(included, candidates))
+    while missing and len(included) < max_selected:
+        addition: int | None = None
+        for node in sorted(included):
+            for neighbour in adjacency[node]:
+                if neighbour in included or neighbour not in component_nodes:
+                    continue
+                if discriminative_units(candidates[neighbour].text) & missing:
+                    addition = neighbour
+                    break
+            if addition is not None:
+                break
+        if addition is None:
+            break
+        included.add(addition)
+        missing -= discriminative_units(candidates[addition].text)
+    return included
 
 
 def _adjacency(

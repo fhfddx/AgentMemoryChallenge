@@ -29,7 +29,10 @@ from masm.retrieval.evidence_graph_rules import (
     LinkKind,
     RequirementKind,
     SupportRole,
+    ValidatedLink,
     candidate_views,
+    derived_links,
+    discriminative_units,
     planner_candidate_text,
     validate_proposal,
 )
@@ -327,6 +330,21 @@ def _reported_state(state: str) -> "ReportedGraphState":
     return "unknown"
 
 
+def _merge_links(
+    validated: Sequence[ValidatedLink], derived: Sequence[ValidatedLink]
+) -> tuple[ValidatedLink, ...]:
+    """合并模型已校验链接与代码证明链接；同一端点对与类型只保留一条。"""
+    merged: list[ValidatedLink] = []
+    seen: set[tuple[int, int, str]] = set()
+    for link in (*validated, *derived):
+        key = (link.left_index, link.right_index, link.kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(link)
+    return tuple(merged)
+
+
 class GraphEvidenceSelector:
     """单次 planner 调用 + 确定性校验/组装，失败时回退一次冻结的 v7 selector。"""
 
@@ -432,12 +450,21 @@ class GraphEvidenceSelector:
                     pool,
                     pool_anchor_ids,
                 )
+            links = _merge_links(
+                outcome.links,
+                derived_links(
+                    question,
+                    views,
+                    source_context_enabled=context.source_context_enabled,
+                ),
+            )
             assembled = assemble(
                 requirement_count=len(outcome.requirements),
                 supports=outcome.supports,
-                links=outcome.links,
+                links=links,
                 candidates=views,
                 max_selected=self._max_selected,
+                question_units=discriminative_units(question),
             )
         except Exception:
             return self._fallback_selection(
