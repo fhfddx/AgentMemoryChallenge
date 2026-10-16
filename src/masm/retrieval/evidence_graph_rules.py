@@ -181,6 +181,26 @@ def unit_frequencies(pool: Sequence["CandidateView"]) -> dict[str, int]:
     return counts
 
 
+def _is_cjk_unit(unit: str) -> bool:
+    return any(
+        "\u3400" <= character <= "\u4dbf" or "\u4e00" <= character <= "\u9fff"
+        for character in unit
+    )
+
+
+def attested_units(text: str, frequencies: Mapping[str, int]) -> frozenset[str]:
+    """完整性判定使用的单元：拉丁单元照收，CJK 单元必须在本请求候选池中被实际证实。
+
+    未分词的 CJK 子串会产生跨词边界的伪单元（例如“城市举办”里的“市举”）；只有当它真的
+    出现在某个候选里时，才允许它成为“问题里还没落地”的硬性要求。
+    """
+    return frozenset(
+        unit
+        for unit in discriminative_units(text)
+        if not _is_cjk_unit(unit) or frequencies.get(unit, 0) >= 1
+    )
+
+
 def planner_candidate_text(item: RankedEvidence, max_chars: int) -> str:
     """planner 实际看到的候选文本，与 v7 selector 的可见文本规则保持一致。"""
     if isinstance(item.content, str):

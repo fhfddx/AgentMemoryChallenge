@@ -30,10 +30,11 @@ from masm.retrieval.evidence_graph_rules import (
     RequirementKind,
     SupportRole,
     ValidatedLink,
+    attested_units,
     candidate_views,
     derived_links,
-    discriminative_units,
     planner_candidate_text,
+    unit_frequencies,
     validate_proposal,
 )
 from masm.retrieval.evidence_selector import (
@@ -458,13 +459,17 @@ class GraphEvidenceSelector:
                     source_context_enabled=context.source_context_enabled,
                 ),
             )
+            frequencies = unit_frequencies(views)
             assembled = assemble(
                 requirement_count=len(outcome.requirements),
                 supports=outcome.supports,
                 links=links,
                 candidates=views,
                 max_selected=self._max_selected,
-                question_units=discriminative_units(question),
+                question_units=attested_units(question, frequencies),
+                requirement_units=tuple(
+                    attested_units(quote, frequencies) for quote in outcome.requirements
+                ),
             )
         except Exception:
             return self._fallback_selection(

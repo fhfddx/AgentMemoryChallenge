@@ -42,8 +42,13 @@ def assemble(
     candidates: Sequence[CandidateView],
     max_selected: int = 12,
     question_units: frozenset[str] = frozenset(),
+    requirement_units: Sequence[frozenset[str]] = (),
 ) -> AssemblyOutcome:
-    """从已校验的支持与链接推导三态并选出证据。"""
+    """从已校验的支持与链接推导三态并选出证据。
+
+    ``question_units`` 是问题的区分单元，``requirement_units`` 与需求一一对应。两者用于
+    完整性判定：模型没有覆盖、且没有任何已选证据覆盖的问题内容，绝不允许判为完整。
+    """
     if requirement_count < 1:
         return AssemblyOutcome("insufficient", (), 0)
     # 图节点 = 被引用的支撑节点 ∪ 已校验链接的端点；未连接、未被引用的候选永远不进入图。
@@ -90,6 +95,10 @@ def assemble(
     if not covered:
         return AssemblyOutcome("insufficient", (), len(components))
 
+    unclaimed = set(question_units)
+    for units in requirement_units:
+        unclaimed -= units
+
     resolved = _conflicts_are_resolved(covered, supports, candidates)
 
     choice_lists = [(requirement, covering[requirement]) for requirement in covered]
@@ -122,6 +131,8 @@ def assemble(
             max_selected=max_selected,
         )
         if len(included) > max_selected:
+            continue
+        if unclaimed - set(_grounded_units(included, candidates)):
             continue
         score = _score(included, candidates, supports)
         if best_full is None or score < best_full[0]:
@@ -169,6 +180,9 @@ def assemble(
             interpretive_pairs=interpretive_pairs,
             max_selected=max_selected,
         )
+    evidence_units = _grounded_units(included, candidates)
+    if unclaimed - set(evidence_units):
+        return AssemblyOutcome("insufficient", (), len(components))
     return AssemblyOutcome("partial", _selected(included, candidates), len(components))
 
 

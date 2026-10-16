@@ -504,6 +504,127 @@ def test_source_context_json_boilerplate_never_creates_edges() -> None:
     assert len(outcome.selection.evidence) == 1
 
 
+# --- 2c. completeness: unclaimed or ungrounded question content cannot be sufficient ----
+
+
+def _chain_candidates() -> tuple[RankedEvidence, RankedEvidence]:
+    return (
+        _evidence(1, "source-a", "Nora attended the Zephyr workshop."),
+        _evidence(2, "source-b", "The Zephyr workshop is held in Lisbon."),
+    )
+
+
+def test_unclaimed_question_content_blocks_sufficiency() -> None:
+    planned = _evidence(1, "source-a", "Nora planned a workshop.")
+    hosted = _evidence(2, "source-b", "The workshop is in Lisbon.")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Which city hosts the workshop", "location")],
+                supports=[_support(0, 1, "The workshop is in Lisbon.", "direct")],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "Which city hosts the workshop that Nora attended?",
+        None,
+        [planned, hosted],
+        _anchors(planned, hosted),
+        GraphContext(),
+    )
+
+    # 问题里的“that Nora attended”没有被任何需求覆盖，两条候选也没有可证明连接可以补上它。
+    assert outcome.selection.evidence_state == "insufficient"
+    assert outcome.selection.evidence == ()
+
+
+def test_chain_stays_sufficient_when_the_binding_evidence_is_also_cited() -> None:
+    attended, hosted = _chain_candidates()
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement(
+                        "Which city hosts the workshop that Nora attended", "location"
+                    )
+                ],
+                supports=[
+                    _support(0, 0, "Nora attended the Zephyr workshop.", "context"),
+                    _support(0, 1, "The Zephyr workshop is held in Lisbon.", "direct"),
+                ],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "Which city hosts the workshop that Nora attended?",
+        None,
+        [attended, hosted],
+        _anchors(attended, hosted),
+        GraphContext(),
+    )
+
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == (attended, hosted)
+
+
+def test_chinese_unattested_units_do_not_block_a_grounded_completion() -> None:
+    enrolled = _evidence(1, "source-a", "我报名了陶艺工作坊。")
+    hosted = _evidence(2, "source-b", "陶艺工作坊在里斯本举办。")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("在哪个城市举办", "location"),
+                    _requirement("我报名的课程", "subject"),
+                ],
+                supports=[
+                    _support(1, 0, "我报名了陶艺工作坊。", "direct"),
+                    _support(0, 1, "陶艺工作坊在里斯本举办。", "direct"),
+                ],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "我报名的课程在哪个城市举办？",
+        None,
+        [enrolled, hosted],
+        _anchors(enrolled, hosted),
+        GraphContext(),
+    )
+
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == (enrolled, hosted)
+    # 陶艺 在两个候选里各出现一次：代码据此建边，两个候选合为一个连通分量。
+    assert outcome.graph.component_count == 1
+
+
+def test_chinese_negative_without_grounded_binding_content_abstains() -> None:
+    generic = _evidence(1, "source-a", "我报名了一个工作坊。")
+    hosted = _evidence(2, "source-b", "这个工作坊在里斯本举办。")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("工作坊在哪个城市举办", "location")],
+                supports=[_support(0, 1, "这个工作坊在里斯本举办。", "direct")],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "我报名的课程，工作坊在哪个城市举办？",
+        None,
+        [generic, hosted],
+        _anchors(generic, hosted),
+        GraphContext(),
+    )
+
+    assert outcome.selection.evidence_state == "insufficient"
+    assert outcome.selection.evidence == ()
+
+
 # --- 3. explicit cross-source chain ------------------------------------------------------
 
 
