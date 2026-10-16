@@ -34,13 +34,16 @@ class FakeCommandRunner:
         runtime_settings: str = "valid",
         runtime_setting_issues: list[str] | None = None,
         stability_code: int = 0,
+        diagnostic_code: int = 1,
     ) -> None:
         self.source_digest = source_digest
         self.providers = providers or dict(_PROVIDERS)
         self.runtime_settings = runtime_settings
         self.runtime_setting_issues = runtime_setting_issues or []
         self.stability_code = stability_code
+        self.diagnostic_code = diagnostic_code
         self.stability_inputs: list[bytes] = []
+        self.diagnostic_inputs: list[bytes] = []
 
     def __call__(
         self,
@@ -86,6 +89,25 @@ class FakeCommandRunner:
             "python",
             "-",
         ):
+            if isinstance(input_text, bytes):
+                self.diagnostic_inputs.append(input_text)
+                stdout = (
+                    '{"case":"private-case-name","positive":true,"passed":false,'
+                    '"evidence_state":"sufficient","fallback":true,'
+                    '"failure_category":"planner_invalid"}\n'
+                    '{"case":"another-private-case","positive":false,"passed":true,'
+                    '"evidence_state":"insufficient","fallback":false,'
+                    '"failure_category":"none"}\n'
+                    '{"case":"summary","case_count":2,"positive_total":1,'
+                    '"positive_passed":0,"negative_total":1,"negative_passed":1,'
+                    '"fallbacks":1,"failure_count":1,"candidate_eligible":false}\n'
+                )
+                return subprocess.CompletedProcess(
+                    command,
+                    self.diagnostic_code,
+                    stdout,
+                    "private-provider-body",
+                )
             payload = {
                 "candidate_modules": "present",
                 "graph_flag": "unset(default_off)",
@@ -360,6 +382,46 @@ def test_explicit_stability_run_uses_verified_probe_and_writes_sanitized_output(
     )
     assert "stability_summary" in output.getvalue()
     assert "probe_exit_code=0" in output.getvalue()
+    assert "private-provider-body" not in output.getvalue()
+    assert "private-provider-body" not in error.getvalue()
+
+
+def test_explicit_diagnostic_runs_one_round_and_prints_only_safe_aggregates(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    result_path = tmp_path / "diagnostic.jsonl"
+    runner = FakeCommandRunner()
+    output = io.StringIO()
+    error = io.StringIO()
+
+    code = gate.run_server_gate(
+        ["--diagnostic", "--strict-exit", "--output", str(result_path)],
+        repository=repository,
+        output=output,
+        error=error,
+        command_runner=runner,
+        expectations=_expectations(),
+    )
+
+    assert code == 1
+    assert runner.diagnostic_inputs == [b"print('synthetic probe')\n"]
+    assert json.loads(output.getvalue().splitlines()[-2]) == {
+        "candidate_eligible": False,
+        "case": "diagnostic_summary",
+        "case_count": 2,
+        "evidence_states": {"insufficient": 1, "sufficient": 1},
+        "failure_categories": {"none": 1, "planner_invalid": 1},
+        "failure_count": 1,
+        "fallbacks": 1,
+        "negative_passed": 1,
+        "negative_total": 1,
+        "positive_passed": 0,
+        "positive_total": 1,
+    }
+    assert output.getvalue().splitlines()[-1] == "probe_exit_code=1"
+    assert "private-case-name" not in output.getvalue()
+    assert "another-private-case" not in output.getvalue()
     assert "private-provider-body" not in output.getvalue()
     assert "private-provider-body" not in error.getvalue()
 

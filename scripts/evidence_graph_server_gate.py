@@ -128,6 +128,12 @@ _ALLOWED_RUNTIME_SETTING_ISSUES = frozenset(
     | {"MASM_RUNTIME_PROFILE:invalid_choice"}
     | _VALIDATION_SETTING_ISSUES
 )
+_ALLOWED_DIAGNOSTIC_FAILURE_CATEGORIES = frozenset(
+    {"none", "planner_unavailable", "planner_invalid", "internal_error", "probe_error"}
+)
+_ALLOWED_DIAGNOSTIC_STATES = frozenset(
+    {"sufficient", "partial", "insufficient", "unknown"}
+)
 _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _CONTAINER_CHECK_TEMPLATE = r"""
 import hashlib
@@ -754,6 +760,114 @@ def _run_stability(
     return result.returncode
 
 
+def _diagnostic_summary(rendered: str) -> Mapping[str, object] | None:
+    summary: Mapping[str, object] | None = None
+    case_count = 0
+    failure_categories: dict[str, int] = {}
+    evidence_states: dict[str, int] = {}
+    for line in rendered.splitlines():
+        if not line.strip():
+            continue
+        try:
+            candidate = json.loads(line)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(candidate, dict):
+            return None
+        if candidate.get("case") == "summary":
+            if summary is not None:
+                return None
+            summary = cast(Mapping[str, object], candidate)
+            continue
+        case_count += 1
+        if case_count > 64:
+            return None
+        category = candidate.get("failure_category")
+        if category not in _ALLOWED_DIAGNOSTIC_FAILURE_CATEGORIES:
+            return None
+        state = candidate.get("evidence_state", "unknown")
+        if state not in _ALLOWED_DIAGNOSTIC_STATES:
+            return None
+        assert isinstance(category, str)
+        assert isinstance(state, str)
+        failure_categories[category] = failure_categories.get(category, 0) + 1
+        evidence_states[state] = evidence_states.get(state, 0) + 1
+
+    if summary is None:
+        return None
+    integer_fields = (
+        "case_count",
+        "positive_total",
+        "positive_passed",
+        "negative_total",
+        "negative_passed",
+        "fallbacks",
+        "failure_count",
+    )
+    safe_integers: dict[str, int] = {}
+    for name in integer_fields:
+        value = summary.get(name)
+        if type(value) is not int or value < 0:
+            return None
+        safe_integers[name] = value
+    eligible = summary.get("candidate_eligible")
+    if not isinstance(eligible, bool) or safe_integers["case_count"] != case_count:
+        return None
+    return {
+        "case": "diagnostic_summary",
+        **safe_integers,
+        "candidate_eligible": eligible,
+        "failure_categories": dict(sorted(failure_categories.items())),
+        "evidence_states": dict(sorted(evidence_states.items())),
+    }
+
+
+def _run_diagnostic(
+    *,
+    repository: Path,
+    container: str,
+    result_path: Path | None,
+    output: TextIO,
+    error: TextIO,
+    runner: CommandRunner,
+    probe_bytes: bytes,
+) -> int:
+    result_file = _open_result_file(repository, result_path)
+    if result_file is None:
+        print("diagnostic_output=invalid", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    result = _command(
+        runner,
+        ("docker", "exec", "-i", container, "python", "-"),
+        repository=repository,
+        input_text=probe_bytes,
+    )
+    if result is None:
+        _close_result_file(result_file)
+        print("diagnostic_exec=failed", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    rendered = _stdout_text(result)
+    if rendered is None:
+        _close_result_file(result_file)
+        print("diagnostic_output=invalid", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    if not _write_result_file(result_file, rendered):
+        print("diagnostic_output=write_failed", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    summary = _diagnostic_summary(rendered)
+    if summary is None:
+        print("diagnostic_summary=missing", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    print(json.dumps(summary, sort_keys=True), file=output)
+    print(f"probe_exit_code={result.returncode}", file=output)
+    return result.returncode
+
+
 def run_server_gate(
     argv: Sequence[str],
     *,
@@ -765,10 +879,16 @@ def run_server_gate(
 ) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--container", default="masm-v11-api-1")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--stability",
         action="store_true",
         help="After verification, make the fixed five-round real-Provider run",
+    )
+    mode.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="After verification, run one round and print only safe aggregate diagnostics",
     )
     parser.add_argument(
         "--strict-exit",
@@ -780,8 +900,9 @@ def run_server_gate(
     if not _CONTAINER_NAME.fullmatch(args.container):
         print("container_name=invalid", file=error)
         print("verification_exit_code=2", file=output)
-        if args.stability:
-            print("stability_not_started=yes", file=output)
+        if args.stability or args.diagnostic:
+            mode_name = "stability" if args.stability else "diagnostic"
+            print(f"{mode_name}_not_started=yes", file=output)
         return 2 if args.strict_exit else 0
 
     verification_code, verified_probe = _verify_candidate(
@@ -794,14 +915,27 @@ def run_server_gate(
     )
     print(f"verification_exit_code={verification_code}", file=output)
     if verification_code != 0:
-        if args.stability:
-            print("stability_not_started=yes", file=output)
+        if args.stability or args.diagnostic:
+            mode_name = "stability" if args.stability else "diagnostic"
+            print(f"{mode_name}_not_started=yes", file=output)
         return verification_code if args.strict_exit else 0
-    if not args.stability:
+    if not args.stability and not args.diagnostic:
         return 0
     if verified_probe is None:
-        print("stability_not_started=yes", file=output)
+        mode_name = "stability" if args.stability else "diagnostic"
+        print(f"{mode_name}_not_started=yes", file=output)
         return 2 if args.strict_exit else 0
+    if args.diagnostic:
+        diagnostic_code = _run_diagnostic(
+            repository=repository,
+            container=args.container,
+            result_path=args.output,
+            output=output,
+            error=error,
+            runner=command_runner,
+            probe_bytes=verified_probe,
+        )
+        return diagnostic_code if args.strict_exit else 0
     stability_code = _run_stability(
         repository=repository,
         container=args.container,
