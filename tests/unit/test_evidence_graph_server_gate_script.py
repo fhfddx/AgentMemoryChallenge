@@ -204,6 +204,18 @@ def test_default_gate_pins_the_committed_probe() -> None:
     assert gate.DEFAULT_EXPECTATIONS.probe_blob == committed_blob
     assert gate.DEFAULT_EXPECTATIONS.probe_sha256 == hashlib.sha256(probe.read_bytes()).hexdigest()
 
+    tracked = subprocess.run(
+        ("git", "ls-files", "-z", "--", "src/masm"),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+    )
+    manifest = gate._tracked_package_files(tracked)
+    assert manifest is not None
+    manifest_matches, source_digest = gate._package_digest(repository / "src" / "masm", manifest)
+    assert manifest_matches is True
+    assert gate.DEFAULT_EXPECTATIONS.source_digest == source_digest
+
 
 def test_default_mode_verifies_without_starting_provider_calls(tmp_path: Path) -> None:
     runner = FakeCommandRunner()
