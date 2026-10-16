@@ -190,6 +190,21 @@ def _expectations() -> gate.CandidateExpectations:
     )
 
 
+def test_default_gate_pins_the_committed_probe() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    probe = repository / "scripts" / "evidence_graph_probe.py"
+    committed_blob = subprocess.run(
+        ("git", "rev-parse", "HEAD:scripts/evidence_graph_probe.py"),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert gate.DEFAULT_EXPECTATIONS.probe_blob == committed_blob
+    assert gate.DEFAULT_EXPECTATIONS.probe_sha256 == hashlib.sha256(probe.read_bytes()).hexdigest()
+
+
 def test_default_mode_verifies_without_starting_provider_calls(tmp_path: Path) -> None:
     runner = FakeCommandRunner()
     output = io.StringIO()
