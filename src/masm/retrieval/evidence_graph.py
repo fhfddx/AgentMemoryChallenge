@@ -35,6 +35,7 @@ from masm.retrieval.evidence_graph_rules import (
     candidate_views,
     derived_links,
     planner_candidate_text,
+    question_has_clause_marker,
     unit_frequencies,
     validate_proposal,
 )
@@ -474,6 +475,7 @@ class GraphEvidenceSelector:
                 requirement_units=tuple(
                     attested_units(quote, frequencies) for quote in outcome.requirements
                 ),
+                tighten_completeness=question_has_clause_marker(question),
             )
         except Exception:
             return self._fallback_selection(

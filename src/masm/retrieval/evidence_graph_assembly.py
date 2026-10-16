@@ -43,11 +43,16 @@ def assemble(
     max_selected: int = 12,
     question_units: frozenset[str] = frozenset(),
     requirement_units: Sequence[frozenset[str]] = (),
+    tighten_completeness: bool = False,
 ) -> AssemblyOutcome:
     """从已校验的支持与链接推导三态并选出证据。
 
     ``question_units`` 是问题的区分单元，``requirement_units`` 与需求一一对应。两者用于
     完整性判定：模型没有覆盖、且没有任何已选证据覆盖的问题内容，绝不允许判为完整。
+
+    ``tighten_completeness`` 只在问题含子句边界标记时为真：此时需求引文自身的区分单元也必须
+    被已选证据覆盖，否则该需求不算被覆盖。单子句问题（例如 "What color bicycle did I buy?"）
+    的省略回答（"No, I bought the red one."）不在此列，必须继续被判为完整。
     """
     if requirement_count < 1:
         return AssemblyOutcome("insufficient", (), 0)
@@ -132,7 +137,12 @@ def assemble(
         )
         if len(included) > max_selected:
             continue
-        if unclaimed - set(_grounded_units(included, candidates)):
+        evidence_units = _grounded_units(included, candidates)
+        if unclaimed - set(evidence_units):
+            continue
+        if not _requirements_are_grounded(
+            chosen, requirement_units, evidence_units, tighten=tighten_completeness
+        ):
             continue
         score = _score(included, candidates, supports)
         if best_full is None or score < best_full[0]:
@@ -183,7 +193,43 @@ def assemble(
     evidence_units = _grounded_units(included, candidates)
     if unclaimed - set(evidence_units):
         return AssemblyOutcome("insufficient", (), len(components))
+    remaining = [
+        requirement
+        for requirement in chosen
+        if _requirement_is_grounded(
+            requirement, requirement_units, evidence_units, tighten=tighten_completeness
+        )
+    ]
+    if not remaining:
+        return AssemblyOutcome("insufficient", (), len(components))
     return AssemblyOutcome("partial", _selected(included, candidates), len(components))
+
+
+def _requirement_is_grounded(
+    requirement: int,
+    requirement_units: Sequence[frozenset[str]],
+    evidence_units: frozenset[str],
+    *,
+    tighten: bool,
+) -> bool:
+    if not tighten or requirement >= len(requirement_units):
+        return True
+    return requirement_units[requirement] <= evidence_units
+
+
+def _requirements_are_grounded(
+    chosen: Mapping[int, int],
+    requirement_units: Sequence[frozenset[str]],
+    evidence_units: frozenset[str],
+    *,
+    tighten: bool,
+) -> bool:
+    return all(
+        _requirement_is_grounded(
+            requirement, requirement_units, evidence_units, tighten=tighten
+        )
+        for requirement in chosen
+    )
 
 
 def _grounded_units(nodes: set[int], candidates: Sequence[CandidateView]) -> frozenset[str]:

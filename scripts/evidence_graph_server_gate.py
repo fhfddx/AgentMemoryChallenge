@@ -159,6 +159,8 @@ _ALLOWED_DIAGNOSTIC_PLANNER_FAILURE_REASONS = frozenset(
         "empty_requirements",
         "requirement_count_exceeded",
         "requirement_quote_not_grounded",
+        "requirement_quote_reordered",
+        "requirement_quote_paraphrased",
         "support_count_exceeded",
         "support_index_out_of_range",
         "link_count_exceeded",

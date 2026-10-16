@@ -112,6 +112,51 @@ def _validate(
 # --- normalization and grounding ---------------------------------------------------------
 
 
+def test_requirement_quotes_tolerate_punctuation_only_differences() -> None:
+    views = _views(_evidence(1, "source-a", "The check-in code is K7-42."))
+    outcome = _validate(
+        _proposal(
+            requirements=[
+                _requirement("What is the check-in code, and where is the venue")
+            ]
+        ),
+        question="What is the check-in code and where is the venue?",
+        views=views,
+    )
+
+    # 逗号/问号等标点差异不改变“引文就是问题原文”，不得判为结构失败。
+    assert outcome.valid is True
+    assert outcome.reason == "none"
+
+
+def test_reworded_requirement_quotes_report_an_actionable_reason() -> None:
+    views = _views(_evidence(1, "source-a", "The check-in code is K7-42."))
+    question = "What is the check-in code and where is the venue?"
+    reordered = _validate(
+        _proposal(
+            requirements=[
+                _requirement("Where is the venue and what is the check-in code")
+            ]
+        ),
+        question=question,
+        views=views,
+    )
+    paraphrased = _validate(
+        _proposal(
+            requirements=[
+                _requirement("What is the check-in passcode and where is the venue")
+            ]
+        ),
+        question=question,
+        views=views,
+    )
+
+    assert reordered.valid is False
+    assert reordered.reason == "requirement_quote_reordered"
+    assert paraphrased.valid is False
+    assert paraphrased.reason == "requirement_quote_paraphrased"
+
+
 def test_normalization_folds_case_width_and_whitespace_without_deleting_negation() -> None:
     assert normalize_text("I have NOT  stored\u00a0it") == "i have not stored it"
     assert normalize_text("ＤＲＡＷＥＲ　ｔｈｒｅｅ") == "drawer three"

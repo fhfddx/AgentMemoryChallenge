@@ -625,6 +625,88 @@ def test_chinese_negative_without_grounded_binding_content_abstains() -> None:
     assert outcome.selection.evidence == ()
 
 
+def test_multi_clause_question_cannot_be_sufficient_without_the_binding_evidence() -> None:
+    planned = _evidence(1, "source-a", "Nora planned a workshop.")
+    hosted = _evidence(2, "source-b", "The workshop is in Lisbon.")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement(
+                        "Which city hosts the workshop that Nora attended", "location"
+                    )
+                ],
+                supports=[_support(0, 1, "The workshop is in Lisbon.", "direct")],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "Which city hosts the workshop that Nora attended?",
+        None,
+        [planned, hosted],
+        _anchors(planned, hosted),
+        GraphContext(),
+    )
+
+    # 关系从句 that Nora attended 被吞进唯一需求引文，但没有任何已选证据覆盖它。
+    assert outcome.selection.evidence_state == "insufficient"
+    assert outcome.selection.evidence == ()
+
+
+def test_chinese_comma_question_cannot_be_sufficient_without_the_binding_content() -> None:
+    generic = _evidence(1, "source-a", "我报名了一个工作坊。")
+    hosted = _evidence(2, "source-b", "这个工作坊在里斯本举办。")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("我报名的课程，工作坊在哪个城市举办", "location")],
+                supports=[_support(0, 1, "这个工作坊在里斯本举办。", "direct")],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "我报名的课程，工作坊在哪个城市举办？",
+        None,
+        [generic, hosted],
+        _anchors(generic, hosted),
+        GraphContext(),
+    )
+
+    # “我报名的课程”被吞进唯一需求引文，已选证据只覆盖“举办”，不得判为完整。
+    assert outcome.selection.evidence_state == "insufficient"
+    assert outcome.selection.evidence == ()
+
+
+def test_elliptical_answer_without_a_clause_marker_stays_sufficient() -> None:
+    asked = _evidence(1, "source-a", "Did you buy the blue bicycle?")
+    answered = _evidence(2, "source-b", "No, I bought the red one.")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("What color bicycle did I buy", "attribute")],
+                supports=[
+                    _support(0, 1, "No, I bought the red one.", "direct"),
+                    _support(0, 0, "Did you buy the blue bicycle?", "context"),
+                ],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "What color bicycle did I buy?",
+        None,
+        [asked, answered],
+        _anchors(asked, answered),
+        GraphContext(),
+    )
+
+    # 单子句问题的省略回答（red one）合法：没有子句标记就不启用完整性收紧。
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == (answered,)
+
+
 # --- 3. explicit cross-source chain ------------------------------------------------------
 
 
@@ -1670,7 +1752,7 @@ def _invalid_proposals() -> list[dict[str, object]]:
                 "supports": [],
                 "links": [],
             },
-            "requirement_quote_not_grounded",
+            "requirement_quote_paraphrased",
         ),
         (
             {

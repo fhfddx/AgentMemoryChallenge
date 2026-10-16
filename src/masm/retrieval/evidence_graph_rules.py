@@ -9,6 +9,7 @@ short numbers and punctuation never connect anything, so an unprovable bridge fa
 
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -52,6 +53,8 @@ PlannerFailureReason = Literal[
     "empty_requirements",
     "requirement_count_exceeded",
     "requirement_quote_not_grounded",
+    "requirement_quote_reordered",
+    "requirement_quote_paraphrased",
     "support_count_exceeded",
     "support_index_out_of_range",
     "link_count_exceeded",
@@ -107,6 +110,37 @@ def grounded_quote(quote: str, text: str) -> bool:
     """引用必须非空且是 planner 实际所见文本的归一化精确子串。"""
     normalized = normalize_text(quote)
     return bool(normalized) and normalized in normalize_text(text)
+
+
+_NON_WORD = re.compile(r"[\W_]+")
+# 子句边界标记：只有多子句问题才收紧“完整”的含义（单子句的省略回答必须继续被接受）。
+_CLAUSE_MARKERS = (" that ", " which ", " who ", " whom ", " whose ")
+_CLAUSE_PUNCTUATION = (",", ";", "，", "；", "、")
+
+
+def quote_shape(text: str) -> str:
+    """去掉标点后的形状：容忍标点差异，但绝不放行改写或改序。"""
+    return " ".join(_NON_WORD.sub(" ", normalize_text(text)).split())
+
+
+def question_has_clause_marker(question: str) -> bool:
+    """问题是否含子句边界标记（逗号/分号或关系代词）。"""
+    normalized = normalize_text(question)
+    if any(marker in normalized for marker in _CLAUSE_PUNCTUATION):
+        return True
+    padded = f" {normalized} "
+    return any(marker in padded for marker in _CLAUSE_MARKERS)
+
+
+def _grounding_mismatch_reason(
+    quote: str, normalized_question: str
+) -> PlannerFailureReason:
+    """区分“同词不同序”和“改写用词”，让契约问题可定位且不泄露文本。"""
+    quote_tokens = Counter(quote_shape(quote).split())
+    question_tokens = Counter(quote_shape(normalized_question).split())
+    if quote_tokens and quote_tokens == question_tokens:
+        return "requirement_quote_reordered"
+    return "requirement_quote_paraphrased"
 
 
 def _is_content_token(token: str) -> bool:
@@ -422,10 +456,16 @@ def validate_proposal(
     if len(proposal.requirements) > max_requirements:
         return _invalid("requirement_count_exceeded")
     quotes: list[str] = []
+    shape_question = quote_shape(question)
     for requirement in proposal.requirements:
         quote = normalize_text(requirement.question_quote)
-        if not quote or quote not in normalized_question:
+        if not quote:
             return _invalid("requirement_quote_not_grounded")
+        if quote not in normalized_question:
+            # 标点差异（逗号、问号、连字符写法）不改变“引文即问题原文”，但改写或改序仍然拒绝。
+            shaped = quote_shape(quote)
+            if not shaped or shaped not in shape_question:
+                return _invalid(_grounding_mismatch_reason(quote, normalized_question))
         quotes.append(quote)
     if len(proposal.supports) > max_supports:
         return _invalid("support_count_exceeded")
