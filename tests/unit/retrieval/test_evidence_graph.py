@@ -679,6 +679,34 @@ def test_chinese_comma_question_cannot_be_sufficient_without_the_binding_content
     assert outcome.selection.evidence == ()
 
 
+def test_binding_preposition_question_cannot_be_sufficient_without_its_value() -> None:
+    stored = _evidence(1, "source-a", "I stored the amber key in drawer three.")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("What is the storage code for the amber key", "attribute")
+                ],
+                supports=[
+                    _support(0, 0, "I stored the amber key in drawer three.", "direct")
+                ],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "What is the storage code for the amber key?",
+        None,
+        [stored],
+        _anchors(stored),
+        GraphContext(),
+    )
+
+    # 问题问的是 storage code，候选只说明放在哪个抽屉：绑定内容的单元未被覆盖，不得判为完整。
+    assert outcome.selection.evidence_state == "insufficient"
+    assert outcome.selection.evidence == ()
+
+
 def test_elliptical_answer_without_a_clause_marker_stays_sufficient() -> None:
     asked = _evidence(1, "source-a", "Did you buy the blue bicycle?")
     answered = _evidence(2, "source-b", "No, I bought the red one.")
@@ -705,6 +733,68 @@ def test_elliptical_answer_without_a_clause_marker_stays_sufficient() -> None:
     # 单子句问题的省略回答（red one）合法：没有子句标记就不启用完整性收紧。
     assert outcome.selection.evidence_state == "sufficient"
     assert outcome.selection.evidence == (answered,)
+
+
+def test_persisted_relation_pair_connects_without_a_planner_link() -> None:
+    code = _evidence(1, "source-a", "The check-in code is K7-42.")
+    venue = _evidence(2, "source-b", "The venue is the old cinema.")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("What is the check-in code", "attribute"),
+                    _requirement("where is the venue", "location"),
+                ],
+                supports=[
+                    _support(0, 0, "The check-in code is K7-42.", "direct"),
+                    _support(1, 1, "The venue is the old cinema.", "direct"),
+                ],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "What is the check-in code and where is the venue?",
+        None,
+        [code, venue],
+        _anchors(code, venue),
+        GraphContext(relation_source_pairs=(("source-a", "source-b"),)),
+    )
+
+    # 侧车已存关系本身就是可证明连接：模型没有提出 persisted_relation 也必须连通。
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == (code, venue)
+
+
+def test_persisted_relation_edges_require_the_sidecar_pair() -> None:
+    code = _evidence(1, "source-a", "The check-in code is K7-42.")
+    venue = _evidence(2, "source-b", "The venue is the old cinema.")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("What is the check-in code", "attribute"),
+                    _requirement("where is the venue", "location"),
+                ],
+                supports=[
+                    _support(0, 0, "The check-in code is K7-42.", "direct"),
+                    _support(1, 1, "The venue is the old cinema.", "direct"),
+                ],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "What is the check-in code and where is the venue?",
+        None,
+        [code, venue],
+        _anchors(code, venue),
+        GraphContext(),
+    )
+
+    # 没有侧车对：跨来源候选绝不因此连通，只能部分返回。
+    assert outcome.selection.evidence_state == "partial"
+    assert len(outcome.selection.evidence) == 1
 
 
 # --- 3. explicit cross-source chain ------------------------------------------------------

@@ -113,8 +113,10 @@ def grounded_quote(quote: str, text: str) -> bool:
 
 
 _NON_WORD = re.compile(r"[\W_]+")
-# 子句边界标记：只有多子句问题才收紧“完整”的含义（单子句的省略回答必须继续被接受）。
+# 子句/绑定边界标记：只有问题带绑定结构时才收紧“完整”的含义。
+# 单子句的省略回答（"What color bicycle did I buy?" ← "No, I bought the red one."）必须继续被接受。
 _CLAUSE_MARKERS = (" that ", " which ", " who ", " whom ", " whose ")
+_BINDING_PREPOSITIONS = (" for ", " of ", " with ", " about ", " regarding ")
 _CLAUSE_PUNCTUATION = (",", ";", "，", "；", "、")
 
 
@@ -124,12 +126,14 @@ def quote_shape(text: str) -> str:
 
 
 def question_has_clause_marker(question: str) -> bool:
-    """问题是否含子句边界标记（逗号/分号或关系代词）。"""
+    """问题是否含绑定结构标记：子句标点、关系代词，或绑定介词短语。"""
     normalized = normalize_text(question)
     if any(marker in normalized for marker in _CLAUSE_PUNCTUATION):
         return True
     padded = f" {normalized} "
-    return any(marker in padded for marker in _CLAUSE_MARKERS)
+    if any(marker in padded for marker in _CLAUSE_MARKERS):
+        return True
+    return any(marker in padded for marker in _BINDING_PREPOSITIONS)
 
 
 def _grounding_mismatch_reason(
@@ -359,15 +363,24 @@ def _link_is_provable(
     return shared_discriminative_unit(left_quote, right_quote, question) is not None
 
 
-def _bounded_pairs(
+def bounded_persisted_pairs(
     context: GraphContextView,
 ) -> frozenset[tuple[str, str]]:
+    """本请求可见的、去重且双向归一的侧车关系来源对（上限见 MAX_GRAPH_CONTEXT_PAIRS）。"""
     pairs: set[tuple[str, str]] = set()
     for pair in context.relation_source_pairs[:MAX_GRAPH_CONTEXT_PAIRS]:
         if len(pair) != 2 or not pair[0] or not pair[1]:
             continue
+        if pair[0] == pair[1]:
+            continue
         pairs.add(tuple(sorted(pair)))  # type: ignore[arg-type]
     return frozenset(pairs)
+
+
+def _bounded_pairs(
+    context: GraphContextView,
+) -> frozenset[tuple[str, str]]:
+    return bounded_persisted_pairs(context)
 
 
 def _invalid(reason: PlannerFailureReason) -> ValidationOutcome:
@@ -392,12 +405,15 @@ def derived_links(
     candidates: Sequence[CandidateView],
     *,
     source_context_enabled: bool,
+    persisted_pairs: frozenset[tuple[str, str]] = frozenset(),
 ) -> tuple[ValidatedLink, ...]:
-    """确定性代码直接证明的两类连接，不依赖模型是否愿意提出链接。
+    """确定性代码直接证明的三类连接，不依赖模型是否愿意提出链接。
 
     1. 同来源相邻上下文：同一非空来源、位置相差 1，且本请求可用来源上下文（规格连接类型 1）；
     2. 跨来源显式 mention：两组候选正文共享问题中不存在的区分单元（规格连接类型 3），
-       且该单元在本次候选池中足够稀有（文档频率不超过 2），避免重复措辞连成一片。
+       且该单元在本次候选池中足够稀有（文档频率不超过 2），避免重复措辞连成一片；
+    3. 侧车已存关系：两组候选的来源构成 `relation_source_pairs` 中的一对（规格连接类型 2）。
+       已存关系是事实，不需要模型先提出；没有该对时跨来源候选绝不会被连起来。
 
     模型提议的链接仍照旧独立校验；这里只是不把可证明的连接交给模型决定。
     """
@@ -415,6 +431,19 @@ def derived_links(
                 )
                 continue
             if left.source_group == right.source_group:
+                continue
+            if (
+                left.request_id
+                and right.request_id
+                and tuple(sorted((left.request_id, right.request_id))) in persisted_pairs
+            ):
+                links.append(
+                    ValidatedLink(
+                        left_index=left.index,
+                        right_index=right.index,
+                        kind="persisted_relation",
+                    )
+                )
                 continue
             if (
                 shared_discriminative_unit(

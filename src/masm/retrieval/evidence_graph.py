@@ -32,6 +32,7 @@ from masm.retrieval.evidence_graph_rules import (
     SupportRole,
     ValidatedLink,
     attested_units,
+    bounded_persisted_pairs,
     candidate_views,
     derived_links,
     planner_candidate_text,
@@ -462,6 +463,7 @@ class GraphEvidenceSelector:
                     question,
                     views,
                     source_context_enabled=context.source_context_enabled,
+                    persisted_pairs=bounded_persisted_pairs(context),
                 ),
             )
             frequencies = unit_frequencies(views)

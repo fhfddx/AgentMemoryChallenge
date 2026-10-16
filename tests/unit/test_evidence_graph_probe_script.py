@@ -142,15 +142,15 @@ def test_provider_failures_never_count_as_passed_cases() -> None:
 def test_one_broken_negative_twin_rejects_the_whole_run() -> None:
     responses = proposal_responses()
     index = next(
-        position for position, case in enumerate(CASES) if case.name == "missing_value_negative"
+        position for position, case in enumerate(CASES) if case.name == "direct_fact_negative"
     )
     responses[index] = {
-        "requirements": [{"question_quote": "What is the storage code", "kind": "attribute"}],
+        "requirements": [{"question_quote": "Where did I store the amber key", "kind": "location"}],
         "supports": [
             {
                 "requirement_index": 0,
                 "candidate_index": 0,
-                "candidate_quote": "I stored the amber key in drawer three.",
+                "candidate_quote": "The amber key matters to me.",
                 "role": "direct",
             }
         ],
@@ -197,17 +197,17 @@ def test_stability_gate_rejects_one_failed_round_without_stopping_early() -> Non
     broken_index = next(
         position
         for position, case in enumerate(CASES)
-        if case.name == "missing_value_negative"
+        if case.name == "direct_fact_negative"
     )
     rounds[2][broken_index] = {
         "requirements": [
-            {"question_quote": "What is the storage code", "kind": "attribute"}
+            {"question_quote": "Where did I store the amber key", "kind": "location"}
         ],
         "supports": [
             {
                 "requirement_index": 0,
                 "candidate_index": 0,
-                "candidate_quote": "I stored the amber key in drawer three.",
+                "candidate_quote": "The amber key matters to me.",
                 "role": "direct",
             }
         ],
