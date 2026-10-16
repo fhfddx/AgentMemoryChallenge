@@ -401,4 +401,61 @@ rebase 丢弃，只保留三个独有提交：`2eddbb8`（中间 pin）、`9b242
 3. 复跑前先读 `/tmp/masm-eg-verify.txt` 确认 `verification_exit_code` 的具体原因（容器名、运行档位或
    Provider 变量），再执行 `--stability`。
 
+## 16. 首次真实 Provider 稳定性门槛结果：候选被拒绝（2026-10-17）
+
+### 16.1 运行事实
+
+候选镜像由 `537c892` 构建并只替换 `masm-v11-api-1`（`--no-deps`，graph 与来源上下文开关保持关闭），
+`masm-v11-postgres-1` 容器 ID 未变；只读核验 `verification_exit_code=0`（`source_match=yes`、
+`candidate_modules=present`、`runtime_settings=valid`、四个 Provider 变量 `set`）。随后一次性五轮固定
+门槛（26 例 × 5 轮 = 130 个用例行）：
+
+| 指标 | 实际值 |
+| --- | --- |
+| `round_count` / `rounds_passed` | 5 / **0** |
+| `probe_exit_code` | 1 |
+| `candidate_eligible` | false |
+| `failure_categories` | `none` 121、`planner_invalid` 9；**无 `planner_unavailable`** |
+| `fallbacks` | 9（全部集中在两个 persisted 用例） |
+| `evidence_states` | sufficient 79、partial 16、insufficient 35 |
+| 单例 `passed` | 94 / 130（任一轮必须 26/26 才算通过，故五轮全失败） |
+
+按事先冻结的判定规则：**该提交被拒绝**，不重跑、不调参刷通过。因为不存在 `planner_unavailable`，
+Provider 通路正常，所以这次运行对该候选是**有效测量**，不适用"基础设施无效运行"豁免。
+
+### 16.2 失败用例与机制
+
+| 用例 | 失败轮次 | 观测 | 机制 |
+| --- | --- | --- | --- |
+| `two_attributes` | 5/5 | partial，`link_count=0`，只返回 1 条 | 模型没有为同来源相邻两条提出 `same_source_context`，两条各自成单节点分量 |
+| `cross_source_chain` | 5/5 | **sufficient**，`link_count=0`，只返回 1 条 | 模型把“哪个城市 + Nora 参加”压成单一需求，只用 1 条 direct 支持就判完整，另一片段缺失 |
+| `crowded_candidates` | 5/5 | 同上（32 候选） | 同上 |
+| `cross_source_chain_negative` | 5/5 | **sufficient**，返回含 `Lisbon` 的单条 | 同上：绑定子句（Nora 参加）无支持却判完整 → **假阳性（安全相关）** |
+| `chinese_context` | 2/5 | partial，只返回 1 条 | 同上（同源/跨源连接缺失） |
+| `chinese_context_negative` | 5/5 | sufficient/partial，返回含 `里斯本` 的单条 | 同上 |
+| `persisted_two_hop` | 5/5 | `planner_invalid` + 回退 | proposal 未通过结构校验（原因枚举待 `--diagnostic` 一轮确认） |
+| `persisted_two_hop_negative` | 4/5 | 同上 | 同上 |
+
+通过的用例全部是单来源直接事实、省略确认、纠正、错误主体、缺失值、选项干扰、断连拒绝等；失败集中在
+**多需求分解与跨来源连接**，即本架构要解决的目标场景。
+
+### 16.3 结论与未决设计问题
+
+1. 确定性层自身没有被证伪：同一套件在 fake provider 下 26/26 通过；真实失败来自模型提出的
+   requirement/link 与真实语义之间的差距。
+2. **架构级缺口**：`sufficient` 的安全性依赖模型把问题拆成完备的需求集。当前校验只检查
+   “question_quote 是否原文出现在问题里”“candidate_quote 是否原文出现在候选里”，**不检查
+   candidate_quote 是否与该需求有任何语义关系**，因此模型可以把任意已 grounding 的候选引用
+   挂到任意需求上并宣称 direct 覆盖，从而在绑定子句无支持时仍判 sufficient（16.2 的假阳性）。
+   纯字符串规则无法裁决这一点：例如 `two_attributes`/`cross_source_chain` 的合法用例里，
+   需求引文（来自问题）与支持引文（来自候选）本就可能没有共同的区分单元。
+3. 可在确定性层安全实施、且属于规格允许连接类型的改进（需用户批准后按 RED→GREEN 落地）：
+   - R1：同来源相邻位置由代码直接建边（规格允许的连接类型 1，无需模型提出）；
+   - R2：跨来源显式 mention 由代码在候选可见文本之间计算区分单元并建边（规格允许的连接类型 3）。
+     两者都可能修复 `two_attributes`、`cross_source_chain`、`crowded_candidates`、`chinese_context`
+     的召回，但**不能**保证修复两个期望拒答/部分的假阳性负例。
+4. 线上状态：`masm-v11-api-1` 运行 `537c892` 且 `graph_flag=unset(default_off)`，真实 Search 仍走冻结的
+   v7 路径；本次门槛失败没有改变线上行为，旧 override 仍可回滚。
+
+
 
