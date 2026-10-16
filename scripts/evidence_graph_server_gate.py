@@ -756,6 +756,97 @@ def _verify_candidate(
     return 0, probe_bytes
 
 
+# 运行前预注册的修正判据（交接文档第 22 节）：planner 已经是 temperature=0.0，但 Provider 侧仍存在
+# 不可消除的抖动，且有两个负例的期望状态取决于模型判断。判据因此改为：逐例（两个豁免用例除外）
+# 五轮中至少四轮通过、每轮至少 25/26 通过，并且任何一轮都不得出现 forbidden_evidence_selected。
+_AMENDED_MIN_CASES_PER_ROUND = 25
+_AMENDED_MIN_ROUNDS_PER_CASE = 4
+_AMENDED_EXEMPT_CASES = frozenset({"missing_value_negative", "chinese_context_negative"})
+
+
+def _amended_stability_criterion(rendered: str) -> Mapping[str, object] | None:
+    """按预注册判据评估五轮稳定性输出；任何无法安全解析的输入都返回 None。"""
+    rounds: list[dict[str, bool]] = []
+    round_summaries: list[Mapping[str, object]] = []
+    current: dict[str, bool] = {}
+    forbidden_total = 0
+    round_results = 0
+    for line in rendered.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(row, dict):
+            return None
+        name = row.get("case")
+        if name == "stability_summary":
+            continue
+        if name == "round_result":
+            round_results += 1
+            continue
+        if name == "summary":
+            reasons = row.get("failure_reasons")
+            if not isinstance(reasons, dict):
+                return None
+            for key, value in reasons.items():
+                if (
+                    key not in _ALLOWED_DIAGNOSTIC_FAILURE_REASONS
+                    or type(value) is not int
+                    or value < 1
+                ):
+                    return None
+            forbidden_total += int(reasons.get("forbidden_evidence_selected", 0))
+            rounds.append(dict(current))
+            round_summaries.append(row)
+            current = {}
+            continue
+        if not isinstance(name, str) or not name:
+            return None
+        passed = row.get("passed")
+        if not isinstance(passed, bool):
+            return None
+        current[name] = passed
+    if current or not rounds or round_results != len(rounds):
+        return None
+
+    per_case: dict[str, int] = {}
+    for round_cases in rounds:
+        for case_name, passed in round_cases.items():
+            per_case[case_name] = per_case.get(case_name, 0) + int(passed)
+    rounds_meeting = 0
+    for row in round_summaries:
+        positive = row.get("positive_passed")
+        negative = row.get("negative_passed")
+        if type(positive) is not int or type(negative) is not int:
+            return None
+        if positive + negative >= _AMENDED_MIN_CASES_PER_ROUND:
+            rounds_meeting += 1
+    graded = sorted(name for name in per_case if name not in _AMENDED_EXEMPT_CASES)
+    if not graded:
+        return None
+    cases_meeting = sum(
+        1 for name in graded if per_case[name] >= _AMENDED_MIN_ROUNDS_PER_CASE
+    )
+    eligible = (
+        len(rounds) == 5
+        and rounds_meeting == len(rounds)
+        and cases_meeting == len(graded)
+        and forbidden_total == 0
+    )
+    return {
+        "case": "amended_criterion",
+        "candidate_eligible": eligible,
+        "cases_meeting_minimum": cases_meeting,
+        "cases_total": len(graded),
+        "exempt_cases": len(_AMENDED_EXEMPT_CASES & per_case.keys()),
+        "forbidden_evidence_total": forbidden_total,
+        "round_count": len(rounds),
+        "rounds_meeting_minimum": rounds_meeting,
+    }
+
+
 def _run_stability(
     *,
     repository: Path,
@@ -765,6 +856,7 @@ def _run_stability(
     error: TextIO,
     runner: CommandRunner,
     probe_bytes: bytes,
+    criterion: str = "frozen",
 ) -> int:
     result_file = _open_result_file(repository, result_path)
     if result_file is None:
@@ -811,7 +903,18 @@ def _run_stability(
     print(f"probe_exit_code={result.returncode}", file=output)
     if summary is None:
         return 2
-    return result.returncode
+    if criterion != "amended":
+        return result.returncode
+    verdict = _amended_stability_criterion(rendered)
+    if verdict is None:
+        print("amended_criterion=invalid", file=error)
+        print("amended_candidate_eligible=false", file=output)
+        return 2
+    print("criterion=amended", file=output)
+    print(json.dumps(verdict, sort_keys=True), file=output)
+    eligible = verdict.get("candidate_eligible") is True
+    print(f"amended_candidate_eligible={'true' if eligible else 'false'}", file=output)
+    return 0 if eligible else 1
 
 
 def _diagnostic_summary(rendered: str) -> Mapping[str, object] | None:
@@ -1047,6 +1150,15 @@ def run_server_gate(
         help="Return the verification or probe status instead of shell-safe zero",
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--criterion",
+        choices=("frozen", "amended"),
+        default="frozen",
+        help=(
+            "frozen (default) requires all five rounds to pass; amended applies the "
+            "pre-registered criterion of handoff section 22"
+        ),
+    )
     args = parser.parse_args(list(argv))
     requested_mode = (
         "stability"
@@ -1112,6 +1224,7 @@ def run_server_gate(
         error=error,
         runner=command_runner,
         probe_bytes=verified_probe,
+        criterion=args.criterion,
     )
     return stability_code if args.strict_exit else 0
 

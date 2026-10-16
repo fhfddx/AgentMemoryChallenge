@@ -674,6 +674,54 @@ source_digest = ecfd0c52bc9b12ecbd8c8c056b7b895fe9047fb446a9e76d9a6e4ab502699a05
 - `source_digest` 重新钉为 `944fae8f4e57ec8046474b7e62f6a6453d9cbb8bf920cb9cae140083c6442a80`；
   probe 未改动（`8cff3fbd…` / `e02b2501…` 不变）。
 
+## 22. 运行前预注册：修正后的资格判据（用户批准，先于运行记录）
+
+### 22.1 为什么需要预注册
+
+第 21.5 节的两个事实：planner 已经是 `temperature=0.0`，但 `missing_value_negative` 在两次运行间翻转
+（Provider 侧抖动无法消除）；`chinese_context_negative` 的期望状态取决于模型引用哪一条候选。在冻结的
+"5 轮 × 26 例全绿"判据下，**实现完全正确也可能因单例抖动而失败**，而一次失败按规则即淘汰候选。
+用户批准改为预注册判据，本节点记录即生效，**在任何五轮运行之前**。
+
+### 22.2 判据全文（`--criterion amended`，默认仍为 `frozen`）
+
+候选合格当且仅当以下五条全部成立：
+
+1. `verification_exit_code == 0`（只读核验：checkout、probe 字节、容器安装摘要、运行档位与 Provider 变量）；
+2. `round_count == 5`（固定五轮，不因失败提前退出）；
+3. **每一轮**至少 25/26 个用例通过（`positive_passed + negative_passed >= 25`）；
+4. **除两个预声明豁免用例外**，每个用例在五轮中至少通过四轮；
+5. **每一轮**都不得出现 `forbidden_evidence_selected`（安全硬条件，不豁免）。
+
+预声明豁免（仅豁免第 4 条，第 5 条照旧适用）：
+
+| 豁免用例 | 理由 |
+| --- | --- |
+| `missing_value_negative` | 期望状态取决于模型是否把"只提及实体"的记忆误判为 direct 覆盖，两次运行间翻转（温度已为 0） |
+| `chinese_context_negative` | 期望 `partial` 需要模型引用"报名"那条候选；引用"里斯本"那条时门控会给出**安全的拒答**，失败在安全方向 |
+
+### 22.3 运行方式与固定输出
+
+```bash
+python3 scripts/evidence_graph_server_gate.py --container masm-v11-api-1 --stability \
+  --criterion amended --strict-exit --output "/tmp/masm-eg-gate-$(date -u +%H%M%S).jsonl"
+```
+
+门禁自行计算并只打印固定枚举与计数：`criterion=amended`、一行 `{"case":"amended_criterion",...}`
+（`round_count`、`rounds_meeting_minimum`、`cases_total`、`cases_meeting_minimum`、`exempt_cases`、
+`forbidden_evidence_total`、`candidate_eligible`）、以及 `amended_candidate_eligible=true|false`。
+判据本身由 `_amended_stability_criterion` 实现，其单元测试覆盖四种拒绝路径与一种通过路径。
+
+### 22.4 反钓鱼与不可回退声明
+
+- 本判据在运行前固定；**只对一次五轮运行生效**，不因结果调整；
+- 早先 `537c892` 在**冻结判据**下的 0/5 结论不变，仍记录在第 16 节；
+- 若修正判据下仍不合格：该候选被淘汰，下一次尝试必须来自**新提交**；
+- 修正判据比冻结判据弱，这是用户明确批准的有意放宽，理由与证据（温度已为 0、翻转发生在 Provider 侧）
+  记录在第 21.5 节；
+- 任何一轮出现 `forbidden_evidence_selected` 即淘汰，安全要求没有被放宽。
+
+
 
 
 

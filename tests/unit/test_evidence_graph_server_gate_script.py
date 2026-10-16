@@ -192,6 +192,132 @@ def _expectations() -> gate.CandidateExpectations:
     )
 
 
+def _stability_round(
+    round_number: int,
+    failing: Sequence[str] = (),
+    *,
+    forbidden: int = 0,
+) -> str:
+    case_names = [f"case-{index:02d}" for index in range(1, 25)] + [
+        "missing_value_negative",
+        "chinese_context_negative",
+    ]
+    lines = [
+        json.dumps({"case": name, "passed": name not in failing}, sort_keys=True)
+        for name in case_names
+    ]
+    passed = len(case_names) - len(failing)
+    lines.append(
+        json.dumps(
+            {
+                "case": "summary",
+                "case_count": len(case_names),
+                "positive_total": 13,
+                "positive_passed": min(13, passed),
+                "negative_total": 13,
+                "negative_passed": passed - min(13, passed),
+                "fallbacks": 0,
+                "failure_count": len(failing),
+                "failure_reasons": {"forbidden_evidence_selected": forbidden}
+                if forbidden
+                else {"passed": passed},
+                "candidate_eligible": not failing,
+            },
+            sort_keys=True,
+        )
+    )
+    lines.append(
+        json.dumps(
+            {"case": "round_result", "round": round_number, "passed": not failing},
+            sort_keys=True,
+        )
+    )
+    return "\n".join(lines)
+
+
+def _stability_document(rounds: Sequence[str]) -> str:
+    return (
+        "\n".join(rounds)
+        + "\n"
+        + json.dumps(
+            {
+                "case": "stability_summary",
+                "round_count": len(rounds),
+                "rounds_passed": 0,
+                "candidate_eligible": False,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+
+def test_amended_criterion_accepts_four_of_five_with_one_exempt_case_failing() -> None:
+    document = _stability_document(
+        [_stability_round(number, {"chinese_context_negative"}) for number in range(1, 6)]
+    )
+
+    verdict = gate._amended_stability_criterion(document)
+
+    assert verdict is not None
+    assert verdict["candidate_eligible"] is True
+    assert verdict["round_count"] == 5
+    assert verdict["rounds_meeting_minimum"] == 5
+    assert verdict["cases_meeting_minimum"] == verdict["cases_total"]
+    assert verdict["forbidden_evidence_total"] == 0
+
+
+def test_amended_criterion_rejects_a_case_that_fails_more_than_once() -> None:
+    rounds = [_stability_round(number) for number in range(1, 6)]
+    for offset in (0, 1, 2):
+        rounds[offset] = _stability_round(offset + 1, {"case-07"})
+    document = _stability_document(rounds)
+
+    verdict = gate._amended_stability_criterion(document)
+
+    assert verdict is not None
+    assert verdict["candidate_eligible"] is False
+    assert verdict["cases_meeting_minimum"] < verdict["cases_total"]
+
+
+def test_amended_criterion_rejects_any_round_with_forbidden_evidence() -> None:
+    rounds = [_stability_round(number) for number in range(1, 6)]
+    rounds[2] = _stability_round(3, {"missing_value_negative"}, forbidden=1)
+    document = _stability_document(rounds)
+
+    verdict = gate._amended_stability_criterion(document)
+
+    assert verdict is not None
+    assert verdict["candidate_eligible"] is False
+    assert verdict["forbidden_evidence_total"] == 1
+
+
+def test_amended_criterion_rejects_a_round_below_the_case_minimum() -> None:
+    rounds = [_stability_round(number) for number in range(1, 6)]
+    rounds[4] = _stability_round(5, {"case-01", "case-02"})
+    document = _stability_document(rounds)
+
+    verdict = gate._amended_stability_criterion(document)
+
+    assert verdict is not None
+    assert verdict["candidate_eligible"] is False
+    assert verdict["rounds_meeting_minimum"] == 4
+
+
+def test_amended_criterion_rejects_unknown_failure_reason_keys() -> None:
+    document = _stability_document(
+        [
+            _stability_round(1).replace('{"passed": 26}', '{"private-text": 26}'),
+            _stability_round(2),
+            _stability_round(3),
+            _stability_round(4),
+            _stability_round(5),
+        ]
+    )
+
+    assert gate._amended_stability_criterion(document) is None
+
+
 def test_default_gate_pins_the_committed_probe() -> None:
     repository = Path(__file__).resolve().parents[2]
     probe = repository / "scripts" / "evidence_graph_probe.py"
