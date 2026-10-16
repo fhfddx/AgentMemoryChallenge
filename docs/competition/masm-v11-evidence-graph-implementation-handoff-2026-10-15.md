@@ -371,13 +371,13 @@ C2 落地后：`test_evidence_graph_rules.py` 由 RED 转 GREEN（28 passed）�
 | 对象 | 值 |
 | --- | --- |
 | `d022b8a` 的旧 pin | `541fceac…3e3dd`（与任何一端口径都不符） |
-| 本地 `dc38ede` 的 pin（Windows worktree 字节，含 CRLF） | `8b81c490…5c9b8da` |
+| 中间提交 `2eddbb8` 的 pin（Windows worktree 字节，含 CRLF） | `8b81c490…5c9b8da` |
 | 已提交 blob 摘要 = 容器内已安装摘要（平台无关） | `d1e1ce2b…b8b6b79` |
 
 本地复现：`core.autocrlf=true` 时 `src/masm` 有 55/60 个文件带 CRLF，`_package_digest`（worktree 字节）
 因此与 `_git_package_digest`（`git cat-file blob`）不等；容器模板计算的是已安装文件的 LF 字节。
 
-### 15.3 修复（`6142f30`）
+### 15.3 修复（`9b24224`）
 
 - `source_digest` 改钉**平台无关的 blob 摘要** `d1e1ce2b…b8b6b79`；
 - 新增 `_probe_bytes_match()`：送进容器的 probe 在比较前做 CRLF→LF 归一化，Windows 与 Linux
@@ -389,11 +389,16 @@ RED：`-k "platform_independent or line_ending or pins_the_committed"` → 3 fai
 且 pin 不等于 blob 摘要）。GREEN：该测试文件 `28 passed`；全量 `973 passed, 1 skipped, 92 warnings`；
 Ruff 通过；mypy 62 个源文件通过。
 
-### 15.4 复跑前置条件
+### 15.4 已发布历史与复跑前置条件
 
-1. 服务器 checkout 必须包含 `6142f30`（或更新的同分支提交）；该提交尚未推送，需由用户推送/传输。
-2. `src/masm` 在 `d022b8a..6142f30` 之间没有任何改动，因此**不需要重建镜像**：容器内已安装摘要
+推送时发现 origin 上已存在两个同内容的重复提交（`f1d91ef`、`8d1be10`），因此本地等价的两份被
+rebase 丢弃，只保留三个独有提交：`2eddbb8`（中间 pin）、`9b24224`（本修复）、
+`1b67ac5`（本节文档）。rebase 前后整棵树逐字节一致（`git diff` 为空），已发布 HEAD 为 `1b67ac5`。
+
+1. 服务器 checkout 必须包含 `9b24224`（或更新的同分支提交），即 `1b67ac5`。
+2. `src/masm` 在 `d022b8a..1b67ac5` 之间没有任何改动，因此**不需要重建镜像**：容器内已安装摘要
    本来就等于新 pin，只需更新 checkout 与 probe。
-3. 复跑前先读 `/tmp/masm-eg-verify.txt` 确认 `verification_exit_code=2` 的具体原因（容器名、运行档位或
+3. 复跑前先读 `/tmp/masm-eg-verify.txt` 确认 `verification_exit_code` 的具体原因（容器名、运行档位或
    Provider 变量），再执行 `--stability`。
+
 
