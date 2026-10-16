@@ -318,9 +318,9 @@ class CandidateExpectations:
 
 
 DEFAULT_EXPECTATIONS = CandidateExpectations(
-    probe_blob="f2a3965f1c82788117e103855f82329441a7b41f",
-    probe_sha256="b5c44943224f00882f69a5a40c7b6d2c1a6f39516d05dbefa97a58204b99b665",
-    source_digest="9fd4b38f1eef244c47446ada3e56f293ed447d035b8b81d8e4ea113a92fc069f",
+    probe_blob="8cff3fbd1af934d1ba36905230f208ce4d7411e4",
+    probe_sha256="e02b2501ebf415d0a357ddb062785bd229f6874967a9727cc232c247a38f5f02",
+    source_digest="ecfd0c52bc9b12ecbd8c8c056b7b895fe9047fb446a9e76d9a6e4ab502699a05",
 )
 
 

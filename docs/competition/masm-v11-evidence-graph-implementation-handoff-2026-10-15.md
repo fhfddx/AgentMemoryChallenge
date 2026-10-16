@@ -526,6 +526,45 @@ CJK 单元必须先在本请求候选池中被实际证实（DF ≥ 1）才参�
   这是它不会伤及既有召回的直接证据；
 - `source_digest` 重新钉为 `9fd4b38f1eef244c47446ada3e56f293ed447d035b8b81d8e4ea113a92fc069f`。
 
+## 19. 固定枚举的结构失败原因：让下一次诊断一次定位（`3e74489`）
+
+### 19.1 为什么必须补这个instrument
+
+第 16 节的 JSONL 里，`persisted_two_hop`（5/5）与 `persisted_two_hop_negative`（4/5）都是
+`planner_schema_valid=true` + `failure_category=planner_invalid` + 回退。但**回退路径把
+`requirement_count`/`support_count`/`link_count` 全部清零**，因此无法判断是哪条结构规则触发
+（空需求列表？下标越界？需求引文未落地？），也无法判断模型究竟发了什么形状。继续凭猜测改提示词
+就是提示词轮盘赌，与项目既有教训相悖。
+
+### 19.2 实现（纯诊断，规格 §10 允许：只有固定枚举与计数）
+
+| 位置 | 新增 |
+| --- | --- |
+| `ValidationOutcome.reason` | 每个结构拒绝点写入固定枚举：`candidate_scope_mismatch`、`empty_requirements`、`requirement_count_exceeded`、`requirement_quote_not_grounded`、`support_count_exceeded`、`support_index_out_of_range`、`link_count_exceeded`、`link_index_out_of_range`、`link_self_reference` |
+| `GraphDiagnostics.planner_failure_reason` | 另含 `none`、`schema_invalid`（解析失败）、`planner_unavailable`、`internal_error` |
+| 搜索诊断载荷 | 新增 `graph_planner_failure_reason`，与其它图字段一样按固定枚举白名单折叠，其它取值折叠为 `unknown` |
+| probe | 每条用例行输出 `planner_failure_reason`；每轮汇总输出 `planner_failure_reasons` 计数 |
+| server gate | 只接受同一套固定键的 `planner_failure_reasons` 映射（键未知或计数不合即整份诊断作废） |
+
+RED 证据：`test_structural_failures_report_a_fixed_reason` 六种形状（空需求、引文未落地、支持下标越界、
+自链接、链接超上限、schema 失败）与 `test_successful_proposals_report_no_failure_reason` 先全部失败。
+
+### 19.3 pin 与部署影响
+
+`src/masm` 与 probe 都变了，因此三个 pin 全部刷新：
+
+```
+probe_blob    = 8cff3fbd1af934d1ba36905230f208ce4d7411e4
+probe_sha256  = e02b2501ebf415d0a357ddb062785bd229f6874967a9727cc232c247a38f5f02
+source_digest = ecfd0c52bc9b12ecbd8c8c056b7b895fe9047fb446a9e76d9a6e4ab502699a05
+```
+
+下一次诊断轮（1 轮 26 次调用，不产生资格结论）将同时回答两件事：
+1. R1/R2/Rule A 实际修复了多少此前失败的用例（第 16 节共 8 个用例、36 个用例行失败）；
+2. `persisted_two_hop` 的结构失败究竟是哪条规则，从而决定是改契约（例如空需求列表是否算合法弃答）
+   还是按固定原因精确修复。任何资格门槛仍只在二者明确之后、由新提交跑一次。
+
+
 
 
 
