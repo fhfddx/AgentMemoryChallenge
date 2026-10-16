@@ -488,6 +488,45 @@ Provider 通路正常，所以这次运行对该候选是**有效测量**，不�
 `eff1dd3fb74f4af75c43bf099084e74c06bb19fbbc2c05da0eb5bc326c051f2d`（`probe_blob`/`probe_sha256` 未变）。
 任何新候选镜像必须由新提交构建，容器内安装摘要才会与 pin 一致。
 
+## 18. 完整性闸门：只分解了一半的问题不得判为完整（`33ff242`）
+
+### 18.1 规则与依据
+
+对第 16 节的两个假阳性负例（期望拒答/部分）落地"问题完整性"闸门：
+
+- `question_units`：问题的区分单元；`requirement_units`：每个已校验需求引文的区分单元；
+- **未被任何需求主张、且没有任何已选证据覆盖**的问题单元若存在，则该组合不得判为 sufficient，
+  部分分支直接返回 `insufficient` 且证据为空（`unclaimed - grounded(included) != empty`）。
+
+CJK 单元必须先在本请求候选池中被实际证实（DF ≥ 1）才参与完整性判定：未分词的中文子串会产生
+跨词边界的伪单元（问题"城市举办"里的"市举"），任何候选都无法覆盖它，若当作硬性要求会误杀合法完成。
+拉丁单元（≥6 字符 token 与多词短语）直接参与。
+
+### 18.2 被否决的更严版本（有意记录）
+
+先实现过更严的版本："需求的每个区分单元都必须被已选证据覆盖，否则该需求不算被覆盖"。
+它当场打断了既有测试 `test_unproven_correction_link_is_rejected`：问题"What color bicycle did I buy?"
+本就可以用"No, I bought the red one."回答（省略回答不含 bicycle/color 字面词），该规则会在这类
+合法召回上直接拒答——正是本项目历史上 direct recall 归零的失败模式。该规则已删除，代码注释与提交
+信息都记录了原因。
+
+### 18.3 仍然存在的缺口（需 Codex 评审或契约变更）
+
+若模型不是**漏掉**绑定子句，而是把绑定子句**吞进需求引文**（单个需求引文横跨
+"Which city hosts the workshop that Nora attended"），则 Rule A 保持沉默，负例仍可能判 sufficient。
+这需要语义裁决：字符串规则无法区分"省略回答"与"无关候选"，可行的方向是改契约（例如要求需求引文
+不得横跨两个内容子句，或要求模型为每个绑定子句单独出需求），属于提示词/契约决策，需要用户批准。
+
+### 18.4 验证
+
+- RED→GREEN：`test_unclaimed_question_content_blocks_sufficiency`、
+  `test_chinese_negative_without_grounded_binding_content_abstains` 先失败后通过；
+- 全量（临时 `masm_test`）：980 passed / 1 skipped，唯一失败是当时过期的 source digest pin（本节刷新）；
+- 套件（fake provider）仍 26/26、正负各 13/13、零回退：Rule A 在**分解完整**的提案上从不触发，
+  这是它不会伤及既有召回的直接证据；
+- `source_digest` 重新钉为 `9fd4b38f1eef244c47446ada3e56f293ed447d035b8b81d8e4ea113a92fc069f`。
+
+
 
 
 
