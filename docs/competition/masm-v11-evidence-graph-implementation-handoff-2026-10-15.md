@@ -564,6 +564,61 @@ source_digest = ecfd0c52bc9b12ecbd8c8c056b7b895fe9047fb446a9e76d9a6e4ab502699a05
 2. `persisted_two_hop` 的结构失败究竟是哪条规则，从而决定是改契约（例如空需求列表是否算合法弃答）
    还是按固定原因精确修复。任何资格门槛仍只在二者明确之后、由新提交跑一次。
 
+## 20. 诊断轮结果与两个精确修复（`31fec64`）
+
+### 20.1 诊断轮（1 轮 26 例，不构成资格结论）
+
+`planner_failure_reasons = {"none": 24, "requirement_quote_not_grounded": 2}`，24/26 通过：
+
+| 用例 | 上一轮（5 轮门槛） | 本轮诊断 | 结论 |
+| --- | --- | --- | --- |
+| `two_attributes` | 0/5 通过 | ✅ | R1 同来源相邻建边修复 |
+| `cross_source_chain` | 0/5 | ✅ | R2 + R2b 修复 |
+| `crowded_candidates` | 0/5 | ✅ | R2（池内稀有度 ≤2）+ R2b 修复 |
+| `chinese_context` | 3/5 | ✅ | R2 + R2b 修复 |
+| `cross_source_chain_negative` | 0/5 | ❌ sufficient | hyp-2 确认：`requirement_count=1`、`support_count=1`，绑定子句被吞进唯一需求引文 |
+| `chinese_context_negative` | 0/5 | ❌ sufficient | 同上 |
+| `persisted_two_hop` | 0/5 | ❌ `requirement_quote_not_grounded` | **不是**空需求列表，而是模型改写/标点了问题原文 |
+| `persisted_two_hop_negative` | 1/5 | ❌ 同上 | 同上 |
+
+即：第 16 节担心的"模型给出空需求列表"并未发生；两个留待决策的假设各有明确答案。
+
+### 20.2 修复 1：引文标点容差 + 可定位的改写原因
+
+需求引文的 grounding 现在允许**仅标点差异**（逗号、分号、问号、连字符写法）：先按归一化精确子串，
+再按"去标点形状"子串匹配。改写与改序仍然拒绝，且原因细化为
+`requirement_quote_reordered`（词元多重集相同、顺序不同）或 `requirement_quote_paraphrased`（词元不同），
+从而让契约问题一次可定位。候选引文的 grounding 保持精确子串不变。
+
+### 20.3 修复 2：子句标记门控的完整性收紧
+
+仅当问题含**子句边界标记**（逗号/分号，或关系代词 that/which/who/whom/whose）时，需求引文自身的
+区分单元必须被已选证据覆盖，否则该需求不算被覆盖；若因此没有任何需求被覆盖，则判 `insufficient`
+且证据为空。这样 `cross_source_chain_negative`（关系从句）与 `chinese_context_negative`（中文逗号）
+都被修复，而不影响单子句问题。
+
+**为什么必须门控**：不分门控的版本此前已用既有测试证明有害——它会打断
+`test_unproven_correction_link_is_rejected` 里合法的省略回答（"What color bicycle did I buy?"
+由 "No, I bought the red one." 回答，两者没有共同区分单元）。新增
+`test_elliptical_answer_without_a_clause_marker_stays_sufficient` 把"单子句 + 省略回答仍判完整"钉住。
+
+### 20.4 验证与 pin
+
+- RED→GREEN：4 个新测试先失败（标点容差、改写原因、关系从句收紧、中文逗号收紧）；
+- 全量（临时 `masm_test`）：992 passed / 1 skipped（唯一失败是当时过期的 source digest pin）；
+- ruff、mypy 全绿；套件（fake）26/26、正负各 13/13、零回退、`planner_failure_reasons={"none":26}`；
+- `source_digest` 重新钉为 `2f4adb35df7248d58bafabb9b4f9a425358fd5a7fdb12ba6278ef81e6345d6ac`；
+  probe 未改动，`probe_blob`/`probe_sha256` 保持
+  `8cff3fbd1af934d1ba36905230f208ce4d7411e4` / `e02b2501ebf415d0a357ddb062785bd229f6874967a9727cc232c247a38f5f02`。
+
+### 20.5 下一步
+
+重建镜像后**再跑一轮诊断**（26 次调用）确认 26/26；只有确认全绿，才值得花那一次五轮资格门槛
+（130 次调用）。若诊断轮仍出现 `requirement_quote_reordered` 或 `requirement_quote_paraphrased`，
+说明模型不是标点差异而是真的改写问题原文，那时需要的是**契约/提示词层面的明确要求**（逐字复制问题片段），
+而不是继续放宽 grounding。
+
+
 
 
 
