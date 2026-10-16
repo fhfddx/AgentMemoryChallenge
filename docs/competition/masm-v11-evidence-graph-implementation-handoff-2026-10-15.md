@@ -865,6 +865,55 @@ ruff、mypy 干净。
 `source_digest` 重新钉为 `76d092e0277d3622e9b9f7a68f72a9c731d9d1ef433ef77d60ed86d124cff41b`；
 probe 未改动，`probe_blob`/`probe_sha256` 不变。
 
+## 26. Canary 复验结论（`2e389e7`，flags 打开）
+
+### 26.1 部署与观测
+
+镜像 `masm-v11-final-candidate:2e389e7` 只替换 API：`API_REPLACED` / `DB_UNCHANGED` / `healthy` /
+`restarts=0`；配置解析为 `MASM_EVIDENCE_GRAPH_ENABLED="1"`、`MASM_SOURCE_CONTEXT_ENABLED="1"`、
+`MASM_EVIDENCE_SELECTOR_ENABLED="1"`、`MASM_RUNTIME_PROFILE=official-masm`；容器内 `graph_flag=1`。
+
+真实流量（canary 自身 `/add` + 两次 `/search`）后的遥测：
+
+| 字段 | 值 |
+| --- | --- |
+| `graph_enabled` | `True` × 2（白名单修复验证通过：图遥测终于出现在日志行里） |
+| `graph_planner_calls` | `0` × 1（无关问题候选为空，早退不调用）、`1` × 1 |
+| `graph_fallback` / `graph_failure_category` / `graph_planner_failure_reason` | `False` / `none` / `none`（**无回退、无故障**） |
+| `graph_state` | `sufficient` × 1、`unknown` × 1（后者为候选空池的早退） |
+| `graph_planner_latency_ms` / `latency_ms` | 1864.59 / 2093.51（有 planner 的搜索）；0.0 / 212.91（无 planner） |
+| 无关问题 | 返回空（`response_bytes=11`），拒答方向正确 |
+
+即：**图路径在线上确实运行，无回退、无内部错误、拒答方向正确，单次额外成本约 1.9 s。**
+
+### 26.2 唯一疑点的定性
+
+多部分问题 `What is the check-in code and where is the venue?` 只返回 1 条。补采字段后定性：
+
+```
+candidate_count = 3      graph_candidate_count = 3
+graph_requirement_count = 2   graph_support_count = 2
+graph_component_count = 2     graph_link_count = 0
+graph_selected_count = 1      graph_state = sufficient
+```
+
+池内 3 条候选、模型给出 2 个需求与 2 个支持，但**被引用的两条之间不存在任何可证明连接**
+（同源相邻不成立、无共享区分单元、该库无侧车关系），因此分量数为 2，图只返回它**能证明**的那一条。
+
+这不是判定错误，而是设计取舍的必然结果：`/search` 返回的是**证据条目**、不做任何断言，所以**没有产生
+虚假声明**；代价是多部分问题会少回一条（召回成本）。若要消除该成本，需要放宽"组合必须有可证明连接"这
+条核心安全性质，本实现与设计中都不允许。
+
+### 26.3 决策
+
+canary 判定为**健康**：无回退、无故障、无虚假声明，延迟增量有界（约 1.9 s）。因此**保持两个开关打开**，
+并按设计进入**唯一一次**官方 Smoke；Full 永不执行。
+
+判读规则（先定好）：把 Smoke 的官方聚合指标与文档中记录的 v1.0 基线对比——任何指标出现回归即回滚
+（一条命令切回 flags 关闭的 override）并把结果入档；若持平或改善，则保持打开并记录为本轮结论。
+本 Smoke 是一次性运行，不重跑、不择优选结果。
+
+
 
 
 
