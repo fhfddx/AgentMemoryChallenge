@@ -721,6 +721,66 @@ python3 scripts/evidence_graph_server_gate.py --container masm-v11-api-1 --stabi
   记录在第 21.5 节；
 - 任何一轮出现 `forbidden_evidence_selected` 即淘汰，安全要求没有被放宽。
 
+## 23. 预注册判据下的五轮运行结果与 R4（`2035493`）
+
+### 23.1 运行结果：按冻结判据淘汰
+
+候选镜像 `masm-v11-final-candidate:d6a9ccc`，只替换 API（`API_REPLACED`/`DB_UNCHANGED`/`healthy`/`restarts=0`），
+只读核验 `verification_exit_code=0`、`source_match=yes`。五轮运行：
+
+| 判据条目 | 结果 |
+| --- | --- |
+| `verification_exit_code=0` | ✅ |
+| `round_count=5` | ✅ |
+| 每轮 ≥25/26 | ❌ `rounds_meeting_minimum=1` |
+| 非豁免用例逐例 ≥4/5 | ❌ `cases_meeting_minimum=23 / 24` |
+| 任一轮 `forbidden_evidence_selected=0` | ✅ `forbidden_evidence_total=0` |
+
+按预注册声明：**该候选被淘汰，不重跑**。同时记录一项正面结果：130 次真实调用中没有任何一次
+返回被禁止片段，失败全部在"稳定性/逐例一致性"方向。
+
+### 23.2 逐例结果：24/26 用例 5/5 全过
+
+`persisted_two_hop`、`persisted_two_hop_negative`、`cross_source_chain_negative`、`missing_value_negative`
+等此前失败的用例本轮**全部 5/5**，即 R1/R2/R2b/Rule A/Rule B/R3/R3b 全部被真实运行验证。
+只有两个中文用例失败，且同一根因：
+
+| 用例 | 通过轮次 | 观测 | 机制 |
+| --- | --- | --- | --- |
+| `chinese_context`（正例） | 1/5 | partial，`requirement_count=2`、`support_count=1`、`selected_count=2` | 模型只为一个需求声明支持；另一需求无声明覆盖 → partial，尽管两条证据都已被取回 |
+| `chinese_context_negative` | 0/5 | insufficient，空证据 | 模型只引用"里斯本"那条；门控丢弃吞掉绑定子句的需求 → 安全拒答 |
+
+`chinese_context_negative` 期望的 `partial` 需要模型去引用"报名"那条候选，确定性层无法做到；它是预注册
+判据里的豁免用例，且失败在安全方向。**`chinese_context` 是本轮唯一阻断合格的非豁免用例。**
+
+### 23.3 判据算术缺陷的更正（不影响结论、也不需要改判据）
+
+第 22.2 节第 3 条写"每轮 ≥25/26"，同时豁免两个用例，算术上自相矛盾（两个豁免都失败时上限为 24，
+正确写法应为 ≥24）。更正记录如下：本轮 4 轮失败 2 例、1 轮失败 1 例；**只要 `chinese_context` 修好，
+每轮即 25/26 通过**，按原始阈值（≥25）与非豁免逐例 ≥4/5 同时成立，因此该缺陷**不需要修改判据**
+即可消除，避免了事后移动门槛。
+
+### 23.4 R4：代码可确立覆盖（用户批准）
+
+同一分量内，若某需求没有模型声明的支持，但其区分单元**非空**且**全部**被该组合的已选证据覆盖，
+则该需求算被覆盖；`sufficient` 不再要求每个需求都有声明支持，而要求每个需求"被确立"（显式或 R4）。
+**空单元需求永不自动确立**，因此少引用一条需求的提案不会被代码补齐；证据必然与真实覆盖节点同处一个
+已证明连通的分量，未证明连接无法参与。
+
+- RED→GREEN：`test_uncited_requirement_counts_as_covered_when_its_units_are_grounded` 先前判 partial；
+- 守则：`test_uncited_requirement_is_not_covered_without_grounded_units`（无可证明连接时不得确立）、
+  `test_unit_free_requirement_is_never_auto_covered`（侧车对连接两条证据、但第二条需求无区分单元 → 仍 partial）；
+- 全量（临时 `masm_test`）：1003 passed / 1 skipped（唯一失败是当时过期的 source digest pin）；
+- ruff、mypy 全绿；套件（fake）26/26；
+- `source_digest` 重新钉为 `ce923f90a5c95f248ba1b44302bce8275a6453f3f608c53625fdc40ffe3582f1`（probe 未改）。
+
+### 23.5 下一次（也是最后一次）资格运行
+
+由提交 `2035493` 重建镜像后，按**同一套预注册判据**（第 22 节，阈值不改）跑一次五轮：
+预计每轮 25/26（仅豁免的 `chinese_context_negative` 失败且失败在安全方向）、非豁免用例全 ≥4/5、
+`forbidden_evidence_total=0` → 合格。若仍不合格，按预注册声明该候选淘汰，下一次尝试必须来自新提交。
+
+
 
 
 
