@@ -134,6 +134,17 @@ _ALLOWED_DIAGNOSTIC_FAILURE_CATEGORIES = frozenset(
 _ALLOWED_DIAGNOSTIC_STATES = frozenset(
     {"sufficient", "partial", "insufficient", "unknown"}
 )
+_ALLOWED_PROVIDER_CHECK_CATEGORIES = frozenset(
+    {
+        "success",
+        "http_status",
+        "timeout",
+        "transport",
+        "invalid_response",
+        "unavailable_unknown",
+        "internal_error",
+    }
+)
 _CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _CONTAINER_CHECK_TEMPLATE = r"""
 import hashlib
@@ -275,8 +286,8 @@ class CandidateExpectations:
 
 
 DEFAULT_EXPECTATIONS = CandidateExpectations(
-    probe_blob="735b103ab7fbe71b6d80f82f3db62f0db26edfc8",
-    probe_sha256="6c994f05633844ddabe97e08101d3a0a611fbcfabadea6ccee812978e843f47b",
+    probe_blob="c0d7e3db00b3dbaf076690a90668dd1a63f85fa5",
+    probe_sha256="bf9365f5fc7c51a4751a33d017d45a399bc156a915c468a85a90871c14033cd7",
     source_digest="541fceacb6cbc80e9f5718a83247fe00e1577cd21d956b68abc9c1a894f3e3dd",
 )
 
@@ -868,6 +879,79 @@ def _run_diagnostic(
     return result.returncode
 
 
+def _provider_check_payload(rendered: str) -> Mapping[str, object] | None:
+    lines = [line for line in rendered.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None
+    try:
+        candidate = json.loads(lines[0])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(candidate, dict) or candidate.get("case") != "provider_check":
+        return None
+    category = candidate.get("category")
+    if category not in _ALLOWED_PROVIDER_CHECK_CATEGORIES:
+        return None
+    safe: dict[str, object] = {"case": "provider_check", "category": category}
+    attempt = candidate.get("attempt")
+    if attempt is not None:
+        if type(attempt) is not int or not 1 <= attempt <= 2:
+            return None
+        safe["attempt"] = attempt
+    status_code = candidate.get("status_code")
+    if status_code is not None:
+        if type(status_code) is not int or not 100 <= status_code <= 599:
+            return None
+        safe["status_code"] = status_code
+    return safe
+
+
+def _run_provider_check(
+    *,
+    repository: Path,
+    container: str,
+    result_path: Path | None,
+    output: TextIO,
+    error: TextIO,
+    runner: CommandRunner,
+    probe_bytes: bytes,
+) -> int:
+    result_file = _open_result_file(repository, result_path)
+    if result_file is None:
+        print("provider_check_output=invalid", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    result = _command(
+        runner,
+        ("docker", "exec", "-i", container, "python", "-", "--provider-check"),
+        repository=repository,
+        input_text=probe_bytes,
+    )
+    if result is None:
+        _close_result_file(result_file)
+        print("provider_check_exec=failed", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    rendered = _stdout_text(result)
+    if rendered is None:
+        _close_result_file(result_file)
+        print("provider_check_output=invalid", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    if not _write_result_file(result_file, rendered):
+        print("provider_check_output=write_failed", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    payload = _provider_check_payload(rendered)
+    if payload is None:
+        print("provider_check_result=invalid", file=error)
+        print("probe_exit_code=2", file=output)
+        return 2
+    print(json.dumps(payload, sort_keys=True), file=output)
+    print(f"probe_exit_code={result.returncode}", file=output)
+    return result.returncode
+
+
 def run_server_gate(
     argv: Sequence[str],
     *,
@@ -890,6 +974,11 @@ def run_server_gate(
         action="store_true",
         help="After verification, run one round and print only safe aggregate diagnostics",
     )
+    mode.add_argument(
+        "--provider-check",
+        action="store_true",
+        help="After verification, make one call and print safe Provider failure metadata",
+    )
     parser.add_argument(
         "--strict-exit",
         action="store_true",
@@ -897,12 +986,20 @@ def run_server_gate(
     )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(list(argv))
+    requested_mode = (
+        "stability"
+        if args.stability
+        else "diagnostic"
+        if args.diagnostic
+        else "provider_check"
+        if args.provider_check
+        else None
+    )
     if not _CONTAINER_NAME.fullmatch(args.container):
         print("container_name=invalid", file=error)
         print("verification_exit_code=2", file=output)
-        if args.stability or args.diagnostic:
-            mode_name = "stability" if args.stability else "diagnostic"
-            print(f"{mode_name}_not_started=yes", file=output)
+        if requested_mode is not None:
+            print(f"{requested_mode}_not_started=yes", file=output)
         return 2 if args.strict_exit else 0
 
     verification_code, verified_probe = _verify_candidate(
@@ -915,16 +1012,25 @@ def run_server_gate(
     )
     print(f"verification_exit_code={verification_code}", file=output)
     if verification_code != 0:
-        if args.stability or args.diagnostic:
-            mode_name = "stability" if args.stability else "diagnostic"
-            print(f"{mode_name}_not_started=yes", file=output)
+        if requested_mode is not None:
+            print(f"{requested_mode}_not_started=yes", file=output)
         return verification_code if args.strict_exit else 0
-    if not args.stability and not args.diagnostic:
+    if requested_mode is None:
         return 0
     if verified_probe is None:
-        mode_name = "stability" if args.stability else "diagnostic"
-        print(f"{mode_name}_not_started=yes", file=output)
+        print(f"{requested_mode}_not_started=yes", file=output)
         return 2 if args.strict_exit else 0
+    if args.provider_check:
+        provider_check_code = _run_provider_check(
+            repository=repository,
+            container=args.container,
+            result_path=args.output,
+            output=output,
+            error=error,
+            runner=command_runner,
+            probe_bytes=verified_probe,
+        )
+        return provider_check_code if args.strict_exit else 0
     if args.diagnostic:
         diagnostic_code = _run_diagnostic(
             repository=repository,

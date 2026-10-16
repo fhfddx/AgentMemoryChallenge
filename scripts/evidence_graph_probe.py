@@ -15,7 +15,10 @@ from dataclasses import dataclass
 from typing import TextIO
 from uuid import UUID
 
+import masm.providers.llm as llm_module
 from masm.config import RuntimeProfile, Settings
+from masm.providers.diagnostics import ProviderFailureDiagnostics
+from masm.providers.errors import ProviderError
 from masm.providers.llm import OpenAICompatibleLLM, StructuredLLM
 from masm.retrieval.evidence_graph import (
     EvidenceGraphPlanner,
@@ -657,6 +660,63 @@ def _passed(case: Case, outcome: GraphSelection) -> bool:
     return not any(fragment in text for fragment in case.forbidden_fragments)
 
 
+def run_provider_check(llm: StructuredLLM, output: TextIO) -> int:
+    """Run one fixed planner call and render only allowlisted Provider metadata."""
+    captured: list[ProviderFailureDiagnostics] = []
+
+    def capture_failure(value: ProviderFailureDiagnostics) -> None:
+        captured.append(value)
+
+    original_emit = llm_module.emit_provider_failure
+    llm_module.emit_provider_failure = capture_failure
+    try:
+        case = CASES[0]
+        EvidenceGraphPlanner(llm).plan(
+            case.question,
+            False,
+            case.options,
+            _ranked(case),
+        )
+    except ProviderError:
+        if not captured:
+            payload: dict[str, str | int] = {
+                "case": "provider_check",
+                "category": "unavailable_unknown",
+            }
+        else:
+            diagnostic = captured[-1]
+            payload = {
+                "case": "provider_check",
+                "category": diagnostic.category.value,
+                "attempt": diagnostic.attempt,
+            }
+            if diagnostic.status_code is not None:
+                payload["status_code"] = diagnostic.status_code
+        print(json.dumps(payload, sort_keys=True), file=output, flush=True)
+        return 1
+    except Exception:
+        print(
+            json.dumps(
+                {"case": "provider_check", "category": "internal_error"},
+                sort_keys=True,
+            ),
+            file=output,
+            flush=True,
+        )
+        return 2
+    finally:
+        llm_module.emit_provider_failure = original_emit
+    print(
+        json.dumps(
+            {"case": "provider_check", "category": "success"},
+            sort_keys=True,
+        ),
+        file=output,
+        flush=True,
+    )
+    return 0
+
+
 def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> int:
     """执行固定套件；只有全部正负例通过且零回退时才返回 0。"""
     selector = GraphEvidenceSelector(
@@ -772,6 +832,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Run the fixed suite five complete rounds as one eligibility gate",
     )
+    mode.add_argument(
+        "--provider-check",
+        action="store_true",
+        help="Run one planner call and report only safe Provider failure metadata",
+    )
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
     try:
@@ -792,6 +857,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_attempts=1,
         )
         try:
+            if args.provider_check:
+                return run_provider_check(llm, sys.stdout)
             if args.stability:
                 return run_stability_probe(llm, sys.stdout)
             return run_probe(llm, sys.stdout, reverse=args.reverse)

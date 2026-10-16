@@ -4,12 +4,14 @@ import io
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 import scripts.evidence_graph_probe as probe
 from scripts.evidence_graph_probe import CASES, proposal_responses, run_probe
 
 from masm.config import RuntimeProfile
 from masm.providers.fakes import FakeStructuredLLM
+from masm.providers.llm import OpenAICompatibleLLM
 from masm.retrieval.evidence_graph import EvidenceGraphProposal
 
 
@@ -209,6 +211,42 @@ def test_stability_gate_output_never_contains_suite_content() -> None:
         assert secret not in rendered
 
 
+def test_provider_check_reports_only_safe_http_status_metadata() -> None:
+    private_body = "private-provider-body"
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(401, json={"error": private_body})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    llm = OpenAICompatibleLLM(
+        model="gpt-4o-mini",
+        base_url="https://private-provider.invalid/v1",
+        api_key="private-api-key",
+        client=client,
+        max_attempts=1,
+    )
+    output = io.StringIO()
+
+    code = probe.run_provider_check(llm, output)
+
+    assert code == 1
+    assert calls == 1
+    assert _rows(output) == [
+        {
+            "attempt": 1,
+            "case": "provider_check",
+            "category": "http_status",
+            "status_code": 401,
+        }
+    ]
+    rendered = output.getvalue()
+    for secret in (private_body, "private-provider.invalid", "private-api-key"):
+        assert secret not in rendered
+
+
 def test_main_stability_flag_routes_to_the_fixed_five_round_gate(
     monkeypatch, capsys
 ) -> None:
@@ -240,6 +278,33 @@ def test_main_stability_flag_routes_to_the_fixed_five_round_gate(
         "rounds_passed": 5,
         "candidate_eligible": True,
     }
+
+
+def test_main_provider_check_flag_routes_to_one_planner_call(
+    monkeypatch, capsys
+) -> None:
+    llm = FakeStructuredLLM([proposal_responses()[0]])
+    llm.close = lambda: None  # type: ignore[attr-defined]
+    settings = SimpleNamespace(
+        runtime_profile=RuntimeProfile.OFFICIAL_MASM,
+        llm_model="fake-model",
+        llm_base_url="https://provider.invalid/v1",
+        llm_api_key="private-key",
+        model_timeout_seconds=30.0,
+        validate_runtime=lambda: None,
+    )
+    monkeypatch.setattr(
+        probe.Settings, "from_env", classmethod(lambda cls: settings)
+    )
+    monkeypatch.setattr(probe, "OpenAICompatibleLLM", lambda **kwargs: llm)
+
+    code = probe.main(["--provider-check"])
+
+    assert code == 0
+    assert len(llm.requests) == 1
+    assert _rows(io.StringIO(capsys.readouterr().out)) == [
+        {"case": "provider_check", "category": "success"}
+    ]
 
 
 def test_main_sanitizes_settings_parse_failure(monkeypatch, capsys) -> None:

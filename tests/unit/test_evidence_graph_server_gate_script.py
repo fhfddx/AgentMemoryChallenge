@@ -35,6 +35,7 @@ class FakeCommandRunner:
         runtime_setting_issues: list[str] | None = None,
         stability_code: int = 0,
         diagnostic_code: int = 1,
+        provider_check_code: int = 1,
     ) -> None:
         self.source_digest = source_digest
         self.providers = providers or dict(_PROVIDERS)
@@ -42,8 +43,10 @@ class FakeCommandRunner:
         self.runtime_setting_issues = runtime_setting_issues or []
         self.stability_code = stability_code
         self.diagnostic_code = diagnostic_code
+        self.provider_check_code = provider_check_code
         self.stability_inputs: list[bytes] = []
         self.diagnostic_inputs: list[bytes] = []
+        self.provider_check_inputs: list[bytes] = []
 
     def __call__(
         self,
@@ -138,6 +141,27 @@ class FakeCommandRunner:
             return subprocess.CompletedProcess(
                 command,
                 self.stability_code,
+                stdout,
+                "private-provider-body",
+            )
+        if command == (
+            "docker",
+            "exec",
+            "-i",
+            "masm-v11-api-1",
+            "python",
+            "-",
+            "--provider-check",
+        ):
+            assert isinstance(input_text, bytes)
+            self.provider_check_inputs.append(input_text)
+            stdout = (
+                '{"case":"provider_check","category":"http_status",'
+                '"attempt":1,"status_code":401}\n'
+            )
+            return subprocess.CompletedProcess(
+                command,
+                self.provider_check_code,
                 stdout,
                 "private-provider-body",
             )
@@ -422,6 +446,37 @@ def test_explicit_diagnostic_runs_one_round_and_prints_only_safe_aggregates(
     assert output.getvalue().splitlines()[-1] == "probe_exit_code=1"
     assert "private-case-name" not in output.getvalue()
     assert "another-private-case" not in output.getvalue()
+    assert "private-provider-body" not in output.getvalue()
+    assert "private-provider-body" not in error.getvalue()
+
+
+def test_explicit_provider_check_runs_once_and_prints_only_safe_metadata(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path)
+    result_path = tmp_path / "provider-check.jsonl"
+    runner = FakeCommandRunner()
+    output = io.StringIO()
+    error = io.StringIO()
+
+    code = gate.run_server_gate(
+        ["--provider-check", "--strict-exit", "--output", str(result_path)],
+        repository=repository,
+        output=output,
+        error=error,
+        command_runner=runner,
+        expectations=_expectations(),
+    )
+
+    assert code == 1
+    assert runner.provider_check_inputs == [b"print('synthetic probe')\n"]
+    assert json.loads(output.getvalue().splitlines()[-2]) == {
+        "attempt": 1,
+        "case": "provider_check",
+        "category": "http_status",
+        "status_code": 401,
+    }
+    assert output.getvalue().splitlines()[-1] == "probe_exit_code=1"
     assert "private-provider-body" not in output.getvalue()
     assert "private-provider-body" not in error.getvalue()
 
