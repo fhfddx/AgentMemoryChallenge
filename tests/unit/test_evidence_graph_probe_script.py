@@ -38,6 +38,22 @@ def test_case_table_is_fixed_and_paired_with_valid_proposals() -> None:
         assert any(case.name == twin.name.removesuffix("_negative") for case in positive)
 
 
+def test_identical_planner_inputs_are_distinguished_by_validator_provenance() -> None:
+    by_planner_input: dict[tuple[object, ...], list[probe.Case]] = {}
+    for case in CASES:
+        key = (case.question, case.candidates, case.options)
+        by_planner_input.setdefault(key, []).append(case)
+
+    for twins in by_planner_input.values():
+        if len(twins) < 2:
+            continue
+        validator_contexts = {
+            (case.source_context, case.context_pairs)
+            for case in twins
+        }
+        assert len(validator_contexts) == len(twins)
+
+
 def test_scripted_suite_passes_every_positive_and_negative_case() -> None:
     code, rows = _run(FakeStructuredLLM(proposal_responses()))
 
@@ -56,6 +72,10 @@ def test_scripted_suite_passes_every_positive_and_negative_case() -> None:
         "sufficient->sufficient": 15,
     }
     assert summary["candidate_eligible"] is True
+    for row in rows[:-1]:
+        assert row["planner_schema_valid"] is True
+        assert row["requirement_count"] >= 1
+        assert row["support_count"] >= 0
 
 
 def test_suite_output_never_contains_question_or_candidate_text() -> None:
@@ -76,6 +96,9 @@ def test_suite_output_never_contains_question_or_candidate_text() -> None:
             "failure_category",
             "selected_count",
             "selected_source_count",
+            "planner_schema_valid",
+            "requirement_count",
+            "support_count",
             "link_count",
             "case_count",
             "positive_total",

@@ -21,6 +21,7 @@ from masm.providers.diagnostics import ProviderFailureDiagnostics
 from masm.providers.errors import ProviderError
 from masm.providers.llm import OpenAICompatibleLLM, StructuredLLM
 from masm.retrieval.evidence_graph import (
+    PROMPT_VERSION,
     EvidenceGraphPlanner,
     GraphContext,
     GraphEvidenceSelector,
@@ -353,14 +354,14 @@ CASES: tuple[Case, ...] = (
                     1,
                     "Did you buy the blue bicycle?",
                     "No, I bought the red one.",
-                    "shared_explicit_mention",
+                    "correction",
                 )
             ],
         ),
         expected_state="sufficient",
         required_fragments=("red",),
         forbidden_fragments=("blue",),
-        source_context=True,
+        source_context=False,
     ),
     Case(
         name="persisted_two_hop",
@@ -738,6 +739,7 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
     for case in cases:
         ranked = _ranked(case)
         anchors = {item.memory_id for item in ranked}
+        record_count = len(llm.records)
         try:
             outcome = selector.select(
                 case.question,
@@ -751,6 +753,11 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
                 request_user_id=_USER,
             )
         except Exception:
+            planner_records = [
+                record
+                for record in llm.records[record_count:]
+                if record.prompt_version == PROMPT_VERSION
+            ]
             failure_count += 1
             failure_reasons["graph_failure"] = (
                 failure_reasons.get("graph_failure", 0) + 1
@@ -758,9 +765,18 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
             transition = f"{case.expected_state}->unknown"
             state_transitions[transition] = state_transitions.get(transition, 0) + 1
             print(json.dumps({"case": case.name, "passed": False,
-                              "failure_category": "probe_error"}, sort_keys=True),
+                              "failure_category": "probe_error",
+                              "planner_schema_valid": (
+                                  len(planner_records) == 1
+                                  and planner_records[0].succeeded
+                              )}, sort_keys=True),
                   file=output, flush=True)
             continue
+        planner_records = [
+            record
+            for record in llm.records[record_count:]
+            if record.prompt_version == PROMPT_VERSION
+        ]
         reason = _failure_reason(case, outcome)
         ok = reason == "passed"
         failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
@@ -782,6 +798,11 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
             "abstained": outcome.selection.abstained,
             "fallback": outcome.graph.fallback,
             "failure_category": outcome.graph.failure_category,
+            "planner_schema_valid": (
+                len(planner_records) == 1 and planner_records[0].succeeded
+            ),
+            "requirement_count": outcome.graph.requirement_count,
+            "support_count": outcome.graph.support_count,
             "selected_count": len(outcome.selection.evidence),
             "selected_source_count": outcome.selection.selected_source_count,
             "link_count": outcome.graph.link_count,
