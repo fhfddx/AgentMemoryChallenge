@@ -302,7 +302,7 @@ class CandidateExpectations:
 DEFAULT_EXPECTATIONS = CandidateExpectations(
     probe_blob="f2a3965f1c82788117e103855f82329441a7b41f",
     probe_sha256="b5c44943224f00882f69a5a40c7b6d2c1a6f39516d05dbefa97a58204b99b665",
-    source_digest="8b81c4907e192fc8c5a198badc4599f98b995f5b6d8b29295798b70105c9b8da",
+    source_digest="d1e1ce2b795c4a88c34a3b191dbafd04954114fc739deb582ef092881b8b6b79",
 )
 
 
@@ -447,6 +447,15 @@ def _worktree_matches_head(
         if worktree_blob is None or worktree_blob != committed_blob:
             return False
     return True
+
+
+def _probe_bytes_match(probe_bytes: bytes, expected_sha256: str) -> bool:
+    """比对将要送进容器的 probe 字节；行尾归一化后比较，使结论与平台无关。
+
+    ``probe_blob`` 已经独立钉住已提交内容，因此这里的 CRLF/LF 差异不改变被审计的程序。
+    """
+    normalized = probe_bytes.replace(b"\r\n", b"\n")
+    return hashlib.sha256(normalized).hexdigest() == expected_sha256
 
 
 def _container_check(manifest: Sequence[str]) -> str:
@@ -649,7 +658,7 @@ def _verify_candidate(
         return 2, None
     checkout_clean = not status_stdout.strip()
     probe_matches = probe_blob == expectations.probe_blob
-    probe_worktree_matches = hashlib.sha256(probe_bytes).hexdigest() == expectations.probe_sha256
+    probe_worktree_matches = _probe_bytes_match(probe_bytes, expectations.probe_sha256)
     container_manifest_matches = payload.get("package_manifest") == "match"
     source_manifest_matches = host_manifest_matches and container_manifest_matches
     container_digest = payload.get("source_digest")

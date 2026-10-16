@@ -202,8 +202,13 @@ def test_default_gate_pins_the_committed_probe() -> None:
     ).stdout.strip()
 
     assert gate.DEFAULT_EXPECTATIONS.probe_blob == committed_blob
-    assert gate.DEFAULT_EXPECTATIONS.probe_sha256 == hashlib.sha256(probe.read_bytes()).hexdigest()
+    assert gate._probe_bytes_match(
+        probe.read_bytes(), gate.DEFAULT_EXPECTATIONS.probe_sha256
+    )
 
+
+def test_default_gate_pins_the_platform_independent_package_digest() -> None:
+    repository = Path(__file__).resolve().parents[2]
     tracked = subprocess.run(
         ("git", "ls-files", "-z", "--", "src/masm"),
         cwd=repository,
@@ -212,9 +217,27 @@ def test_default_gate_pins_the_committed_probe() -> None:
     )
     manifest = gate._tracked_package_files(tracked)
     assert manifest is not None
-    manifest_matches, source_digest = gate._package_digest(repository / "src" / "masm", manifest)
+    manifest_matches, _ = gate._package_digest(repository / "src" / "masm", manifest)
     assert manifest_matches is True
-    assert gate.DEFAULT_EXPECTATIONS.source_digest == source_digest
+    # 门禁与容器都比对「已提交字节」的摘要；worktree 的行尾（CRLF/LF）不能改变它。
+    blob_digest = gate._git_package_digest(repository, manifest, gate._run_command)
+    assert blob_digest is not None
+    assert gate.DEFAULT_EXPECTATIONS.source_digest == blob_digest
+    assert gate._worktree_matches_head(
+        repository, repository / "src" / "masm", manifest, gate._run_command
+    )
+
+
+def test_probe_worktree_check_is_line_ending_independent() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    probe = (repository / "scripts" / "evidence_graph_probe.py").read_bytes()
+    pin = gate.DEFAULT_EXPECTATIONS.probe_sha256
+    crlf = probe.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+
+    assert gate._probe_bytes_match(probe, pin) is True
+    assert gate._probe_bytes_match(crlf, pin) is True
+    assert gate._probe_bytes_match(probe + b"\n# tampered\n", pin) is False
+    assert gate._probe_bytes_match(probe.replace(b"import", b"imp0rt"), pin) is False
 
 
 def test_default_mode_verifies_without_starting_provider_calls(tmp_path: Path) -> None:
