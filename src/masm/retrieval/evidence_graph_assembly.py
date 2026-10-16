@@ -144,11 +144,19 @@ def assemble(
             chosen, requirement_units, evidence_units, tighten=tighten_completeness
         ):
             continue
+        established = set(chosen)
+        for requirement in range(requirement_count):
+            if requirement in established:
+                continue
+            if _requirement_is_auto_covered(requirement, requirement_units, evidence_units):
+                established.add(requirement)
+        if len(established) != requirement_count:
+            continue
         score = _score(included, candidates, supports)
         if best_full is None or score < best_full[0]:
             best_full = (score, included)
 
-    if best_full is not None and len(covered) == requirement_count and resolved:
+    if best_full is not None and resolved:
         return AssemblyOutcome(
             "sufficient", _selected(best_full[1], candidates), len(components)
         )
@@ -215,6 +223,25 @@ def _requirement_is_grounded(
     if not tighten or requirement >= len(requirement_units):
         return True
     return requirement_units[requirement] <= evidence_units
+
+
+def _requirement_is_auto_covered(
+    requirement: int,
+    requirement_units: Sequence[frozenset[str]],
+    evidence_units: frozenset[str],
+) -> bool:
+    """未被模型引用的需求：仅当其区分单元非空且全部被已选证据覆盖时由代码确立。
+
+    单元为空的需求（例如 "where is the venue"）永不自动确立：没有可核对的证据，
+    因此少引用一条需求的提案不会被代码“补齐”。证据必须与真实覆盖节点处于同一分量，
+    因为这里的 evidence_units 只来自该组合已选出的、已证明连通的候选。
+    """
+    if requirement >= len(requirement_units):
+        return False
+    units = requirement_units[requirement]
+    if not units:
+        return False
+    return units <= evidence_units
 
 
 def _requirements_are_grounded(

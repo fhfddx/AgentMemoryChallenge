@@ -797,6 +797,91 @@ def test_persisted_relation_edges_require_the_sidecar_pair() -> None:
     assert len(outcome.selection.evidence) == 1
 
 
+def test_uncited_requirement_counts_as_covered_when_its_units_are_grounded() -> None:
+    enrolled = _evidence(1, "source-a", "我报名了陶艺工作坊。")
+    hosted = _evidence(2, "source-b", "陶艺工作坊在里斯本举办。")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("在哪个城市举办", "location"),
+                    _requirement("我报名的课程", "subject"),
+                ],
+                supports=[_support(0, 1, "陶艺工作坊在里斯本举办。", "direct")],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "我报名的课程在哪个城市举办？",
+        None,
+        [enrolled, hosted],
+        _anchors(enrolled, hosted),
+        GraphContext(),
+    )
+
+    # 第二个需求没有模型声明的支持，但它与已覆盖需求同一分量，且其区分单元被已选证据覆盖。
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == (enrolled, hosted)
+
+
+def test_uncited_requirement_is_not_covered_without_grounded_units() -> None:
+    generic = _evidence(1, "source-a", "我报名了一个工作坊。")
+    hosted = _evidence(2, "source-b", "这个工作坊在里斯本举办。")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("工作坊在哪个城市举办", "location"),
+                    _requirement("我报名的课程", "subject"),
+                ],
+                supports=[_support(0, 1, "这个工作坊在里斯本举办。", "direct")],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "我报名的课程，工作坊在哪个城市举办？",
+        None,
+        [generic, hosted],
+        _anchors(generic, hosted),
+        GraphContext(),
+    )
+
+    # 两条候选之间没有任何可证明连接：未被引用的“我报名的课程”不得由别处的证据确立。
+    assert outcome.selection.evidence_state != "sufficient"
+    assert outcome.selection.evidence == (hosted,)
+
+
+def test_unit_free_requirement_is_never_auto_covered() -> None:
+    code = _evidence(1, "source-a", "The check-in code is K7-42.")
+    venue = _evidence(2, "source-b", "The venue is the old cinema.")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("What is the check-in code", "attribute"),
+                    _requirement("where is the venue", "location"),
+                ],
+                supports=[_support(0, 0, "The check-in code is K7-42.", "direct")],
+            )
+        ]
+    )
+
+    outcome = _selector(llm).select(
+        "What is the check-in code and where is the venue?",
+        None,
+        [code, venue],
+        _anchors(code, venue),
+        GraphContext(relation_source_pairs=(("source-a", "source-b"),)),
+    )
+
+    # 侧车对把两条证据连成同一分量，但“where is the venue”没有区分单元可供核对：
+    # 代码不得替模型确立这条需求，只能部分返回。
+    assert outcome.selection.evidence_state == "partial"
+    assert outcome.selection.evidence == (code,)
+
+
 # --- 3. explicit cross-source chain ------------------------------------------------------
 
 
