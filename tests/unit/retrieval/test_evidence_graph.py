@@ -156,7 +156,7 @@ def test_direct_single_source_fact_is_sufficient() -> None:
     assert outcome.graph.selected_count == 1
     assert outcome.graph.selected_source_count == 1
     assert len(llm.requests) == 1
-    assert llm.requests[0].prompt_version == "evidence-graph-planner-v1"
+    assert llm.requests[0].prompt_version == "evidence-graph-planner-v2"
     assert llm.requests[0].max_attempts == 1
     assert llm.requests[0].temperature == 0.0
 
@@ -451,6 +451,28 @@ def test_elliptical_confirmation_returns_the_adjacent_question_turn() -> None:
     assert without_context.selection.evidence_state == "sufficient"
 
 
+def test_confirmation_link_keeps_context_even_when_planner_omits_context_support() -> None:
+    proposal = _proposal(
+        requirements=[_requirement("Which city did I move to", "location")],
+        supports=[_support(0, 1, "Yes, last week.", "direct")],
+        links=[_link(0, 1, "Did you move to Porto?", "Yes, last week.", "confirmation")],
+    )
+    asked = _evidence(1, "source-a", "Did you move to Porto?", position=0)
+    confirmed = _evidence(2, "source-a", "Yes, last week.", position=1)
+
+    outcome = _selector(FakeStructuredLLM([proposal])).select(
+        "Which city did I move to?",
+        None,
+        [asked, confirmed],
+        _anchors(asked, confirmed),
+        GraphContext(source_context_enabled=True),
+    )
+
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == (asked, confirmed)
+    assert outcome.graph.link_count == 1
+
+
 # --- 5. forward correction ---------------------------------------------------------------
 
 
@@ -491,6 +513,36 @@ def test_forward_correction_keeps_both_turns() -> None:
     joined = " ".join(_texts(outcome.selection.evidence))
     assert "red" in joined
     assert "blue" in joined
+
+
+def test_correction_link_keeps_corrected_context_when_planner_omits_context_support() -> None:
+    proposal = _proposal(
+        requirements=[_requirement("What color bicycle did I buy", "attribute")],
+        supports=[_support(0, 1, "No, I bought the red one.", "direct")],
+        links=[
+            _link(
+                0,
+                1,
+                "Did you buy the blue bicycle?",
+                "No, I bought the red one.",
+                "correction",
+            )
+        ],
+    )
+    asked = _evidence(1, "source-a", "Did you buy the blue bicycle?", position=0)
+    corrected = _evidence(2, "source-a", "No, I bought the red one.", position=1)
+
+    outcome = _selector(FakeStructuredLLM([proposal])).select(
+        "What color bicycle did I buy?",
+        None,
+        [asked, corrected],
+        _anchors(asked, corrected),
+        GraphContext(source_context_enabled=True),
+    )
+
+    assert outcome.selection.evidence_state == "sufficient"
+    assert outcome.selection.evidence == (asked, corrected)
+    assert outcome.graph.link_count == 1
 
 
 def test_unproven_correction_link_is_rejected() -> None:
@@ -689,7 +741,7 @@ def test_multiple_choice_options_cannot_create_support() -> None:
             )
         ]
     )
-    stored = _evidence(1, "source-a", "I stored the amber key in the hallway cabinet.")
+    stored = _evidence(1, "source-a", "The amber key matters to me.")
 
     outcome = _selector(llm).select(
         "Where did I store the amber key?",
@@ -1285,7 +1337,7 @@ def test_planner_transport_failure_falls_back_to_the_frozen_selector_once() -> N
     assert outcome.graph.failure_category == "planner_unavailable"
     assert outcome.selection.evidence == (direct,)
     assert [request.prompt_version for request in llm.requests] == [
-        "evidence-graph-planner-v1",
+        "evidence-graph-planner-v2",
         "evidence-selector-v7",
     ]
 
@@ -1315,7 +1367,7 @@ def test_planner_failure_falls_back_once_over_the_same_bounded_pool() -> None:
     assert outcome.graph.failure_category == "planner_unavailable"
     assert outcome.selection.candidate_count == 32
     assert [request.prompt_version for request in llm.requests] == [
-        "evidence-graph-planner-v1",
+        "evidence-graph-planner-v2",
         "evidence-selector-v7",
     ]
 
@@ -1363,7 +1415,7 @@ def test_structurally_invalid_proposals_fall_back_once(response: Mapping[str, ob
     assert outcome.graph.failure_category == "planner_invalid"
     assert outcome.selection.evidence == (direct,)
     assert [request.prompt_version for request in llm.requests] == [
-        "evidence-graph-planner-v1",
+        "evidence-graph-planner-v2",
         "evidence-selector-v7",
     ]
 

@@ -53,6 +53,11 @@ def assemble(
         links,
         internal_pairs=_stored_conflict_pairs(supports, candidates),
     )
+    interpretive_pairs = tuple(
+        (link.left_index, link.right_index)
+        for link in links
+        if link.kind in {"confirmation", "correction"}
+    )
     components = _components(adjacency)
     component_of = {
         node: index for index, component in enumerate(components) for node in component
@@ -99,7 +104,11 @@ def assemble(
             continue
         included = _deduplicate(
             _inclusion(
-                set(components[component_index]), chosen, support_nodes, adjacency
+                set(components[component_index]),
+                chosen,
+                support_nodes,
+                adjacency,
+                interpretive_pairs,
             ),
             candidates,
         )
@@ -124,7 +133,14 @@ def assemble(
         if any(node in component_nodes for node in covering[requirement])
     }
     included = _deduplicate(
-        _inclusion(component_nodes, chosen, support_nodes, adjacency), candidates
+        _inclusion(
+            component_nodes,
+            chosen,
+            support_nodes,
+            adjacency,
+            interpretive_pairs,
+        ),
+        candidates,
     )
     if len(included) > max_selected:
         included = _best_bounded_partial(
@@ -134,6 +150,7 @@ def assemble(
             adjacency=adjacency,
             candidates=candidates,
             supports=supports,
+            interpretive_pairs=interpretive_pairs,
             max_selected=max_selected,
         )
     return AssemblyOutcome("partial", _selected(included, candidates), len(components))
@@ -290,6 +307,7 @@ def _inclusion(
     chosen: Mapping[int, int],
     support_nodes: Mapping[int, set[int]],
     adjacency: Mapping[int, Sequence[int]],
+    interpretive_pairs: Sequence[tuple[int, int]],
 ) -> set[int]:
     included: set[int] = set(chosen.values())
     for requirement, node in chosen.items():
@@ -299,7 +317,28 @@ def _inclusion(
     ordered = sorted(chosen.values())
     for left, right in zip(ordered, ordered[1:], strict=False):
         included |= _shortest_path(adjacency, component_nodes, left, right)
-    return included
+    return _interpretive_closure(included, component_nodes, interpretive_pairs)
+
+
+def _interpretive_closure(
+    included: set[int],
+    component_nodes: set[int],
+    interpretive_pairs: Sequence[tuple[int, int]],
+) -> set[int]:
+    """Keep the grounded context needed to interpret confirmations and corrections."""
+    expanded = set(included)
+    changed = True
+    while changed:
+        changed = False
+        for left, right in interpretive_pairs:
+            if left not in component_nodes or right not in component_nodes:
+                continue
+            if left not in expanded and right not in expanded:
+                continue
+            before = len(expanded)
+            expanded.update((left, right))
+            changed = changed or len(expanded) != before
+    return expanded
 
 
 def _deduplicate(included: set[int], candidates: Sequence[CandidateView]) -> set[int]:
@@ -402,6 +441,7 @@ def _best_bounded_partial(
     adjacency: Mapping[int, Sequence[int]],
     candidates: Sequence[CandidateView],
     supports: Sequence[ValidatedSupport],
+    interpretive_pairs: Sequence[tuple[int, int]],
     max_selected: int,
 ) -> set[int]:
     """Choose the best connected requirement subset that fits the response cap."""
@@ -419,7 +459,11 @@ def _best_bounded_partial(
             choices = [available[requirement] for requirement in subset]
             for combination in itertools.product(*choices):
                 chosen = set(combination)
-                raw = _connected_choice(component_nodes, chosen, adjacency)
+                raw = _interpretive_closure(
+                    _connected_choice(component_nodes, chosen, adjacency),
+                    component_nodes,
+                    interpretive_pairs,
+                )
                 deduplicated = _deduplicate(raw, candidates)
                 included = (
                     deduplicated

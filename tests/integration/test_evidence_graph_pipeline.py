@@ -111,7 +111,7 @@ class _PayloadPlannerLLM(FakeStructuredLLM):
         self.payloads: list[Mapping[str, Any]] = []
 
     def complete_json(self, request: Any, output_type: Any) -> Any:
-        if request.prompt_version == "evidence-graph-planner-v1":
+        if request.prompt_version == "evidence-graph-planner-v2":
             self.payloads.append(request.payload)
             self.queue(self._proposal(request.payload))
         return super().complete_json(request, output_type)
@@ -231,7 +231,7 @@ def test_persisted_relation_sidecar_enables_a_cross_source_chain(
             response = service.search(SearchRequest(query=_QUESTION, user_id=user, top_k=10))
 
         assert [request.prompt_version for request in llm.requests] == [
-            "evidence-graph-planner-v1"
+            "evidence-graph-planner-v2"
         ]
         returned = {item.content for item in response.data}
         assert any(_CODE_TEXT in text for text in returned)

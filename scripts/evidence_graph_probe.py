@@ -528,7 +528,7 @@ CASES: tuple[Case, ...] = (
     Case(
         name="option_overlap_negative",
         question=_AMBER_QUESTION,
-        candidates=(("s0", 0, "I stored the amber key in the hallway cabinet."),),
+        candidates=(("s0", 0, "The amber key matters to me."),),
         positive=False,
         options=("drawer three", "shelf two"),
         proposal=_proposal(

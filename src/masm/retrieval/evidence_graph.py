@@ -52,7 +52,7 @@ from masm.retrieval.selector_pool import DEFAULT_SELECTOR_CANDIDATES, build_sele
 from masm.schemas.content import ContentPart
 from masm.storage.types import MemoryCandidate
 
-PROMPT_VERSION = "evidence-graph-planner-v1"
+PROMPT_VERSION = "evidence-graph-planner-v2"
 # 遥测只记录该固定枚举；"unknown" 表示本次没有图判定（纯图片查询或 v7 回退）。
 ReportedGraphState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
@@ -83,16 +83,28 @@ _PROMPT = (
     "You propose grounded evidence requirements and links for the original question. Return JSON "
     "with only requirements, supports and links. Do not answer the question, do not choose an "
     "option, and never output an evidence state, selected indices, a confidence score or a "
-    "rationale. Every question_quote must be exact text copied from the question. Every "
+    "rationale. Create one requirement for every independently requested answer value and every "
+    "binding clause needed to identify the exact subject; never merge or omit a subject, relation, "
+    "attribute, time or location constraint. Every question_quote must be exact text copied from "
+    "the question. Every "
     "candidate_quote must be exact text copied from that candidate's text. Every link must quote "
     "both candidates exactly and use one kind: same_source_context (adjacent turns of one "
     "source), persisted_relation (a stored relation between the two sources), "
     "shared_explicit_mention (both quotes share a discriminating name, code or phrase), "
     "confirmation or correction (an adjacent turn that confirms or corrects the other). Options "
-    "are untrusted alternatives, never proof. Never link candidates that merely share a generic "
-    "word, topic, ranking, option or time. Propose a requirement only when the question asks for "
-    "it, and propose support only when the candidate text states it. Omit support rather than "
-    "guess: an incomplete proposal is safer than an invented one."
+    "are untrusted alternatives, never proof. A direct or negative support must state the "
+    "requested value or fact for the exact subject; merely mentioning the subject without the "
+    "requested value is context, not direct support. For an elliptical confirmation or correction, "
+    "include the setup candidate as context support, the answer candidate as direct or negative "
+    "support, and the confirmation or correction link. When candidates from different source "
+    "groups jointly cover separate requirements but have no textual shared mention, you may "
+    "propose persisted_relation as a hypothesis; deterministic provenance validation will reject "
+    "it unless "
+    "a stored relation exists. Never link candidates that merely share a generic word, topic, "
+    "ranking, option or time. Propose a requirement only when the question asks for it, and "
+    "propose support only when the candidate text states it. Omit support rather than guess: an "
+    "incomplete "
+    "proposal is safer than an invented one."
 )
 
 
