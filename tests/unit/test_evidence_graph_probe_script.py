@@ -49,6 +49,12 @@ def test_scripted_suite_passes_every_positive_and_negative_case() -> None:
     assert summary["negative_passed"] == summary["negative_total"] == 13
     assert summary["fallbacks"] == 0
     assert summary["failure_count"] == 0
+    assert summary["failure_reasons"] == {"passed": 26}
+    assert summary["state_transitions"] == {
+        "insufficient->insufficient": 8,
+        "partial->partial": 3,
+        "sufficient->sufficient": 15,
+    }
     assert summary["candidate_eligible"] is True
 
 
@@ -78,6 +84,8 @@ def test_suite_output_never_contains_question_or_candidate_text() -> None:
             "negative_passed",
             "fallbacks",
             "failure_count",
+            "failure_reasons",
+            "state_transitions",
             "candidate_eligible",
         }
 
@@ -129,6 +137,8 @@ def test_one_broken_negative_twin_rejects_the_whole_run() -> None:
     summary = rows[-1]
     assert summary["positive_passed"] == summary["positive_total"] == 13
     assert summary["negative_passed"] == summary["negative_total"] - 1
+    assert summary["failure_reasons"] == {"passed": 25, "state_mismatch": 1}
+    assert summary["state_transitions"]["insufficient->sufficient"] == 1
     assert summary["candidate_eligible"] is False
 
 

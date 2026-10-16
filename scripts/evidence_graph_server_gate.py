@@ -134,6 +134,20 @@ _ALLOWED_DIAGNOSTIC_FAILURE_CATEGORIES = frozenset(
 _ALLOWED_DIAGNOSTIC_STATES = frozenset(
     {"sufficient", "partial", "insufficient", "unknown"}
 )
+_ALLOWED_DIAGNOSTIC_FAILURE_REASONS = frozenset(
+    {
+        "passed",
+        "graph_failure",
+        "state_mismatch",
+        "required_evidence_missing",
+        "forbidden_evidence_selected",
+    }
+)
+_ALLOWED_DIAGNOSTIC_STATE_TRANSITIONS = frozenset(
+    f"{expected}->{actual}"
+    for expected in ("sufficient", "partial", "insufficient")
+    for actual in _ALLOWED_DIAGNOSTIC_STATES
+)
 _ALLOWED_PROVIDER_CHECK_CATEGORIES = frozenset(
     {
         "success",
@@ -286,8 +300,8 @@ class CandidateExpectations:
 
 
 DEFAULT_EXPECTATIONS = CandidateExpectations(
-    probe_blob="c0d7e3db00b3dbaf076690a90668dd1a63f85fa5",
-    probe_sha256="bf9365f5fc7c51a4751a33d017d45a399bc156a915c468a85a90871c14033cd7",
+    probe_blob="dc773e2c657c37e44854957e1f7703d548236638",
+    probe_sha256="1f9c7fb8dd0a347ddbf49d4bc3491163a5bf94068f17f11a195685fb8d58caab",
     source_digest="541fceacb6cbc80e9f5718a83247fe00e1577cd21d956b68abc9c1a894f3e3dd",
 )
 
@@ -824,12 +838,30 @@ def _diagnostic_summary(rendered: str) -> Mapping[str, object] | None:
     eligible = summary.get("candidate_eligible")
     if not isinstance(eligible, bool) or safe_integers["case_count"] != case_count:
         return None
+    safe_maps: dict[str, dict[str, int]] = {}
+    for name, allowed_keys in (
+        ("failure_reasons", _ALLOWED_DIAGNOSTIC_FAILURE_REASONS),
+        ("state_transitions", _ALLOWED_DIAGNOSTIC_STATE_TRANSITIONS),
+    ):
+        raw = summary.get(name)
+        if not isinstance(raw, dict):
+            return None
+        sanitized: dict[str, int] = {}
+        for key, value in raw.items():
+            if key not in allowed_keys or type(value) is not int or value < 1:
+                return None
+            assert isinstance(key, str)
+            sanitized[key] = value
+        if sum(sanitized.values()) != case_count:
+            return None
+        safe_maps[name] = dict(sorted(sanitized.items()))
     return {
         "case": "diagnostic_summary",
         **safe_integers,
         "candidate_eligible": eligible,
         "failure_categories": dict(sorted(failure_categories.items())),
         "evidence_states": dict(sorted(evidence_states.items())),
+        **safe_maps,
     }
 
 

@@ -103,7 +103,10 @@ class FakeCommandRunner:
                     '"failure_category":"none"}\n'
                     '{"case":"summary","case_count":2,"positive_total":1,'
                     '"positive_passed":0,"negative_total":1,"negative_passed":1,'
-                    '"fallbacks":1,"failure_count":1,"candidate_eligible":false}\n'
+                    '"fallbacks":1,"failure_count":1,'
+                    '"failure_reasons":{"graph_failure":1,"passed":1},'
+                    '"state_transitions":{"insufficient->insufficient":1,'
+                    '"sufficient->unknown":1},"candidate_eligible":false}\n'
                 )
                 return subprocess.CompletedProcess(
                     command,
@@ -437,17 +440,71 @@ def test_explicit_diagnostic_runs_one_round_and_prints_only_safe_aggregates(
         "evidence_states": {"insufficient": 1, "sufficient": 1},
         "failure_categories": {"none": 1, "planner_invalid": 1},
         "failure_count": 1,
+        "failure_reasons": {"graph_failure": 1, "passed": 1},
         "fallbacks": 1,
         "negative_passed": 1,
         "negative_total": 1,
         "positive_passed": 0,
         "positive_total": 1,
+        "state_transitions": {
+            "insufficient->insufficient": 1,
+            "sufficient->unknown": 1,
+        },
     }
     assert output.getvalue().splitlines()[-1] == "probe_exit_code=1"
     assert "private-case-name" not in output.getvalue()
     assert "another-private-case" not in output.getvalue()
     assert "private-provider-body" not in output.getvalue()
     assert "private-provider-body" not in error.getvalue()
+
+
+def test_diagnostic_rejects_unknown_aggregate_keys_without_rendering_them(
+    tmp_path: Path,
+) -> None:
+    class UnsafeAggregateRunner(FakeCommandRunner):
+        def __call__(
+            self,
+            args: Sequence[str],
+            *,
+            cwd: Path,
+            input_text: str | bytes | None = None,
+        ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+            result = super().__call__(args, cwd=cwd, input_text=input_text)
+            if tuple(args) == (
+                "docker",
+                "exec",
+                "-i",
+                "masm-v11-api-1",
+                "python",
+                "-",
+            ) and isinstance(input_text, bytes):
+                assert isinstance(result.stdout, str)
+                return subprocess.CompletedProcess(
+                    result.args,
+                    result.returncode,
+                    result.stdout.replace("graph_failure", "private-injected-key"),
+                    result.stderr,
+                )
+            return result
+
+    repository = _repository(tmp_path)
+    output = io.StringIO()
+    error = io.StringIO()
+
+    code = gate.run_server_gate(
+        ["--diagnostic", "--strict-exit", "--output", str(tmp_path / "result.jsonl")],
+        repository=repository,
+        output=output,
+        error=error,
+        command_runner=UnsafeAggregateRunner(),
+        expectations=_expectations(),
+    )
+
+    assert code == 2
+    assert "diagnostic_summary=missing" in error.getvalue()
+    assert "probe_exit_code=2" in output.getvalue()
+    assert "private-injected-key" not in output.getvalue()
+    assert "private-injected-key" not in error.getvalue()
 
 
 def test_explicit_provider_check_runs_once_and_prints_only_safe_metadata(

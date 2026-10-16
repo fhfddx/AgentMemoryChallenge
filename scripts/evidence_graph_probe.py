@@ -647,17 +647,19 @@ def _evidence_text(evidence: Sequence[RankedEvidence]) -> str:
     return "\n".join(str(item.source_context or item.content) for item in evidence)
 
 
-def _passed(case: Case, outcome: GraphSelection) -> bool:
+def _failure_reason(case: Case, outcome: GraphSelection) -> str:
     selection = outcome.selection
     graph = outcome.graph
     if graph.fallback or graph.failure_category != "none":
-        return False
+        return "graph_failure"
     if selection.evidence_state != case.expected_state:
-        return False
+        return "state_mismatch"
     text = _evidence_text(selection.evidence)
     if any(fragment not in text for fragment in case.required_fragments):
-        return False
-    return not any(fragment in text for fragment in case.forbidden_fragments)
+        return "required_evidence_missing"
+    if any(fragment in text for fragment in case.forbidden_fragments):
+        return "forbidden_evidence_selected"
+    return "passed"
 
 
 def run_provider_check(llm: StructuredLLM, output: TextIO) -> int:
@@ -731,6 +733,8 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
     negative_total = sum(1 for case in cases if not case.positive)
     fallbacks = 0
     failure_count = 0
+    failure_reasons: dict[str, int] = {}
+    state_transitions: dict[str, int] = {}
     for case in cases:
         ranked = _ranked(case)
         anchors = {item.memory_id for item in ranked}
@@ -748,11 +752,23 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
             )
         except Exception:
             failure_count += 1
+            failure_reasons["graph_failure"] = (
+                failure_reasons.get("graph_failure", 0) + 1
+            )
+            transition = f"{case.expected_state}->unknown"
+            state_transitions[transition] = state_transitions.get(transition, 0) + 1
             print(json.dumps({"case": case.name, "passed": False,
                               "failure_category": "probe_error"}, sort_keys=True),
                   file=output, flush=True)
             continue
-        ok = _passed(case, outcome)
+        reason = _failure_reason(case, outcome)
+        ok = reason == "passed"
+        failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+        actual_state = (
+            "unknown" if outcome.graph.fallback else outcome.selection.evidence_state
+        )
+        transition = f"{case.expected_state}->{actual_state}"
+        state_transitions[transition] = state_transitions.get(transition, 0) + 1
         passed += int(ok)
         positive_passed += int(ok and case.positive)
         negative_passed += int(ok and not case.positive)
@@ -786,6 +802,8 @@ def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> i
         "negative_passed": negative_passed,
         "fallbacks": fallbacks,
         "failure_count": failure_count,
+        "failure_reasons": dict(sorted(failure_reasons.items())),
+        "state_transitions": dict(sorted(state_transitions.items())),
         "candidate_eligible": eligible,
     }, sort_keys=True), file=output, flush=True)
     return 0 if eligible else 1
