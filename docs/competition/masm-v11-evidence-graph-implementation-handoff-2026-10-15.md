@@ -618,6 +618,63 @@ source_digest = ecfd0c52bc9b12ecbd8c8c056b7b895fe9047fb446a9e76d9a6e4ab502699a05
 说明模型不是标点差异而是真的改写问题原文，那时需要的是**契约/提示词层面的明确要求**（逐字复制问题片段），
 而不是继续放宽 grounding。
 
+## 21. 第二轮诊断：23/26，两个确定性修复（`dde048b`）
+
+### 21.1 诊断轮二结果
+
+| 用例 | 轮一门槛 | 诊断一 | 诊断二 | 说明 |
+| --- | --- | --- | --- | --- |
+| `two_attributes` / `cross_source_chain` / `crowded_candidates` / `chinese_context` | 0–3/5 | ✅ | ✅ | R1/R2/R2b 稳定通过 |
+| `cross_source_chain_negative` | 0/5 | ❌ | ✅ | 关系从句门控修复 |
+| `persisted_two_hop_negative` | 1/5 | ❌ | ✅ | 标点容差 + 无侧车则不强连 |
+| `persisted_two_hop`（正例） | 0/5 | ❌ | ❌ | `requirement_count=2`、`support_count=2`、**`link_count=0`**：模型引用了两条事实但从不提 persisted 链接 |
+| `missing_value_negative` | 5/5 | ✅ | ❌ | 问题含绑定介词 for，门控当时只认关系代词/逗号，过度声明被放过 |
+| `chinese_context_negative` | 0/5 | ❌ | ❌ | 期望 partial 需要模型引用“报名”那条候选；本轮只引用了“里斯本”那条 |
+
+### 21.2 R3：侧车关系改由代码证明
+
+`persisted_two_hop` 的失败不是判定错误，而是**模型没有提出链接**。侧车已存关系（`relation_source_pairs`）
+是请求上下文里的事实，与相邻上下文、显式 mention 同类，因此现在由代码直接建 `persisted_relation` 边；
+**没有该对时跨来源候选绝不连通**，这一点由新增测试
+`test_persisted_relation_edges_require_the_sidecar_pair`（无侧车 → 仍 partial）钉住。
+
+### 21.3 R3b：绑定介词纳入完整性标记
+
+`missing_value_negative` 的问题是 “the storage code **for** the amber key”，唯一候选只说明放在哪个抽屉。
+模型对整条候选声明 direct，而问题既无逗号也无关系代词 → 门控沉默 → 判 sufficient 并返回了
+“drawer three”。现在门控同时识别**绑定介词短语**（for/of/with/about/regarding）：问题的绑定内容必须被
+证据覆盖 → 该用例按期望拒答且证据为空。单子句省略问句（“What color bicycle did I buy?”）不含此类标记，
+行为不变。
+
+### 21.4 测试记账（不是放宽断言）
+
+两个探测脚本测试原本用“`missing_value_negative` 对整条候选声明 direct”来**模拟**坏负例；该过度声明
+现在已被确定性拒绝，模拟不再产生失败，因此改用 `direct_fact_negative`（同一类过度声明，但问题不含
+绑定标记）。**断言完全未变**，包括精确计数与 `insufficient->sufficient` 迁移。
+
+### 21.5 仍未解决的用例与门槛判据问题（需要决策）
+
+`chinese_context_negative` 期望 `partial`，而模型只引用了城市那条候选；要拿到期望的 partial，模型必须
+引用“报名”那条。当前门控把这种过度声明变成**安全的拒答**（insufficient + 空证据），因此该用例失败在
+安全方向。任何确定性规则都无法既命中期望的 partial、又不误杀
+`test_unproven_correction_link_is_rejected` 保护的合法省略回答。
+
+同时记录一个判据层面的发现：planner 请求**已经是 `temperature=0.0`**（`evidence_graph.py`），但
+`missing_value_negative` 在两次运行间翻转（上一轮 5/5 通过、本轮失败），说明**波动来自 Provider 侧**。
+在“5 轮 × 26 例必须全过”的冻结判据下，即使实现完全正确，单例抖动也会让资格门槛以一定概率失败。
+这一点需要在花钱跑五轮之前由用户（或 Codex 评审）决定：接受该判据并按冻结规则承担失败，或事先声明
+调整判据（例如要求逐例在 5 轮中表现一致，而非 130 次全绿），二者都必须**在运行前**记录。
+
+### 21.6 验证与 pin
+
+- RED→GREEN：`test_persisted_relation_pair_connects_without_a_planner_link`、
+  `test_binding_preposition_question_cannot_be_sufficient_without_its_value` 先失败；
+- 全量（临时 `masm_test`）：995 passed / 1 skipped（唯一失败是当时过期的 source digest pin）；
+- ruff、mypy 全绿；套件（fake）26/26、正负各 13/13、零回退；
+- `source_digest` 重新钉为 `944fae8f4e57ec8046474b7e62f6a6453d9cbb8bf920cb9cae140083c6442a80`；
+  probe 未改动（`8cff3fbd…` / `e02b2501…` 不变）。
+
+
 
 
 
