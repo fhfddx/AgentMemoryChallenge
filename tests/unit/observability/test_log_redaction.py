@@ -38,6 +38,35 @@ def test_whitelist_is_explicit() -> None:
     assert not {"content", "prompt", "api_key", "authorization"} & ALLOWED_LOG_FIELDS
 
 
+def test_graph_diagnostics_survive_redaction() -> None:
+    """图路径遥测必须真的出现在日志行里，否则线上无法判定图行为。"""
+    payload = {
+        "request_tag": "a" * 32,
+        "runtime_profile": "official-masm",
+        "graph_enabled": True,
+        "graph_planner_calls": 1,
+        "graph_candidate_count": 2,
+        "graph_requirement_count": 2,
+        "graph_support_count": 2,
+        "graph_link_count": 1,
+        "graph_component_count": 1,
+        "graph_selected_count": 2,
+        "graph_selected_source_count": 2,
+        "graph_state": "sufficient",
+        "graph_fallback": False,
+        "graph_failure_category": "none",
+        "graph_planner_failure_reason": "none",
+        "graph_planner_latency_ms": 1234.5,
+    }
+
+    redacted = redact_fields(payload)
+
+    assert set(payload) <= set(redacted)
+    assert redacted["graph_state"] == "sufficient"
+    assert redacted["graph_planner_failure_reason"] == "none"
+    assert redacted["graph_planner_latency_ms"] == 1234.5
+
+
 def test_nested_structures_are_redacted() -> None:
     payload = {
         "request_id": "r-1",
