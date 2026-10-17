@@ -335,6 +335,42 @@ def _reported_state(state: str) -> "ReportedGraphState":
     return "unknown"
 
 
+def _additive_selection(
+    baseline: SelectionResult,
+    additions: Sequence[RankedEvidence],
+    *,
+    graph_state: "ReportedGraphState",
+    max_selected: int,
+) -> SelectionResult:
+    """加法式合并：冻结 v7 的选择原样保留，图只在其后追加已证明的多跳证据。
+
+    基线在前、追加在后，按 memory_id 去重并受 ``max_selected`` 限制。这样图路径永远不会删掉
+    v7 已选中的证据，因此 direct/atomic 不可能低于图关闭时的水平。
+    """
+    merged: list[RankedEvidence] = list(baseline.evidence)
+    seen = {item.memory_id for item in merged}
+    for item in additions:
+        if len(merged) >= max_selected:
+            break
+        if item.memory_id in seen:
+            continue
+        seen.add(item.memory_id)
+        merged.append(item)
+    sources = {
+        item.request_id or str(item.memory_id) for item in merged
+    }
+    return SelectionResult(
+        evidence=tuple(merged),
+        candidate_count=baseline.candidate_count,
+        source_count=baseline.source_count,
+        selected_source_count=len(sources),
+        fallback=False,
+        abstained=not merged,
+        failure_category="none",
+        evidence_state=graph_state if merged else baseline.evidence_state,
+    )
+
+
 def _merge_links(
     validated: Sequence[ValidatedLink], derived: Sequence[ValidatedLink]
 ) -> tuple[ValidatedLink, ...]:
@@ -360,6 +396,7 @@ class GraphEvidenceSelector:
         *,
         max_candidates: int = DEFAULT_SELECTOR_CANDIDATES,
         max_selected: int = MAX_SELECTED_EVIDENCE,
+        additive: bool = True,
     ) -> None:
         if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
@@ -369,6 +406,7 @@ class GraphEvidenceSelector:
         self._fallback = fallback
         self._max_candidates = max_candidates
         self._max_selected = max_selected
+        self._additive = additive
 
     def select(
         self,
@@ -380,11 +418,17 @@ class GraphEvidenceSelector:
         *,
         request_user_id: str,
     ) -> GraphSelection:
-        """返回经校验组装的原证据；valid insufficient 直接拒答且不回退。"""
+        """返回经校验组装的原证据；加法式模式下冻结 v7 的选择是基线。"""
         scoped_ranked = [item for item in ranked if item.user_id == request_user_id]
         scoped_anchor_ids = {
             item.memory_id for item in scoped_ranked if item.memory_id in strong_anchor_ids
         }
+        # 加法式架构：先拿到冻结 v7 的选择作为基线，图只能在其之上追加已证明的多跳证据。
+        baseline = (
+            self._v7(query, options, scoped_ranked, scoped_anchor_ids)
+            if self._additive
+            else None
+        )
         pool = build_selector_pool(
             scoped_ranked,
             max_candidates=self._max_candidates,
@@ -393,6 +437,17 @@ class GraphEvidenceSelector:
             item.memory_id for item in pool if item.memory_id in strong_anchor_ids
         }
         if not pool:
+            if baseline is not None:
+                return GraphSelection(
+                    baseline,
+                    GraphDiagnostics(
+                        enabled=True,
+                        candidate_count=baseline.candidate_count,
+                        selected_count=len(baseline.evidence),
+                        selected_source_count=baseline.selected_source_count,
+                        state=_reported_state(baseline.evidence_state),
+                    ),
+                )
             return GraphSelection(
                 SelectionResult((), 0, 0, 0, False, True),
                 GraphDiagnostics(enabled=True),
@@ -401,7 +456,11 @@ class GraphEvidenceSelector:
         question, visual, has_text = _question_text(query)
         if visual and not has_text:
             # 纯图片查询没有可供 planner 判断的文本问题：沿用既有 selector/回退路径。
-            selection = self._v7(query, options, scoped_ranked, scoped_anchor_ids)
+            selection = (
+                baseline
+                if baseline is not None
+                else self._v7(query, options, scoped_ranked, scoped_anchor_ids)
+            )
             return GraphSelection(
                 selection,
                 GraphDiagnostics(
@@ -434,6 +493,7 @@ class GraphEvidenceSelector:
                 pool,
                 pool_anchor_ids,
                 "schema_invalid" if category == "planner_invalid" else "planner_unavailable",
+                baseline,
             )
         latency_ms = (perf_counter() - started) * 1000.0
         try:
@@ -456,6 +516,7 @@ class GraphEvidenceSelector:
                     pool,
                     pool_anchor_ids,
                     outcome.reason,
+                    baseline,
                 )
             links = _merge_links(
                 outcome.links,
@@ -488,20 +549,29 @@ class GraphEvidenceSelector:
                 pool,
                 pool_anchor_ids,
                 "internal_error",
+                baseline,
             )
 
         evidence = tuple(view.evidence for view in assembled.selected)
         selected_sources = len({view.source_group for view in assembled.selected})
-        selection = SelectionResult(
-            evidence=evidence,
-            candidate_count=len(pool),
-            source_count=len({view.source_group for view in views}),
-            selected_source_count=selected_sources,
-            fallback=False,
-            abstained=assembled.state == "insufficient" or not evidence,
-            failure_category="none",
-            evidence_state=assembled.state,
-        )
+        if self._additive and baseline is not None:
+            selection = _additive_selection(
+                baseline,
+                evidence if assembled.state == "sufficient" else (),
+                graph_state=assembled.state,
+                max_selected=self._max_selected,
+            )
+        else:
+            selection = SelectionResult(
+                evidence=evidence,
+                candidate_count=len(pool),
+                source_count=len({view.source_group for view in views}),
+                selected_source_count=selected_sources,
+                fallback=False,
+                abstained=assembled.state == "insufficient" or not evidence,
+                failure_category="none",
+                evidence_state=assembled.state,
+            )
         return GraphSelection(
             selection,
             GraphDiagnostics(
@@ -540,8 +610,13 @@ class GraphEvidenceSelector:
         ranked: Sequence[RankedEvidence],
         strong_anchor_ids: Collection[UUID],
         reason: PlannerFailureReason = "none",
+        baseline: SelectionResult | None = None,
     ) -> GraphSelection:
-        selection = self._v7(query, options, ranked, strong_anchor_ids)
+        selection = (
+            baseline
+            if baseline is not None
+            else self._v7(query, options, ranked, strong_anchor_ids)
+        )
         return GraphSelection(
             selection,
             GraphDiagnostics(

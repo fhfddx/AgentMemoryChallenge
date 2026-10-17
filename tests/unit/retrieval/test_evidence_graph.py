@@ -19,7 +19,7 @@ from masm.retrieval.evidence_graph import (
     GraphEvidenceSelector,
     GraphSelection,
 )
-from masm.retrieval.evidence_selector import EvidenceSelector
+from masm.retrieval.evidence_selector import EvidenceSelector, SelectionResult
 from masm.retrieval.reranker import RankedEvidence
 from masm.schemas.content import ImageURLPart
 
@@ -110,6 +110,7 @@ def _selector(llm: FakeStructuredLLM, *, max_candidates: int = 32) -> _RequestSc
     return _RequestScopedSelector(GraphEvidenceSelector(
         EvidenceGraphPlanner(llm, max_candidates=max_candidates),
         EvidenceSelector(llm, max_candidates=max_candidates),
+        additive=False,
     ))
 
 
@@ -880,6 +881,128 @@ def test_unit_free_requirement_is_never_auto_covered() -> None:
     # 代码不得替模型确立这条需求，只能部分返回。
     assert outcome.selection.evidence_state == "partial"
     assert outcome.selection.evidence == (code,)
+
+
+# --- additive mode: the frozen v7 selection is the baseline ------------------------------
+
+
+class _StubBaseline:
+    """冻结 v7 选择的替身：返回固定证据并记录调用次数。"""
+
+    def __init__(self, evidence: tuple[RankedEvidence, ...]) -> None:
+        self._evidence = evidence
+        self.calls = 0
+
+    def select(
+        self,
+        query: object,
+        options: object,
+        ranked: object,
+        strong_anchor_ids: object,
+    ) -> SelectionResult:
+        self.calls += 1
+        return SelectionResult(
+            evidence=self._evidence,
+            candidate_count=len(self._evidence),
+            source_count=len({item.request_id for item in self._evidence}),
+            selected_source_count=len({item.request_id for item in self._evidence}),
+            fallback=False,
+            abstained=not self._evidence,
+            failure_category="none",
+            evidence_state="sufficient" if self._evidence else "insufficient",
+        )
+
+
+def _additive_selector(
+    llm: FakeStructuredLLM, baseline: _StubBaseline
+) -> GraphEvidenceSelector:
+    return GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        baseline,  # type: ignore[arg-type]
+        additive=True,
+    )
+
+
+def test_additive_mode_keeps_the_baseline_and_appends_proven_evidence() -> None:
+    baseline_item = _evidence(1, "source-a", "I stored the amber key in drawer three.")
+    added_item = _evidence(2, "source-b", "The drawer three key is the amber one.")
+    baseline = _StubBaseline((baseline_item,))
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Where did I store the amber key", "location")],
+                supports=[
+                    _support(0, 1, "The drawer three key is the amber one.", "direct")
+                ],
+            )
+        ]
+    )
+
+    outcome = _additive_selector(llm, baseline).select(
+        "Where did I store the amber key?",
+        None,
+        [baseline_item, added_item],
+        _anchors(baseline_item, added_item),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    # 基线原样保留、追加在后，且只调用一次基线选择。
+    assert outcome.selection.evidence == (baseline_item, added_item)
+    assert baseline.calls == 1
+
+
+def test_additive_mode_keeps_the_baseline_when_the_planner_fails() -> None:
+    baseline_item = _evidence(1, "source-a", "I stored the amber key in drawer three.")
+    baseline = _StubBaseline((baseline_item,))
+    llm = FakeStructuredLLM([])
+
+    outcome = _additive_selector(llm, baseline).select(
+        "Where did I store the amber key?",
+        None,
+        [baseline_item],
+        _anchors(baseline_item),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert outcome.selection.evidence == (baseline_item,)
+    assert outcome.graph.fallback is True
+    assert baseline.calls == 1
+
+
+def test_additive_mode_never_appends_partial_graph_evidence() -> None:
+    baseline_item = _evidence(1, "source-a", "I stored the amber key in drawer three.")
+    other_item = _evidence(2, "source-b", "The drawer three key is the amber one.")
+    baseline = _StubBaseline((baseline_item,))
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("Where did I store the amber key", "location"),
+                    _requirement("when did I last use it", "time"),
+                ],
+                supports=[
+                    _support(0, 1, "The drawer three key is the amber one.", "direct")
+                ],
+                links=[],
+            )
+        ]
+    )
+    selector = _additive_selector(llm, baseline)
+
+    outcome = selector.select(
+        "Where did I store the amber key and when did I last use it?",
+        None,
+        [baseline_item, other_item],
+        _anchors(baseline_item, other_item),
+        GraphContext(relation_source_pairs=(("source-a", "source-b"),)),
+        request_user_id="user-1",
+    )
+
+    # 第二个需求没有证据，判定为部分覆盖：部分证据不得追加到基线之后。
+    assert outcome.graph.state == "partial"
+    assert outcome.selection.evidence == (baseline_item,)
 
 
 # --- 3. explicit cross-source chain ------------------------------------------------------

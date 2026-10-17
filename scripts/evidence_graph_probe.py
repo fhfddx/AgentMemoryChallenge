@@ -721,10 +721,15 @@ def run_provider_check(llm: StructuredLLM, output: TextIO) -> int:
 
 
 def run_probe(llm: StructuredLLM, output: TextIO, *, reverse: bool = False) -> int:
-    """执行固定套件；只有全部正负例通过且零回退时才返回 0。"""
+    """执行固定套件；只有全部正负例通过且零回退时才返回 0。
+
+    套件测量的是**图自身**的判定语义，因此显式关闭加法合并：生产路径是"冻结 v7 基线 + 追加"，
+    而这里是"图单独判定"，两者不能混为一谈。
+    """
     selector = GraphEvidenceSelector(
         EvidenceGraphPlanner(llm),
         EvidenceSelector(llm),
+        additive=False,
     )
     cases = list(reversed(CASES)) if reverse else list(CASES)
     passed = 0

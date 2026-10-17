@@ -248,7 +248,7 @@ def test_search_with_graph_mode_issues_exactly_one_planner_call() -> None:
         max_image_bytes=1024,
         selector=EvidenceSelector(llm),
         graph_selector=GraphEvidenceSelector(
-            EvidenceGraphPlanner(llm), EvidenceSelector(llm)
+            EvidenceGraphPlanner(llm), EvidenceSelector(llm), additive=False
         ),
         runtime_profile="official-masm",
     )
@@ -273,7 +273,7 @@ def test_graph_diagnostics_are_content_free(caplog: pytest.LogCaptureFixture) ->
         max_image_bytes=1024,
         selector=EvidenceSelector(llm),
         graph_selector=GraphEvidenceSelector(
-            EvidenceGraphPlanner(llm), EvidenceSelector(llm)
+            EvidenceGraphPlanner(llm), EvidenceSelector(llm), additive=False
         ),
         runtime_profile="official-masm",
     )

@@ -166,6 +166,7 @@ def _service(
     llm: FakeStructuredLLM,
     *,
     graph: bool,
+    additive: bool = False,
 ) -> SearchService:
     retriever = BaselineRetriever(repository, embeddings, DEFAULT_CHANNEL_WEIGHTS)
     selector = EvidenceSelector(llm)
@@ -177,7 +178,11 @@ def _service(
         relevance_gate=RelevanceGate(),
         selector=selector,
         graph_selector=(
-            GraphEvidenceSelector(EvidenceGraphPlanner(llm), selector) if graph else None
+            GraphEvidenceSelector(
+                EvidenceGraphPlanner(llm), selector, additive=additive
+            )
+            if graph
+            else None
         ),
         renderer=EvidenceRenderer(
             repository, asset_store, max_image_bytes=settings.max_image_bytes
@@ -199,6 +204,52 @@ def _cleanup(
 
 def _graph_payload(caplog: pytest.LogCaptureFixture) -> dict[str, Any]:
     return json.loads(caplog.records[-1].message)
+
+
+def test_additive_mode_keeps_v7_selection_and_appends_graph_evidence(
+    database: Database,
+    asset_store: AssetStore,
+    settings: Settings,
+    embeddings: DeterministicFakeEmbeddingProvider,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = MemoryRepository(database)
+    user = _uid("graph-additive")
+    runs: list[tuple[str, str]] = []
+    code_run, code_id = _seed(database, asset_store, settings, embeddings, user, _CODE_TEXT)
+    venue_run, venue_id = _seed(
+        database, asset_store, settings, embeddings, user, _VENUE_TEXT
+    )
+    runs.extend([(code_run, user), (venue_run, user)])
+    _link(database, user, code_id, venue_id)
+    try:
+        llm = _PayloadPlannerLLM(
+            markers=["K7-42", "old cinema"], requirements=_requirements(), link=True
+        )
+        # 先给冻结 v7 的 selection 一个确定性响应（只选第一条），再让 planner 追加两条。
+        llm.queue({"evidence_state": "sufficient", "selected_indices": [0]})
+        service = _service(
+            repository, asset_store, settings, embeddings, llm, graph=True, additive=True
+        )
+        with caplog.at_level(logging.INFO, logger="masm.search"):
+            response = service.search(SearchRequest(query=_QUESTION, user_id=user, top_k=10))
+
+        assert [request.prompt_version for request in llm.requests] == [
+            "evidence-selector-v7",
+            "evidence-graph-planner-v2",
+        ]
+        returned = {item.content for item in response.data}
+        # v7 的基线选择必须保留，图的已证明证据追加在后。
+        assert len(response.data) >= 2
+        assert any(_CODE_TEXT in text for text in returned)
+        assert any(_VENUE_TEXT in text for text in returned)
+
+        payload = _graph_payload(caplog)
+        assert payload["graph_enabled"] is True
+        assert payload["graph_state"] == "sufficient"
+        assert payload["graph_fallback"] is False
+    finally:
+        _cleanup(repository, asset_store, runs)
 
 
 def test_persisted_relation_sidecar_enables_a_cross_source_chain(
