@@ -59,6 +59,11 @@ class Settings:
     embedding_api_key: str = field(default="", repr=False)
     embedding_model: str = "text-embedding-v4"
     embedding_dimensions: int = 1024
+    # 官方规则只要求 Embedding 与 LLM 固定，Reranker 不限制；以下三项齐全才启用 HTTP 重排。
+    rerank_base_url: str = ""
+    rerank_api_key: str = field(default="", repr=False)
+    rerank_model: str = ""
+    rerank_timeout_seconds: float = 10.0
     model_timeout_seconds: float = 30.0
     model_max_attempts: int = 2
     fused_empty_history_text: bool = False
@@ -119,6 +124,15 @@ class Settings:
             raise ValueError("证据图支持上限必须在 1..24 内")
         if not 1 <= self.evidence_graph_max_links <= 24:
             raise ValueError("证据图链接上限必须在 1..24 内")
+        # Reranker 官方不限制：三项要么全空（走词面重排），要么齐全且使用 HTTPS。
+        rerank_fields = (self.rerank_base_url, self.rerank_api_key, self.rerank_model)
+        if any(value.strip() for value in rerank_fields):
+            if not all(value.strip() for value in rerank_fields):
+                raise ValueError("重排 Base URL、API Key 与模型必须同时配置")
+            if urlparse(self.rerank_base_url).scheme.lower() != "https":
+                raise ValueError("重排 Base URL 必须使用 HTTPS")
+            if not math.isfinite(self.rerank_timeout_seconds) or self.rerank_timeout_seconds <= 0:
+                raise ValueError("重排超时必须为有限正数")
         if (
             not math.isfinite(self.evidence_graph_timeout_seconds)
             or not 0.0 < self.evidence_graph_timeout_seconds <= self.model_timeout_seconds
@@ -180,6 +194,10 @@ class Settings:
             embedding_base_url=os.getenv("MASM_EMBEDDING_BASE_URL", ""),
             embedding_api_key=os.getenv("MASM_EMBEDDING_API_KEY", ""),
             embedding_model=os.getenv("MASM_EMBEDDING_MODEL", "text-embedding-v4"),
+        rerank_base_url=os.getenv("MASM_RERANK_BASE_URL", ""),
+        rerank_api_key=os.getenv("MASM_RERANK_API_KEY", ""),
+        rerank_model=os.getenv("MASM_RERANK_MODEL", ""),
+        rerank_timeout_seconds=_float_env("MASM_RERANK_TIMEOUT_SECONDS", 10.0),
             embedding_dimensions=_int_env("MASM_EMBEDDING_DIMENSIONS", 1024),
             model_timeout_seconds=_float_env("MASM_MODEL_TIMEOUT_SECONDS", 30.0),
             model_max_attempts=_int_env("MASM_MODEL_MAX_ATTEMPTS", 2),

@@ -164,3 +164,37 @@ def test_fused_text_flag_is_off_unless_explicitly_enabled(monkeypatch: pytest.Mo
     assert Settings.from_env().fused_empty_history_text is True
     monkeypatch.setenv("MASM_FUSED_EMPTY_HISTORY_TEXT", "true")
     assert Settings.from_env().fused_empty_history_text is False
+
+def test_rerank_configuration_is_all_or_nothing() -> None:
+    settings = _official()
+    settings.validate_runtime()
+    assert settings.rerank_model == ""
+
+    enabled = replace(
+        settings,
+        rerank_base_url="https://dashscope.example",
+        rerank_api_key="rerank-secret",
+        rerank_model="qwen3-rerank",
+    )
+    enabled.validate_runtime()
+
+    with pytest.raises(ValueError):
+        replace(settings, rerank_base_url="https://dashscope.example").validate_runtime()
+    with pytest.raises(ValueError):
+        replace(
+            settings,
+            rerank_base_url="http://dashscope.example",
+            rerank_api_key="rerank-secret",
+            rerank_model="qwen3-rerank",
+        ).validate_runtime()
+
+
+def test_rerank_secrets_are_not_in_repr() -> None:
+    settings = _official()
+    enabled = replace(
+        settings,
+        rerank_base_url="https://dashscope.example",
+        rerank_api_key="super-secret-rerank",
+        rerank_model="qwen3-rerank",
+    )
+    assert "super-secret-rerank" not in repr(enabled)

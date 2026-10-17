@@ -14,7 +14,7 @@ from masm.providers.fakes import DeterministicFakeEmbeddingProvider
 from masm.providers.llm import OpenAICompatibleLLM, StructuredLLM
 from masm.providers.multimodal_embeddings import GroundedMultimodalEmbeddingProvider
 from masm.providers.openai_embeddings import OpenAICompatibleEmbeddingProvider
-from masm.providers.reranker import LexicalReranker
+from masm.providers.reranker import HttpReranker, LexicalReranker
 from masm.retrieval.baseline import BaselineRetriever, load_channel_weights
 from masm.retrieval.evidence_graph import EvidenceGraphPlanner, GraphEvidenceSelector
 from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
@@ -143,7 +143,18 @@ def build_runtime(
             max_image_bytes=settings.max_image_bytes,
         )
         relation_expander = RelationExpander(repository)
-        reranker = EvidenceReranker(provider=LexicalReranker())
+        rerank_provider: LexicalReranker | HttpReranker
+        if settings.rerank_model:
+            # 官方规则不限制 Reranker：三项齐全时用 HTTP 重排，否则退回词面重排。
+            rerank_provider = HttpReranker(
+                base_url=settings.rerank_base_url,
+                api_key=settings.rerank_api_key,
+                model=settings.rerank_model,
+                timeout_seconds=settings.rerank_timeout_seconds,
+            )
+        else:
+            rerank_provider = LexicalReranker()
+        reranker = EvidenceReranker(provider=rerank_provider)
         relevance_gate = RelevanceGate(
             min_lexical_rank=settings.min_lexical_rank,
             min_text_similarity=settings.min_text_similarity,
