@@ -889,11 +889,8 @@ def test_unit_free_requirement_is_never_auto_covered() -> None:
 class _StubBaseline:
     """冻结 v7 选择的替身：返回固定证据并记录调用次数。"""
 
-    def __init__(
-        self, evidence: tuple[RankedEvidence, ...], evidence_state: str | None = None
-    ) -> None:
+    def __init__(self, evidence: tuple[RankedEvidence, ...]) -> None:
         self._evidence = evidence
-        self._evidence_state = evidence_state
         self.calls = 0
 
     def select(
@@ -912,11 +909,7 @@ class _StubBaseline:
             fallback=False,
             abstained=not self._evidence,
             failure_category="none",
-            evidence_state=(
-                self._evidence_state
-                if self._evidence_state is not None
-                else ("sufficient" if self._evidence else "insufficient")
-            ),
+            evidence_state="sufficient" if self._evidence else "insufficient",
         )
 
 
@@ -1011,90 +1004,6 @@ def test_additive_mode_never_appends_partial_graph_evidence() -> None:
     assert outcome.graph.state == "partial"
     assert outcome.selection.evidence == (baseline_item,)
 
-
-# --- conservative abstention: partial baseline plus an unproven graph refuses ------------
-
-
-def test_partial_baseline_is_withheld_when_the_graph_cannot_prove_completeness() -> None:
-    baseline_item = _evidence(1, "source-a", "The amber key matters to me.")
-    baseline = _StubBaseline((baseline_item,), evidence_state="partial")
-    llm = FakeStructuredLLM(
-        [
-            _proposal(
-                requirements=[
-                    _requirement("Where did I store the amber key", "location"),
-                    _requirement("when did I last use it", "time"),
-                ],
-                supports=[_support(0, 0, "The amber key matters to me.", "context")],
-            )
-        ]
-    )
-
-    outcome = _additive_selector(llm, baseline).select(
-        "Where did I store the amber key and when did I last use it?",
-        None,
-        [baseline_item],
-        _anchors(baseline_item),
-        GraphContext(),
-        request_user_id="user-1",
-    )
-
-    # 唯一被 context 级支持的第二个需求未覆盖 → 图判定 insufficient（非 sufficient），因此拒答。
-    assert outcome.graph.state == "insufficient"
-    assert outcome.selection.evidence == ()
-    assert outcome.selection.abstained is True
-
-
-def test_partial_baseline_is_kept_when_the_graph_proves_sufficiency() -> None:
-    baseline_item = _evidence(1, "source-a", "I stored the amber key in drawer three.")
-    baseline = _StubBaseline((baseline_item,), evidence_state="partial")
-    llm = FakeStructuredLLM(
-        [
-            _proposal(
-                requirements=[_requirement("Where did I store the amber key", "location")],
-                supports=[
-                    _support(0, 0, "I stored the amber key in drawer three.", "direct")
-                ],
-            )
-        ]
-    )
-
-    outcome = _additive_selector(llm, baseline).select(
-        "Where did I store the amber key?",
-        None,
-        [baseline_item],
-        _anchors(baseline_item),
-        GraphContext(),
-        request_user_id="user-1",
-    )
-
-    # 图证明完备时绝不因 v7 的 partial 标签而压掉证据。
-    assert outcome.graph.state == "sufficient"
-    assert outcome.selection.evidence == (baseline_item,)
-
-
-def test_sufficient_baseline_is_never_withheld() -> None:
-    baseline_item = _evidence(1, "source-a", "The amber key matters to me.")
-    baseline = _StubBaseline((baseline_item,), evidence_state="sufficient")
-    llm = FakeStructuredLLM(
-        [
-            _proposal(
-                requirements=[_requirement("Where did I store the amber key", "location")],
-                supports=[_support(0, 0, "The amber key matters to me.", "context")],
-            )
-        ]
-    )
-
-    outcome = _additive_selector(llm, baseline).select(
-        "Where did I store the amber key?",
-        None,
-        [baseline_item],
-        _anchors(baseline_item),
-        GraphContext(),
-        request_user_id="user-1",
-    )
-
-    assert outcome.selection.evidence == (baseline_item,)
 
 # --- 3. explicit cross-source chain ------------------------------------------------------
 

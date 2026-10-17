@@ -561,19 +561,6 @@ class GraphEvidenceSelector:
                 graph_state=assembled.state,
                 max_selected=self._max_selected,
             )
-            # 保守拒答（加法式、图保护）：v7 只给出 partial 证据，且图也无法证明完备时，
-            # 这段证据不足以支撑作答，返回空。图一旦证明 sufficient 就保留证据，从而保护可回答问题。
-            if baseline.evidence_state == "partial" and assembled.state != "sufficient":
-                selection = SelectionResult(
-                    evidence=(),
-                    candidate_count=selection.candidate_count,
-                    source_count=selection.source_count,
-                    selected_source_count=0,
-                    fallback=False,
-                    abstained=True,
-                    failure_category="none",
-                    evidence_state="insufficient",
-                )
         else:
             selection = SelectionResult(
                 evidence=evidence,
