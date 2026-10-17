@@ -44,7 +44,6 @@ def assemble(
     question_units: frozenset[str] = frozenset(),
     requirement_units: Sequence[frozenset[str]] = (),
     tighten_completeness: bool = False,
-    expand_source_window: bool = False,
 ) -> AssemblyOutcome:
     """从已校验的支持与链接推导三态并选出证据。
 
@@ -54,10 +53,6 @@ def assemble(
     ``tighten_completeness`` 只在问题含子句边界标记时为真：此时需求引文自身的区分单元也必须
     被已选证据覆盖，否则该需求不算被覆盖。单子句问题（例如 "What color bicycle did I buy?"）
     的省略回答（"No, I bought the red one."）不在此列，必须继续被判为完整。
-
-    ``expand_source_window`` 在来源上下文可用时为真：选定分量内与已选节点同源的候选会被一并
-    返回（受 ``max_selected`` 限制，冲突对除外）。同源即同一段对话，这一包含关系由 provenance
-    证明；没有它，原子多部分问题会比冻结 v7 少回证据。
     """
     if requirement_count < 1:
         return AssemblyOutcome("insufficient", (), 0)
@@ -110,11 +105,6 @@ def assemble(
         unclaimed -= units
 
     resolved = _conflicts_are_resolved(covered, supports, candidates)
-    conflict_nodes = {
-        node
-        for pair in _stored_conflict_pairs(supports, candidates)
-        for node in pair
-    }
 
     choice_lists = [(requirement, covering[requirement]) for requirement in covered]
     combinations = _combinations(choice_lists)
@@ -145,17 +135,6 @@ def assemble(
             question_units=question_units,
             max_selected=max_selected,
         )
-        if expand_source_window:
-            included = _deduplicate(
-                _expand_source_window(
-                    included,
-                    component_nodes=set(components[component_index]),
-                    candidates=candidates,
-                    conflict_nodes=conflict_nodes,
-                    max_selected=max_selected,
-                ),
-                candidates,
-            )
         if len(included) > max_selected:
             continue
         evidence_units = _grounded_units(included, candidates)
@@ -219,17 +198,6 @@ def assemble(
             interpretive_pairs=interpretive_pairs,
             max_selected=max_selected,
         )
-    if expand_source_window:
-        included = _deduplicate(
-            _expand_source_window(
-                included,
-                component_nodes=component_nodes,
-                candidates=candidates,
-                conflict_nodes=conflict_nodes,
-                max_selected=max_selected,
-            ),
-            candidates,
-        )
     evidence_units = _grounded_units(included, candidates)
     if unclaimed - set(evidence_units):
         return AssemblyOutcome("insufficient", (), len(components))
@@ -243,36 +211,6 @@ def assemble(
     if not remaining:
         return AssemblyOutcome("insufficient", (), len(components))
     return AssemblyOutcome("partial", _selected(included, candidates), len(components))
-
-
-def _expand_source_window(
-    included: set[int],
-    *,
-    component_nodes: set[int],
-    candidates: Sequence[CandidateView],
-    conflict_nodes: set[int],
-    max_selected: int,
-) -> set[int]:
-    """把选定分量内与已选节点同源的候选一并纳入（受上限限制，冲突对除外）。
-
-    同源即同一段对话：这一包含关系由 provenance 直接证明，不属于跨来源推断。没有它，模型只引用
-    其中一条时，原子多部分问题会比冻结 v7 少回证据。
-    """
-    sources = {
-        candidates[node].source_group
-        for node in included
-        if candidates[node].source_group
-    }
-    if not sources:
-        return included
-    for node in sorted(component_nodes):
-        if len(included) >= max_selected:
-            break
-        if node in included or node in conflict_nodes:
-            continue
-        if candidates[node].source_group in sources:
-            included.add(node)
-    return included
 
 
 def _requirement_is_grounded(
