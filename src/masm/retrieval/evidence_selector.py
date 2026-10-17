@@ -66,6 +66,16 @@ _PROMPT = (
     "return evidence_state=insufficient together with a non-empty selected_indices."
 )
 
+# 图路径开启时追加的选择指引：只影响"跨会话取齐"和"证据不足时拒答"两件事。
+# 关闭图路径时 prompt_suffix 为空，选择器提示词逐字不变。
+GRAPH_SELECTION_SUFFIX = (
+    " When the requested fact is spread over more than one session, select the evidence from "
+    "each session that directly states its own part, even when no single session states "
+    "everything. Report insufficient when no candidate directly states the requested fact for "
+    "the exact requested subject; never treat a related entity, a different subject or a "
+    "different attribute as the requested fact."
+)
+
 
 class EvidenceSelection(BaseModel):
     """The model returns a three-state judgement plus indices, never an answer.
@@ -199,6 +209,7 @@ class EvidenceSelector:
         max_selected: int = MAX_SELECTED_EVIDENCE,
         max_chars_per_candidate: int = DEFAULT_MAX_CHARS_PER_CANDIDATE,
         timeout_seconds: float = 30.0,
+        prompt_suffix: str = "",
     ) -> None:
         if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
@@ -213,6 +224,7 @@ class EvidenceSelector:
         self._max_selected = max_selected
         self._max_chars_per_candidate = max_chars_per_candidate
         self._timeout_seconds = timeout_seconds
+        self._prompt = _PROMPT + (prompt_suffix or "")
 
     def select(
         self,
@@ -303,7 +315,7 @@ class EvidenceSelector:
         try:
             output = self._llm.complete_json(
                 ModelRequest(
-                    prompt=_PROMPT,
+                    prompt=self._prompt,
                     payload=payload,
                     model=self._llm.model,
                     prompt_version=PROMPT_VERSION,

@@ -591,3 +591,27 @@ def test_deterministic_selector_passes_through_existing_local_fake_results() -> 
     assert result.evidence == ranked
     assert result.fallback is False
     assert result.abstained is False
+
+def test_graph_prompt_suffix_is_opt_in_and_verbatim_by_default() -> None:
+    from masm.retrieval.evidence_selector import GRAPH_SELECTION_SUFFIX
+
+    item = _evidence(1, "source-a", "Alice bought a blue notebook")
+    plain_llm = FakeStructuredLLM(
+        [{"selected_indices": [0], "sufficient_evidence": True}]
+    )
+    EvidenceSelector(plain_llm).select(
+        "What did Alice buy?", None, [item], {item.memory_id}
+    )
+    suffixed_llm = FakeStructuredLLM(
+        [{"selected_indices": [0], "sufficient_evidence": True}]
+    )
+    EvidenceSelector(suffixed_llm, prompt_suffix=GRAPH_SELECTION_SUFFIX).select(
+        "What did Alice buy?", None, [item], {item.memory_id}
+    )
+
+    plain = plain_llm.requests[-1].prompt
+    suffixed = suffixed_llm.requests[-1].prompt
+    assert not plain.endswith(GRAPH_SELECTION_SUFFIX)
+    assert "spread over more than one session" not in plain
+    assert suffixed == plain + GRAPH_SELECTION_SUFFIX
+    assert plain_llm.requests[-1].prompt_version == suffixed_llm.requests[-1].prompt_version
