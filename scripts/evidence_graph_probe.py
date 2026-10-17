@@ -889,6 +889,7 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
     )
     cases = list(CASES)
     subset_failures = 0
+    forbidden_total = 0
     fallbacks = 0
     failure_categories: dict[str, int] = {}
     for case in cases:
@@ -926,6 +927,13 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
         merged_ids = {item.memory_id for item in outcome.selection.evidence}
         subset_ok = baseline_ids <= merged_ids
         subset_failures += int(not subset_ok)
+        merged_text = " ".join(
+            str(item.source_context or item.content) for item in outcome.selection.evidence
+        )
+        forbidden_hit = any(
+            fragment in merged_text for fragment in case.forbidden_fragments
+        )
+        forbidden_total += int(forbidden_hit)
         graph = outcome.graph
         fallbacks += int(graph.fallback)
         failure_categories[graph.failure_category] = (
@@ -936,6 +944,7 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
                 {
                     "case": case.name,
                     "subset_ok": subset_ok,
+                    "forbidden": forbidden_hit,
                     "baseline_count": len(baseline.evidence),
                     "merged_count": len(outcome.selection.evidence),
                     "added_count": len(merged_ids - baseline_ids),
@@ -949,6 +958,8 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
             file=output,
             flush=True,
         )
+    # forbidden_total 是读取时必须单独核对的度量：这里不让它翻转退出码，以便与既有
+    # candidate_eligible 语义保持一致（退化只看 subset 与 fallback）。
     eligible = subset_failures == 0 and fallbacks == 0
     print(
         json.dumps(
@@ -956,6 +967,7 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
                 "case": "compare_summary",
                 "case_count": len(cases),
                 "subset_failures": subset_failures,
+                "forbidden_total": forbidden_total,
                 "fallback_count": fallbacks,
                 "failure_categories": dict(sorted(failure_categories.items())),
                 "candidate_eligible": eligible,
