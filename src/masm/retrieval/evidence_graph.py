@@ -31,6 +31,7 @@ from masm.retrieval.evidence_graph_rules import (
     RequirementKind,
     SupportRole,
     ValidatedLink,
+    absent_name_tokens,
     attested_units,
     bounded_persisted_pairs,
     candidate_views,
@@ -314,6 +315,7 @@ class GraphDiagnostics:
     fallback: bool = False
     failure_category: GraphFailureCategory = "none"
     planner_failure_reason: PlannerFailureReason = "none"
+    vetoed: bool = False
     planner_latency_ms: float = 0.0
 
 
@@ -554,13 +556,31 @@ class GraphEvidenceSelector:
 
         evidence = tuple(view.evidence for view in assembled.selected)
         selected_sources = len({view.source_group for view in assembled.selected})
+        # R10：问题点名的主体（名字样记号）在整个候选池里从未出现时，池内证据答非所问，直接拒答。
+        absent_names = (
+            absent_name_tokens(question, [view.text for view in views])
+            if self._additive and baseline is not None
+            else frozenset()
+        )
         if self._additive and baseline is not None:
-            selection = _additive_selection(
-                baseline,
-                evidence if assembled.state == "sufficient" else (),
-                graph_state=assembled.state,
-                max_selected=self._max_selected,
-            )
+            if absent_names:
+                selection = SelectionResult(
+                    evidence=(),
+                    candidate_count=baseline.candidate_count,
+                    source_count=baseline.source_count,
+                    selected_source_count=0,
+                    fallback=False,
+                    abstained=True,
+                    failure_category="none",
+                    evidence_state="insufficient",
+                )
+            else:
+                selection = _additive_selection(
+                    baseline,
+                    evidence if assembled.state == "sufficient" else (),
+                    graph_state=assembled.state,
+                    max_selected=self._max_selected,
+                )
         else:
             selection = SelectionResult(
                 evidence=evidence,
@@ -587,6 +607,7 @@ class GraphEvidenceSelector:
                 state=assembled.state,
                 fallback=False,
                 failure_category="none",
+                vetoed=bool(absent_names),
                 planner_latency_ms=latency_ms,
             ),
         )

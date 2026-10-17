@@ -57,6 +57,7 @@ ALLOWED_LOG_FIELDS = frozenset(
         "graph_fallback",
         "graph_failure_category",
         "graph_planner_failure_reason",
+        "graph_vetoed",
         "graph_planner_latency_ms",
         "channel",
         "model_name",

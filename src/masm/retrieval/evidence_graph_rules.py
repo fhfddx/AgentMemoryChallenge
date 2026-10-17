@@ -99,6 +99,10 @@ _STRUCTURAL_TOKENS = frozenset(
 _LATIN_TOKEN = re.compile(r"[a-z0-9][a-z0-9'\-]*")
 _CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 _DIGITS = re.compile(r"[0-9]+")
+# 原始问题里的"名字样"记号：允许词内大写、数字、连字符与下划线。
+_NAME_LIKE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]*")
+_NAME_PART = re.compile(r"[A-Za-z0-9]+")
+_NAME_PART_MIN_CHARS = 4
 
 
 def normalize_text(text: str) -> str:
@@ -196,6 +200,34 @@ def discriminative_units(text: str) -> frozenset[str]:
                 if not _generic_cjk_unit(unit):
                     units.add(unit)
     return frozenset(units)
+
+
+def absent_name_tokens(question: str, pool_texts: Sequence[str]) -> frozenset[str]:
+    """问题中的"名字样"记号若在整个候选池中从未出现，则池内证据回答不了这个问题。
+
+    只看名字（含数字或词内大写）：普通内容词换一种说法就可能不在池里，据此拒答会误伤可回答问题；
+    而一个问题点名的主体若在池里根本不存在，任何"同属性、不同主体"的证据都答非所问。
+    """
+
+    normalized_pool = " ".join(normalize_text(text) for text in pool_texts)
+    absent: set[str] = set()
+    for match in _NAME_LIKE.finditer(unicodedata.normalize("NFKC", question)):
+        token = match.group()
+        if len(token) < _NAME_PART_MIN_CHARS:
+            continue
+        if not (any(char.isdigit() for char in token) or any(char.isupper() for char in token[1:])):
+            continue
+        parts = [
+            normalize_text(part)
+            for part in _NAME_PART.findall(token)
+            if len(part) >= _NAME_PART_MIN_CHARS
+        ]
+        if not parts:
+            continue
+        if any(part in normalized_pool for part in parts):
+            continue
+        absent.add(normalize_text(token))
+    return frozenset(absent)
 
 
 def shared_discriminative_unit(

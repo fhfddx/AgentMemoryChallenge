@@ -14,6 +14,7 @@ from masm.retrieval.evidence_graph import (
 from masm.retrieval.evidence_graph_rules import (
     CandidateView,
     ValidationOutcome,
+    absent_name_tokens,
     candidate_views,
     discriminative_units,
     grounded_quote,
@@ -490,3 +491,25 @@ def test_shared_mention_requires_both_quotes_to_be_grounded() -> None:
         ],
     )
     assert _validate(proposal, question=question, views=views).links == ()
+
+def test_absent_name_tokens_flags_a_subject_missing_from_the_pool() -> None:
+    pool = (
+        "the access code for item-42 locker is code-7",
+        "my sister maya works at the office-9",
+    )
+
+    assert absent_name_tokens(
+        "What is the access code for the lockB-77 locker?", pool
+    ) == frozenset({"lockb-77"})
+
+
+def test_absent_name_tokens_ignores_present_names_and_plain_words() -> None:
+    pool = (
+        "the access code for item-42 locker is code-7",
+        "my sister maya works at the office-9",
+    )
+
+    # 池里存在的名字、以及没有任何"名字样"特征的问题都不触发。
+    assert absent_name_tokens("What is the code for item-42?", pool) == frozenset()
+    assert absent_name_tokens("What is the access code for the locker?", pool) == frozenset()
+    assert absent_name_tokens("Which city hosts the workshop?", pool) == frozenset()

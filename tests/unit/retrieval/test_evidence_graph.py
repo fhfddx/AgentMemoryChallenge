@@ -1005,6 +1005,59 @@ def test_additive_mode_never_appends_partial_graph_evidence() -> None:
     assert outcome.selection.evidence == (baseline_item,)
 
 
+# --- R10: refuse when the named subject is absent from the whole candidate pool ----------
+
+
+def test_additive_mode_refuses_when_the_named_subject_is_absent() -> None:
+    stored = _evidence(1, "source-a", "The access code for the item-42 locker is code-7.")
+    baseline = _StubBaseline((stored,))
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("What is the access code", "location")],
+                supports=[_support(0, 0, "The access code for the item-42 locker", "direct")],
+            )
+        ]
+    )
+
+    outcome = _additive_selector(llm, baseline).select(
+        "What is the access code for the lockB-77 locker?",
+        None,
+        [stored],
+        _anchors(stored),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert outcome.graph.vetoed is True
+    assert outcome.selection.evidence == ()
+    assert outcome.selection.abstained is True
+
+
+def test_additive_mode_keeps_evidence_for_a_present_named_subject() -> None:
+    stored = _evidence(1, "source-a", "The access code for the item-42 locker is code-7.")
+    baseline = _StubBaseline((stored,))
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("What is the access code", "location")],
+                supports=[_support(0, 0, "The access code for the item-42 locker", "direct")],
+            )
+        ]
+    )
+
+    outcome = _additive_selector(llm, baseline).select(
+        "What is the access code for the item-42 locker?",
+        None,
+        [stored],
+        _anchors(stored),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert outcome.graph.vetoed is False
+    assert outcome.selection.evidence == (stored,)
+
 # --- 3. explicit cross-source chain ------------------------------------------------------
 
 
