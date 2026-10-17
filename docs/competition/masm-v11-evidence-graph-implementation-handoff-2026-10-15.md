@@ -1146,6 +1146,56 @@ Retrieval 已达 100（direct 100、atomic 100），总分 30.77 与历史最佳
 **Retrieval 从 66.67 提到 100、总分 23.08 提到 30.77**（与历史最佳持平），且 direct/atomic 双 100；
 `multi_session` 与 `abstention` 未改善，两个进一步尝试（R6/R6b 来源窗口、证明式否决）均被官方结果否决并已撤销。
 
+## 33. 第三次尝试（判官式否决）与 abstention 的收尾（`4e5e919`）
+
+### 33.1 机制
+
+官方总分权重由三次实测反推确认：`total = (3 × retrieval + 9 × abstention + 1 × relational) / 13`
+（`100/0/11.11 → 30.77`、`66.67/0/11.11 → 23.08`、`100/0/22.22 → 38.46`），即 **abstention 占 9/13**。
+前一次否决失败于 planner 的结构性判定在"答案存在"的原子问题上不可靠，因此改为**专用二值判官**：
+仅在 planner 判定非 `sufficient` 且当前有证据时调用一次，问"这些证据是否陈述了所请求的事实"；
+判 `false` 才压掉基线；判官不可用/输出非法/未配置 → 保留证据（安全默认）。
+
+### 33.2 真实 Provider 验证（约 90 次调用，未花官方 Smoke）
+
+```
+compare_exit = 0     subset_failures = 0     fallback_count = 0
+judge_calls = 4      judge_failures = {}     veto_count = 0
+positives_ok = True  （13 个正例基线证据一条不少）
+```
+
+判官被调用的 4 个存疑用例全部被判"已回答"：
+
+| 用例 | 状态 | 期望 | 判官结论 |
+| --- | --- | --- | --- |
+| `two_attributes_negative` | partial | partial（限制证据） | 接受 |
+| `persisted_two_hop_negative` | partial | partial（限制证据） | 接受 |
+| `cross_source_chain_negative` | insufficient | **拒答** | 接受 ✗ |
+| `chinese_context_negative` | insufficient | **拒答** | 接受 ✗ |
+
+按运行前固定的规则（`veto_count ≥ 1` 才进官方），**该 Smoke 未执行**，判官层已撤销（`4e5e919`）。
+
+### 33.3 结论：abstention 不再由本设计推进
+
+三次尝试的官方/实测结果：
+
+| 尝试 | 机制 | 结果 |
+| --- | --- | --- |
+| R6/R6b | 同源窗口连接与补全 | 官方 7.69、direct 0 → 撤销 |
+| 证明式否决 | planner 判定不足即压掉基线 | 官方 23.08、atomic 50 → 撤销 |
+| 判官式否决 | 专用模型判官读证据后决定 | 合成套件零误伤但 **veto_count=0**，不花 Smoke → 撤销 |
+
+即：**读证据的专用模型判官在这些形状上仍判"已回答"**，说明此处需要的判别力不是"对已选证据做一次提示词判断"能提供的；
+剩余缺口来自冻结 v7 的拒答行为，超出本设计范围。按第 31.3 节的停止规则，abstention 的优化到此为止。
+
+### 33.4 最终交付状态
+
+- 代码：`4e5e919`（撤销判官，与 `ea91b37` 的加法式状态逐字节一致）；
+- 线上：加法式镜像 `a4ade0d` + 两个开关打开 = 实测最优（总分 30.77、Retrieval 100）；
+- 官方结论：**Retrieval 66.67 → 100、总分 23.08 → 30.77**；`multi_session 0`、`abstention 11.11` 未改善；
+- 全部证据与每次运行前的判读规则记录在第 16–33 节。
+
+
 
 
 
