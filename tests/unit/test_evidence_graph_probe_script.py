@@ -25,6 +25,53 @@ def _run(llm: FakeStructuredLLM) -> tuple[int, list[dict]]:
     return code, _rows(output)
 
 
+def test_compare_mode_proves_the_additive_path_never_shrinks_the_baseline() -> None:
+    class _CompareLLM(FakeStructuredLLM):
+        """按调用顺序服务两种提示：v7 选择固定返回首条，planner 返回该例的脚本提案。"""
+
+        def __init__(self) -> None:
+            super().__init__([], model="gpt-4o-mini")
+            self._index = -1
+
+        def complete_json(self, request: object, output_type: object) -> object:
+            version = getattr(request, "prompt_version", "")
+            if version == probe.PROMPT_VERSION:
+                self._index += 1
+                self.queue(dict(CASES[self._index].proposal))
+            elif version == "evidence-selector-v7":
+                self.queue({"evidence_state": "sufficient", "selected_indices": [0]})
+            return super().complete_json(request, output_type)
+
+    output = io.StringIO()
+    code = probe.run_compare(_CompareLLM(), output)
+
+    rows = _rows(output)
+    summary = rows[-1]
+    assert summary["case"] == "compare_summary"
+    assert summary["case_count"] == len(CASES)
+    assert summary["subset_failures"] == 0
+    assert summary["fallback_count"] == 0
+    assert summary["candidate_eligible"] is True
+    assert code == 0
+    assert all(row["subset_ok"] for row in rows[:-1])
+
+
+def test_compare_summary_fields_are_content_free() -> None:
+    rendered = json.dumps(
+        {
+            "case": "compare_summary",
+            "case_count": len(CASES),
+            "subset_failures": 0,
+            "fallback_count": 0,
+            "failure_categories": {"none": len(CASES)},
+            "candidate_eligible": True,
+        },
+        sort_keys=True,
+    )
+    for secret in ("amber key", "drawer three", "Zephyr", "琥珀", "工作坊"):
+        assert secret not in rendered
+
+
 def test_case_table_is_fixed_and_paired_with_valid_proposals() -> None:
     assert len(CASES) >= 20
     assert len({case.name for case in CASES}) == len(CASES)

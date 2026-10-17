@@ -874,6 +874,100 @@ def run_stability_probe(llm: StructuredLLM, output: TextIO) -> int:
     return 0 if eligible else 1
 
 
+def run_compare(llm: StructuredLLM, output: TextIO) -> int:
+    """逐例证明加法式路径不退化：冻结 v7 的返回必须被加法式返回整体包含。
+
+    每例先跑冻结 v7 selector（一次调用），再跑加法式图路径（v7 + planner，两次调用）。
+    ``subset_ok`` 为真表示该例上"图开启"返回的证据包含"图关闭"返回的全部证据，即
+    direct/atomic 不可能因开启图而退化；``fallback`` 与 ``failure_category`` 一并输出。
+    """
+    frozen = EvidenceSelector(llm)
+    additive = GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        EvidenceSelector(llm),
+        additive=True,
+    )
+    cases = list(CASES)
+    subset_failures = 0
+    fallbacks = 0
+    failure_categories: dict[str, int] = {}
+    for case in cases:
+        ranked = _ranked(case)
+        anchors = {item.memory_id for item in ranked}
+        context = GraphContext(
+            relation_source_pairs=case.context_pairs,
+            source_context_enabled=case.source_context,
+        )
+        try:
+            baseline = frozen.select(case.question, case.options, ranked, anchors)
+            outcome = additive.select(
+                case.question,
+                case.options,
+                ranked,
+                anchors,
+                context,
+                request_user_id=_USER,
+            )
+        except Exception:
+            subset_failures += 1
+            failure_categories["probe_error"] = (
+                failure_categories.get("probe_error", 0) + 1
+            )
+            print(
+                json.dumps(
+                    {"case": case.name, "subset_ok": False, "failure_category": "probe_error"},
+                    sort_keys=True,
+                ),
+                file=output,
+                flush=True,
+            )
+            continue
+        baseline_ids = {item.memory_id for item in baseline.evidence}
+        merged_ids = {item.memory_id for item in outcome.selection.evidence}
+        subset_ok = baseline_ids <= merged_ids
+        subset_failures += int(not subset_ok)
+        graph = outcome.graph
+        fallbacks += int(graph.fallback)
+        failure_categories[graph.failure_category] = (
+            failure_categories.get(graph.failure_category, 0) + 1
+        )
+        print(
+            json.dumps(
+                {
+                    "case": case.name,
+                    "subset_ok": subset_ok,
+                    "baseline_count": len(baseline.evidence),
+                    "merged_count": len(outcome.selection.evidence),
+                    "added_count": len(merged_ids - baseline_ids),
+                    "graph_state": graph.state,
+                    "fallback": graph.fallback,
+                    "failure_category": graph.failure_category,
+                    "planner_failure_reason": graph.planner_failure_reason,
+                },
+                sort_keys=True,
+            ),
+            file=output,
+            flush=True,
+        )
+    eligible = subset_failures == 0 and fallbacks == 0
+    print(
+        json.dumps(
+            {
+                "case": "compare_summary",
+                "case_count": len(cases),
+                "subset_failures": subset_failures,
+                "fallback_count": fallbacks,
+                "failure_categories": dict(sorted(failure_categories.items())),
+                "candidate_eligible": eligible,
+            },
+            sort_keys=True,
+        ),
+        file=output,
+        flush=True,
+    )
+    return 0 if eligible else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
@@ -887,6 +981,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--provider-check",
         action="store_true",
         help="Run one planner call and report only safe Provider failure metadata",
+    )
+    mode.add_argument(
+        "--compare",
+        action="store_true",
+        help=(
+            "Prove that the additive path never returns less than the frozen v7 selector "
+            "on every fixed case"
+        ),
     )
     args = parser.parse_args(argv)
     logging.disable(logging.CRITICAL)
@@ -910,6 +1012,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             if args.provider_check:
                 return run_provider_check(llm, sys.stdout)
+            if args.compare:
+                return run_compare(llm, sys.stdout)
             if args.stability:
                 return run_stability_probe(llm, sys.stdout)
             return run_probe(llm, sys.stdout, reverse=args.reverse)
