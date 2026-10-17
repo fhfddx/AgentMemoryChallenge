@@ -314,7 +314,6 @@ class GraphDiagnostics:
     fallback: bool = False
     failure_category: GraphFailureCategory = "none"
     planner_failure_reason: PlannerFailureReason = "none"
-    vetoed: bool = False
     planner_latency_ms: float = 0.0
 
 
@@ -529,21 +528,16 @@ class GraphEvidenceSelector:
                 ),
             )
             frequencies = unit_frequencies(views)
-            question_units = attested_units(question, frequencies)
-            requirement_units = tuple(
-                attested_units(quote, frequencies) for quote in outcome.requirements
-            )
-            unclaimed = set(question_units)
-            for units in requirement_units:
-                unclaimed -= units
             assembled = assemble(
                 requirement_count=len(outcome.requirements),
                 supports=outcome.supports,
                 links=links,
                 candidates=views,
                 max_selected=self._max_selected,
-                question_units=question_units,
-                requirement_units=requirement_units,
+                question_units=attested_units(question, frequencies),
+                requirement_units=tuple(
+                    attested_units(quote, frequencies) for quote in outcome.requirements
+                ),
                 tighten_completeness=question_has_clause_marker(question),
             )
         except Exception:
@@ -560,27 +554,7 @@ class GraphEvidenceSelector:
 
         evidence = tuple(view.evidence for view in assembled.selected)
         selected_sources = len({view.source_group for view in assembled.selected})
-        # 证明式否决：只有"提案有效 + 问题被完整分解 + 没有任何需求被覆盖 + 基线非空"才拒绝基线。
-        # 这是唯一能在加法式架构下提高 abstention 的确定性手段；任一条件不满足都退回纯加法行为。
-        vetoed = (
-            self._additive
-            and baseline is not None
-            and bool(baseline.evidence)
-            and assembled.state == "insufficient"
-            and not unclaimed
-        )
-        if vetoed and baseline is not None:
-            selection = SelectionResult(
-                evidence=(),
-                candidate_count=baseline.candidate_count,
-                source_count=baseline.source_count,
-                selected_source_count=0,
-                fallback=False,
-                abstained=True,
-                failure_category="none",
-                evidence_state="insufficient",
-            )
-        elif self._additive and baseline is not None:
+        if self._additive and baseline is not None:
             selection = _additive_selection(
                 baseline,
                 evidence if assembled.state == "sufficient" else (),
@@ -613,7 +587,6 @@ class GraphEvidenceSelector:
                 state=assembled.state,
                 fallback=False,
                 failure_category="none",
-                vetoed=vetoed,
                 planner_latency_ms=latency_ms,
             ),
         )
