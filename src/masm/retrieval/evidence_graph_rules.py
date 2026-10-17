@@ -400,6 +400,24 @@ def _adjacent_same_source(
     return abs(left.source_position - right.source_position) == 1
 
 
+def _same_source_context_pair(
+    left: CandidateView, right: CandidateView, *, source_context_enabled: bool
+) -> bool:
+    """同源上下文连接：相邻消息之间，或 context 粒度候选与其来源消息之间。
+
+    ``context`` 粒度候选是整段来源的派生记忆、本身没有位置信息，但它与同一 request 的消息之间
+    的包含关系由 provenance 直接证明——这是连接类型 1 的组成部分，不是语义猜测。
+    """
+    if not source_context_enabled:
+        return False
+    if not left.request_id or left.request_id != right.request_id:
+        return False
+    if _adjacent_same_source(left, right, source_context_enabled=source_context_enabled):
+        return True
+    granules = {left.granularity, right.granularity}
+    return "context" in granules and "message" in granules
+
+
 def derived_links(
     question: str,
     candidates: Sequence[CandidateView],
@@ -421,7 +439,9 @@ def derived_links(
     links: list[ValidatedLink] = []
     for position, left in enumerate(candidates):
         for right in candidates[position + 1:]:
-            if _adjacent_same_source(left, right, source_context_enabled=source_context_enabled):
+            if _same_source_context_pair(
+                left, right, source_context_enabled=source_context_enabled
+            ):
                 links.append(
                     ValidatedLink(
                         left_index=left.index,

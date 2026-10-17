@@ -478,6 +478,7 @@ class GraphEvidenceSelector:
                     attested_units(quote, frequencies) for quote in outcome.requirements
                 ),
                 tighten_completeness=question_has_clause_marker(question),
+                expand_source_window=context.source_context_enabled,
             )
         except Exception:
             return self._fallback_selection(
