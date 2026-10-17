@@ -102,7 +102,17 @@ _DIGITS = re.compile(r"[0-9]+")
 # 原始问题里的"名字样"记号：允许词内大写、数字、连字符与下划线。
 _NAME_LIKE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]*")
 _NAME_PART = re.compile(r"[A-Za-z0-9]+")
+# 句中大写但通常不是"主体名"的词：据此拒答只会误伤可回答问题。
+_NAME_DENYLIST = frozenset(
+    {
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+        "january", "february", "march", "april", "may", "june", "july", "august",
+        "september", "october", "november", "december", "i", "what", "when", "where",
+        "which", "who", "why", "how", "the", "a", "an", "my", "our", "please",
+    }
+)
 _NAME_PART_MIN_CHARS = 4
+_NAME_STEM_MIN_CHARS = 5
 
 
 def normalize_text(text: str) -> str:
@@ -202,6 +212,17 @@ def discriminative_units(text: str) -> frozenset[str]:
     return frozenset(units)
 
 
+def _part_is_name_shaped(part: str) -> bool:
+    """名字的一部分是否带"名字"特征：数字、词内大写或首字母大写（且不在停用词表内）。"""
+
+    if part.casefold() in _NAME_DENYLIST:
+        return False
+    return (
+        any(char.isdigit() for char in part)
+        or any(char.isupper() for char in part[1:])
+        or part[0].isupper()
+    )
+
 def absent_name_tokens(question: str, pool_texts: Sequence[str]) -> frozenset[str]:
     """问题中的"名字样"记号若在整个候选池中从未出现，则池内证据回答不了这个问题。
 
@@ -215,16 +236,18 @@ def absent_name_tokens(question: str, pool_texts: Sequence[str]) -> frozenset[st
         token = match.group()
         if len(token) < _NAME_PART_MIN_CHARS:
             continue
-        if not (any(char.isdigit() for char in token) or any(char.isupper() for char in token[1:])):
+        if not _part_is_name_shaped(token):
             continue
-        parts = [
+        # 只看名字样的部分：共享的修饰词（例如都含 office）不得把缺失的主体说成存在；
+        # 任一名模样部分（>=5 字符）在整个池中缺失，即判定这个名字未被存过。
+        name_parts = [
             normalize_text(part)
             for part in _NAME_PART.findall(token)
-            if len(part) >= _NAME_PART_MIN_CHARS
+            if len(part) >= _NAME_STEM_MIN_CHARS and _part_is_name_shaped(part)
         ]
-        if not parts:
+        if not name_parts:
             continue
-        if any(part in normalized_pool for part in parts):
+        if all(part in normalized_pool for part in name_parts):
             continue
         absent.add(normalize_text(token))
     return frozenset(absent)

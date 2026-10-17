@@ -101,7 +101,7 @@ def run_probe(
     item = f"Item-{run_tag}"
     sister = f"Sister-{run_tag}"
     office = f"Office-{run_tag}"
-    absent_subject = f"AbsentSubject-{run_tag}"
+    absent_subject = f"AbsentSubject-{uuid4().hex[:8]}"
     brother = f"Brother-{run_tag}"
     topic = f"Topic-{run_tag}"
 

@@ -513,3 +513,14 @@ def test_absent_name_tokens_ignores_present_names_and_plain_words() -> None:
     assert absent_name_tokens("What is the code for item-42?", pool) == frozenset()
     assert absent_name_tokens("What is the access code for the locker?", pool) == frozenset()
     assert absent_name_tokens("Which city hosts the workshop?", pool) == frozenset()
+
+def test_absent_name_tokens_uses_name_parts_not_shared_modifiers() -> None:
+    pool = ("The Lisbon-office contact is Ana.",)
+
+    # 共享修饰词 office 已存在，但主体 Porto 缺失，仍须判定为无法回答。
+    assert absent_name_tokens(
+        "Which office is the Porto-office contact for?", pool
+    ) == frozenset({"porto-office"})
+    assert absent_name_tokens("Which office is the Lisbon-office contact for?", pool) == frozenset()
+    # 日历与代词不是主体名，不得据此拒答。
+    assert absent_name_tokens("What did I file on Monday?", pool) == frozenset()
