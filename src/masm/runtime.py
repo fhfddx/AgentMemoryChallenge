@@ -17,11 +17,7 @@ from masm.providers.openai_embeddings import OpenAICompatibleEmbeddingProvider
 from masm.providers.reranker import LexicalReranker
 from masm.retrieval.baseline import BaselineRetriever, load_channel_weights
 from masm.retrieval.evidence_graph import EvidenceGraphPlanner, GraphEvidenceSelector
-from masm.retrieval.evidence_selector import (
-    GRAPH_SELECTION_SUFFIX,
-    DeterministicEvidenceSelector,
-    EvidenceSelector,
-)
+from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
@@ -160,9 +156,6 @@ def build_runtime(
                 max_selected=settings.selector_max_selected,
                 max_chars_per_candidate=settings.selector_max_chars_per_candidate,
                 timeout_seconds=settings.selector_timeout_seconds,
-                prompt_suffix=(
-                    GRAPH_SELECTION_SUFFIX if settings.evidence_graph_enabled else ""
-                ),
             )
             if settings.evidence_graph_enabled:
                 # 图路径复用同一个 v7 selector 作为唯一回退；默认档位完全不构造它。
