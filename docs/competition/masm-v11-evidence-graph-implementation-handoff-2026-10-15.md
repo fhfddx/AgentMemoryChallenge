@@ -1195,6 +1195,48 @@ positives_ok = True  （13 个正例基线证据一条不少）
 - 官方结论：**Retrieval 66.67 → 100、总分 23.08 → 30.77**；`multi_session 0`、`abstention 11.11` 未改善；
 - 全部证据与每次运行前的判读规则记录在第 16–33 节。
 
+## 34. 第四次尝试（答案抽取式判官）与四种机制的包围结论（`8b640d9`）
+
+### 34.1 机制
+
+前三次的失败模式指向任务本身：让模型"判断证据够不够"过于宽松。改为让模型**用证据回答问题并逐字复制答案**，
+再由代码做确定性校验：答案能在证据里 grounding → 保留；返回 `null` 或答案在证据中无原文 → 拒答；
+调用或 schema 失败 → 保留。判官在**每个可能返回证据的加法搜索**上都被询问（不再只在 planner 存疑时），
+以覆盖 planner 判为 `sufficient` 的 abstention 问题。
+
+### 34.2 真实 Provider 测量（未花官方 Smoke）
+
+```
+compare_exit = 0   subset_failures = 0   fallback_count = 0
+judge_calls = 19   judge_failures = {}   veto_count = 4
+vetoed = two_attributes, two_attributes_negative, persisted_two_hop, persisted_two_hop_negative
+```
+
+**`vetoed` 含两个正例**（`two_attributes`、`persisted_two_hop`），违反运行前固定的"不得否决任何正例"条件，
+因此该 Smoke 未执行。原因是结构性的：答案抽取只能给出**一个**逐字答案，而这两类正例是**多部分**问题
+（一次问两个属性、或需要两跳组合证据），模型只能返回 `null` → 误拒。
+
+### 34.3 四种机制的包围结论
+
+| 机制 | 判定依据 | 失败模式 |
+| --- | --- | --- |
+| planner 的 `insufficient` 判定 | 官方运行 | 压掉答案存在的原子问题（atomic 100 → 50） |
+| 专用 yes/no 判官 | 合成套件实测 | 一律判"已回答"（`veto_count=0`） |
+| 支持文本抽取判官 | 合成套件实测 | 同上，任何相关段落都能满足 |
+| 答案抽取 + grounding 校验 | 合成套件实测 | 否决多部分正例（`two_attributes`、`persisted_two_hop`） |
+
+四种机制从两侧夹住了问题：**宽松侧**一律接受、无法提高 abstention；**严格侧**会拒掉多部分问题，
+而"多部分问题"正是本设计要服务的形状。根因是数据集的 `abstention` 与"部分证据"之间的区别是**语义的**：
+`two_attributes` 与其负例结构完全相同、期望完全相反，确定性规则无法区分，单次提示词判断也无法校准。
+
+### 34.4 剩余的唯一杠杆（需用户决策）
+
+历史上观测到 `abstention 22.22`（`total 38.46`）的那次配置，机制在**冻结 v1.0 selector 的输出校验/规范化**
+（"保守规范化"），不在图路径。要继续推进 abstention，唯一有历史证据的杠杆是**解冻并修改 v1.0 的选择器输出校验**——
+这会改变产生 Retrieval=100 的那个组件，风险是整个 Retrieval 增益的来路。此事超出原定"不改 v1.0"的约束，
+需用户明确授权后才能动。
+
+
 
 
 
