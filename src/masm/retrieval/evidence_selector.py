@@ -66,14 +66,12 @@ _PROMPT = (
     "return evidence_state=insufficient together with a non-empty selected_indices."
 )
 
-# 图路径开启时追加的选择指引：只影响"跨会话取齐"和"证据不足时拒答"两件事。
+# 图路径开启时追加的选择指引：只加"证据不足时拒答"这一条（只会让选择器少选，不可能新增禁用片段）。
 # 关闭图路径时 prompt_suffix 为空，选择器提示词逐字不变。
 GRAPH_SELECTION_SUFFIX = (
-    " When the requested fact is spread over more than one session, select the evidence from "
-    "each session that directly states its own part, even when no single session states "
-    "everything. Report insufficient when no candidate directly states the requested fact for "
-    "the exact requested subject; never treat a related entity, a different subject or a "
-    "different attribute as the requested fact."
+    " Report insufficient when no candidate directly states the requested fact for the exact "
+    "requested subject; never treat a related entity, a different subject or a different "
+    "attribute as the requested fact."
 )
 
 

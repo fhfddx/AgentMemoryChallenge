@@ -612,6 +612,6 @@ def test_graph_prompt_suffix_is_opt_in_and_verbatim_by_default() -> None:
     plain = plain_llm.requests[-1].prompt
     suffixed = suffixed_llm.requests[-1].prompt
     assert not plain.endswith(GRAPH_SELECTION_SUFFIX)
-    assert "spread over more than one session" not in plain
+    assert "Report insufficient when no candidate directly states" not in plain
     assert suffixed == plain + GRAPH_SELECTION_SUFFIX
     assert plain_llm.requests[-1].prompt_version == suffixed_llm.requests[-1].prompt_version
