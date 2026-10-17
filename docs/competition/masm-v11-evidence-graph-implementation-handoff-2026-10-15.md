@@ -1072,6 +1072,44 @@ forbidden_evidence_total=0
 任一指标低于图关闭配置的历史值（总分 30.77、direct 100、atomic 100、abstention 11.11）→ 回滚并记录；
 `multi_session` 仍为 0 则如实记录——加法式架构本次只保证不退化并提供追加增益的机会。
 
+## 31. 下一目标 abstention = 22.22：证明式否决及其边界（运行前记录）
+
+### 31.1 目标与机制
+
+Retrieval 已达 100（direct 100、atomic 100），总分 30.77 与历史最佳持平；新目标为
+`abstention` 由 11.11 提到 22.22。加法层只会增加证据，因此必须给它一个极窄的**否决权**：
+
+四个条件同时成立才拒绝返回基线——(1) 加法模式且基线非空；(2) 提案有效（无回退/失败类别）；
+(3) 装配判定 `insufficient`；(4) 问题被完整分解（Rule A 的 `unclaimed` 为空）。
+任一不满足即退回纯加法行为。否决时返回空证据并在遥测里输出 `graph_vetoed`。
+
+### 31.2 真实 Provider 逐例验证（78 次调用）
+
+`--compare`：`compare_exit=0`、`subset_ok=true` **26/26**、`subset_failures=0`、`fallback_count=0`、
+`veto_count=2`，两次否决分别命中 `cross_source_chain_negative` 与 `chinese_context_negative`（均为应拒答用例），
+**13 个正例全部保留基线证据**。
+
+负例分布（同一次运行）：
+
+| 形状 | 用例数 | 结论 |
+| --- | --- | --- |
+| `baseline=0`（v7 已拒答） | 7 | 图无可作为 |
+| `state=partial` 且 `baseline≥1` | 2 | 用例期望就是 partial，放宽否决会破坏期望并误伤可回答问题 → 不放宽 |
+| `state=sufficient` 且 `baseline≥1` | 2 | 期望状态即 sufficient（只限制证据内容）→ 不该否决 |
+| `state=insufficient` 且 `baseline≥1` | 2 | **2/2 被否决** ✓ |
+
+### 31.3 决策与停止规则
+
+否决权保持当前最小形状，**不再放宽**：放宽等于用已达成的 Retrieval=100 去赌 abstention，而负例分布
+显示官方 abstention 的缺口不在这类形状里（v7 在 7/13 负例上本来就拒答）。
+
+官方 Smoke 判读（运行前固定）：
+- `abstention ≥ 22.22` 且 `Retrieval = 100` → 新目标达成；
+- `abstention = 11.11` 且 `Retrieval = 100` → **停止在图路径上继续追 abstention**：记录"图路径（含最小否决权）
+  不改变 abstention"的结论，因为剩余缺口来自冻结 v7 的拒答行为，不属于本设计可变范围；
+- 任一指标低于 30.77 配置的历史值 → 回滚并记录。
+
+
 
 
 
