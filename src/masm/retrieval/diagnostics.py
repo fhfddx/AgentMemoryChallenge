@@ -21,8 +21,7 @@ _GRAPH_FAILURES = frozenset(
 _GRAPH_PLANNER_FAILURE_REASONS = frozenset(
     {
         "none",
-        "schema_invalid",
-        "planner_unavailable",
+        "schema_invalid",        "planner_unavailable",
         "internal_error",
         "candidate_scope_mismatch",
         "empty_requirements",
@@ -38,6 +37,8 @@ _GRAPH_PLANNER_FAILURE_REASONS = frozenset(
     }
 )
 _TAG_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+# 判官失败类别：只有这两个取值（外加 none），其它一律折叠为 unknown。
+_GREPH_JUDGE_FAILURES = frozenset({"none", "judge_unavailable", "judge_invalid"})
 
 
 @dataclass(frozen=True)
@@ -75,6 +76,9 @@ class SearchDiagnostics:
     graph_fallback: bool = False
     graph_failure_category: str = "none"
     graph_planner_failure_reason: str = "none"
+    graph_judge_calls: int = 0
+    graph_judge_failure_category: str = "none"
+    graph_vetoed: bool = False
     graph_planner_latency_ms: float = 0.0
 
 
@@ -137,6 +141,13 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
             if value.graph_planner_failure_reason in _GRAPH_PLANNER_FAILURE_REASONS
             else "unknown"
         ),
+        "graph_judge_calls": max(0, int(value.graph_judge_calls)),
+        "graph_judge_failure_category": (
+            value.graph_judge_failure_category
+            if value.graph_judge_failure_category in _GREPH_JUDGE_FAILURES
+            else "unknown"
+        ),
+        "graph_vetoed": bool(value.graph_vetoed),
         "graph_planner_latency_ms": round(max(0.0, float(value.graph_planner_latency_ms)), 2),
     }
     _LOGGER.info(

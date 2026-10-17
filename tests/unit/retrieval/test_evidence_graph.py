@@ -19,6 +19,7 @@ from masm.retrieval.evidence_graph import (
     GraphEvidenceSelector,
     GraphSelection,
 )
+from masm.retrieval.evidence_judge import JudgeOutcome
 from masm.retrieval.evidence_selector import EvidenceSelector, SelectionResult
 from masm.retrieval.reranker import RankedEvidence
 from masm.schemas.content import ImageURLPart
@@ -1002,6 +1003,131 @@ def test_additive_mode_never_appends_partial_graph_evidence() -> None:
 
     # 第二个需求没有证据，判定为部分覆盖：部分证据不得追加到基线之后。
     assert outcome.graph.state == "partial"
+    assert outcome.selection.evidence == (baseline_item,)
+
+
+# --- judge: consulted only on doubt, never withholds on its own failure ------------------
+
+
+class _StubJudge:
+    """判官替身：记录调用次数并返回预设结论。"""
+
+    def __init__(self, answers: bool, failure_category: str = "none") -> None:
+        self._answers = answers
+        self._failure_category = failure_category
+        self.calls = 0
+
+    def judge(self, question: str, evidence: tuple[str, ...]) -> JudgeOutcome:
+        self.calls += 1
+        return JudgeOutcome(self._answers, self._failure_category)
+
+
+def _judge_selector(
+    llm: FakeStructuredLLM, baseline: _StubBaseline, judge: _StubJudge
+) -> GraphEvidenceSelector:
+    return GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        baseline,  # type: ignore[arg-type]
+        additive=True,
+        judge=judge,  # type: ignore[arg-type]
+    )
+
+
+def _doubtful_proposal() -> dict[str, object]:
+    return _proposal(
+        requirements=[_requirement("Where did I store the amber key", "location")],
+        supports=[_support(0, 0, "The amber key matters to me.", "context")],
+    )
+
+
+def test_judge_vetoes_when_it_rejects_the_selected_evidence() -> None:
+    baseline_item = _evidence(1, "source-a", "The amber key matters to me.")
+    baseline = _StubBaseline((baseline_item,))
+    judge = _StubJudge(False)
+    llm = FakeStructuredLLM([_doubtful_proposal()])
+
+    outcome = _judge_selector(llm, baseline, judge).select(
+        "Where did I store the amber key?",
+        None,
+        [baseline_item],
+        _anchors(baseline_item),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert judge.calls == 1
+    assert outcome.graph.judge_calls == 1
+    assert outcome.graph.vetoed is True
+    assert outcome.selection.evidence == ()
+    assert outcome.selection.abstained is True
+
+
+def test_judge_keeps_the_evidence_when_it_accepts_it() -> None:
+    baseline_item = _evidence(1, "source-a", "The amber key matters to me.")
+    baseline = _StubBaseline((baseline_item,))
+    judge = _StubJudge(True)
+    llm = FakeStructuredLLM([_doubtful_proposal()])
+
+    outcome = _judge_selector(llm, baseline, judge).select(
+        "Where did I store the amber key?",
+        None,
+        [baseline_item],
+        _anchors(baseline_item),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert judge.calls == 1
+    assert outcome.graph.vetoed is False
+    assert outcome.selection.evidence == (baseline_item,)
+
+
+def test_judge_failure_keeps_the_evidence() -> None:
+    baseline_item = _evidence(1, "source-a", "The amber key matters to me.")
+    baseline = _StubBaseline((baseline_item,))
+    judge = _StubJudge(False, "judge_unavailable")
+    llm = FakeStructuredLLM([_doubtful_proposal()])
+
+    outcome = _judge_selector(llm, baseline, judge).select(
+        "Where did I store the amber key?",
+        None,
+        [baseline_item],
+        _anchors(baseline_item),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert outcome.graph.judge_failure_category == "judge_unavailable"
+    assert outcome.graph.vetoed is False
+    assert outcome.selection.evidence == (baseline_item,)
+
+
+def test_judge_is_not_consulted_for_confident_answers() -> None:
+    baseline_item = _evidence(1, "source-a", "I stored the amber key in drawer three.")
+    baseline = _StubBaseline((baseline_item,))
+    judge = _StubJudge(False)
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Where did I store the amber key", "location")],
+                supports=[
+                    _support(0, 0, "I stored the amber key in drawer three.", "direct")
+                ],
+            )
+        ]
+    )
+
+    outcome = _judge_selector(llm, baseline, judge).select(
+        "Where did I store the amber key?",
+        None,
+        [baseline_item],
+        _anchors(baseline_item),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert judge.calls == 0
+    assert outcome.graph.judge_calls == 0
     assert outcome.selection.evidence == (baseline_item,)
 
 
