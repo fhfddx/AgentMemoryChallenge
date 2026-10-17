@@ -1046,6 +1046,33 @@ forbidden_evidence_total=0
 
 由 `2a19007`（仅判据修正）重跑一次五轮门槛；通过后，官方 Smoke 的时间由用户在冷却窗口内决定。
 
+## 30. Smoke 前验证全部通过（`f0f400d`）
+
+三步严谨化流程的前两步均已在真实 Provider 上通过，第三步（官方 Smoke）等用户确认冷却窗口。
+
+### 30.1 两步结果
+
+| 步骤 | 命令 | 结果 |
+| --- | --- | --- |
+| 1 无回归证明 | `python - --compare`（78 次调用） | `compare_exit=0`、`subset_ok: true` = **26/26**、零回退——真实模型下加法式返回**从未**少于冻结 v7 |
+| 2 五轮稳定性门槛 | `--stability --criterion amended`（130 次调用） | `amended_candidate_eligible=true`：`minimum_per_round=24`、`rounds_meeting_minimum=5`、`cases_meeting_minimum=24/24`、`forbidden_evidence_total=0` |
+
+`probe_exit_code=1` 仍是**冻结全绿信号**未达成（两个豁免负例在安全方向失败），合格结论依据第 22 节预注册、经用户批准、并在第 29 节按推导修正阈值的修正判据。
+
+### 30.2 候选与线上状态
+
+- 候选镜像 `masm-v11-final-candidate:a4ade0d`（加法式架构），仅替换 API；
+- 线上 `graph_flag=1`、`context_flag=1`、`health=healthy`、`restarts=0`、`masm-v11-postgres-1` 容器 ID 未变；
+- `src/masm` 与 probe 自 `a4ade0d` 起未变，三个 pin 有效（`probe_blob=fafa1d13…`、`probe_sha256=41f088d4…`、
+  `source_digest=30704a51…`）。
+
+### 30.3 第三步：官方 Smoke（待用户确认时机）
+
+判读规则（与第 29 节一致，运行前固定）：`Retrieval = 100`（direct 100 + atomic 100）→ 目标达成；
+任一指标低于图关闭配置的历史值（总分 30.77、direct 100、atomic 100、abstention 11.11）→ 回滚并记录；
+`multi_session` 仍为 0 则如实记录——加法式架构本次只保证不退化并提供追加增益的机会。
+
+
 
 
 
