@@ -19,6 +19,7 @@ from masm.retrieval.evidence_graph import (
     GraphEvidenceSelector,
     GraphSelection,
 )
+from masm.retrieval.evidence_judge import JudgeOutcome
 from masm.retrieval.evidence_selector import EvidenceSelector, SelectionResult
 from masm.retrieval.reranker import RankedEvidence
 from masm.schemas.content import ImageURLPart
@@ -1004,6 +1005,147 @@ def test_additive_mode_never_appends_partial_graph_evidence() -> None:
     assert outcome.graph.state == "partial"
     assert outcome.selection.evidence == (baseline_item,)
 
+
+# --- judge: answer-extraction guard on additive searches --------------------------------
+
+
+class _StubJudge:
+    """判官替身：记录调用次数并返回预设结论。"""
+
+    def __init__(self, supported: bool, failure_category: str = "none") -> None:
+        self._supported = supported
+        self._failure_category = failure_category
+        self.calls = 0
+
+    def judge(self, question: str, evidence: tuple[str, ...]) -> JudgeOutcome:
+        self.calls += 1
+        return JudgeOutcome(self._supported, self._failure_category)
+
+
+def _judge_selector(
+    llm: FakeStructuredLLM, baseline: _StubBaseline, judge: _StubJudge
+) -> GraphEvidenceSelector:
+    return GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        baseline,  # type: ignore[arg-type]
+        additive=True,
+        judge=judge,  # type: ignore[arg-type]
+    )
+
+
+def test_judge_withholds_the_baseline_when_no_answer_can_be_copied() -> None:
+    baseline_item = _evidence(1, "source-a", "The amber key matters to me.")
+    baseline = _StubBaseline((baseline_item,))
+    judge = _StubJudge(False)
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Where did I store the amber key", "location")],
+                supports=[_support(0, 0, "The amber key matters to me.", "context")],
+            )
+        ]
+    )
+
+    outcome = _judge_selector(llm, baseline, judge).select(
+        "Where did I store the amber key?",
+        None,
+        [baseline_item],
+        _anchors(baseline_item),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert judge.calls == 1
+    assert outcome.graph.judge_calls == 1
+    assert outcome.selection.evidence == ()
+    assert outcome.selection.abstained is True
+    assert outcome.selection.evidence_state == "insufficient"
+
+
+def test_judge_keeps_the_baseline_when_an_answer_is_grounded() -> None:
+    baseline_item = _evidence(1, "source-a", "I stored the amber key in drawer three.")
+    baseline = _StubBaseline((baseline_item,))
+    judge = _StubJudge(True)
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Where did I store the amber key", "location")],
+                supports=[
+                    _support(0, 0, "I stored the amber key in drawer three.", "direct")
+                ],
+            )
+        ]
+    )
+
+    outcome = _judge_selector(llm, baseline, judge).select(
+        "Where did I store the amber key?",
+        None,
+        [baseline_item],
+        _anchors(baseline_item),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    # 即使是 planner 判定 sufficient 的自信回答，判官也照常被问一次并保留证据。
+    assert judge.calls == 1
+    assert outcome.selection.evidence == (baseline_item,)
+
+
+def test_judge_failure_keeps_the_baseline() -> None:
+    baseline_item = _evidence(1, "source-a", "The amber key matters to me.")
+    baseline = _StubBaseline((baseline_item,))
+    judge = _StubJudge(False, "judge_unavailable")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Where did I store the amber key", "location")],
+                supports=[_support(0, 0, "The amber key matters to me.", "context")],
+            )
+        ]
+    )
+
+    outcome = _judge_selector(llm, baseline, judge).select(
+        "Where did I store the amber key?",
+        None,
+        [baseline_item],
+        _anchors(baseline_item),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert outcome.graph.judge_failure_category == "judge_unavailable"
+    assert outcome.selection.evidence == (baseline_item,)
+
+
+def test_judge_is_not_consulted_without_additive_mode() -> None:
+    baseline_item = _evidence(1, "source-a", "The amber key matters to me.")
+    baseline = _StubBaseline((baseline_item,))
+    judge = _StubJudge(False)
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("Where did I store the amber key", "location")],
+                supports=[_support(0, 0, "The amber key matters to me.", "context")],
+            )
+        ]
+    )
+
+    selector = GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        baseline,  # type: ignore[arg-type]
+        additive=False,
+        judge=judge,  # type: ignore[arg-type]
+    )
+    selector.select(
+        "Where did I store the amber key?",
+        None,
+        [baseline_item],
+        _anchors(baseline_item),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert judge.calls == 0
 
 # --- 3. explicit cross-source chain ------------------------------------------------------
 

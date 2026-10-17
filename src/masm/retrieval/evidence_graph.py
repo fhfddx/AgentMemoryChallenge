@@ -40,6 +40,7 @@ from masm.retrieval.evidence_graph_rules import (
     unit_frequencies,
     validate_proposal,
 )
+from masm.retrieval.evidence_judge import EvidenceSufficiencyJudge
 from masm.retrieval.evidence_selector import (
     DEFAULT_MAX_CHARS_PER_CANDIDATE,
     MAX_CHARS_PER_CANDIDATE,
@@ -314,6 +315,9 @@ class GraphDiagnostics:
     fallback: bool = False
     failure_category: GraphFailureCategory = "none"
     planner_failure_reason: PlannerFailureReason = "none"
+    judge_calls: int = 0
+    judge_failure_category: str = "none"
+    vetoed: bool = False
     planner_latency_ms: float = 0.0
 
 
@@ -397,6 +401,7 @@ class GraphEvidenceSelector:
         max_candidates: int = DEFAULT_SELECTOR_CANDIDATES,
         max_selected: int = MAX_SELECTED_EVIDENCE,
         additive: bool = True,
+        judge: EvidenceSufficiencyJudge | None = None,
     ) -> None:
         if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
@@ -407,6 +412,7 @@ class GraphEvidenceSelector:
         self._max_candidates = max_candidates
         self._max_selected = max_selected
         self._additive = additive
+        self._judge = judge
 
     def select(
         self,
@@ -572,6 +578,35 @@ class GraphEvidenceSelector:
                 failure_category="none",
                 evidence_state=assembled.state,
             )
+        # 答案抽取式守卫：每次加法搜索只要可能返回证据就问一次"能否从证据里逐字抄出答案"。
+        # 判官返回 null 或答案在证据里无原文 → 拒答；判官失败 → 保留证据（安全默认）。
+        judge_calls = 0
+        judge_category = "none"
+        if (
+            self._judge is not None
+            and self._additive
+            and baseline is not None
+            and selection.evidence
+        ):
+            judge_calls = 1
+            verdict = self._judge.judge(
+                question,
+                tuple(
+                    str(item.source_context or item.content) for item in selection.evidence
+                ),
+            )
+            judge_category = verdict.failure_category
+            if judge_category == "none" and not verdict.supported:
+                selection = SelectionResult(
+                    evidence=(),
+                    candidate_count=selection.candidate_count,
+                    source_count=selection.source_count,
+                    selected_source_count=0,
+                    fallback=False,
+                    abstained=True,
+                    failure_category="none",
+                    evidence_state="insufficient",
+                )
         return GraphSelection(
             selection,
             GraphDiagnostics(
@@ -587,6 +622,8 @@ class GraphEvidenceSelector:
                 state=assembled.state,
                 fallback=False,
                 failure_category="none",
+                judge_calls=judge_calls,
+                judge_failure_category=judge_category,
                 planner_latency_ms=latency_ms,
             ),
         )

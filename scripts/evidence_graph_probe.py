@@ -27,6 +27,7 @@ from masm.retrieval.evidence_graph import (
     GraphEvidenceSelector,
     GraphSelection,
 )
+from masm.retrieval.evidence_judge import EvidenceSufficiencyJudge
 from masm.retrieval.evidence_selector import EvidenceSelector
 from masm.retrieval.reranker import RankedEvidence
 
@@ -886,11 +887,14 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
         EvidenceGraphPlanner(llm),
         EvidenceSelector(llm),
         additive=True,
+        judge=EvidenceSufficiencyJudge(llm),
     )
     cases = list(CASES)
     subset_failures = 0
+    vetoes = 0
     fallbacks = 0
     failure_categories: dict[str, int] = {}
+    judge_failures: dict[str, int] = {}
     for case in cases:
         ranked = _ranked(case)
         anchors = {item.memory_id for item in ranked}
@@ -924,9 +928,16 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
             continue
         baseline_ids = {item.memory_id for item in baseline.evidence}
         merged_ids = {item.memory_id for item in outcome.selection.evidence}
-        subset_ok = baseline_ids <= merged_ids
-        subset_failures += int(not subset_ok)
         graph = outcome.graph
+        # 判官拒答是唯一被允许的"比基线更少证据"的情形：必须基线非空且判官未失败。
+        vetoed = bool(baseline.evidence) and not outcome.selection.evidence
+        vetoes += int(vetoed)
+        subset_ok = baseline_ids <= merged_ids or vetoed
+        subset_failures += int(not subset_ok)
+        if graph.judge_failure_category != "none":
+            judge_failures[graph.judge_failure_category] = (
+                judge_failures.get(graph.judge_failure_category, 0) + 1
+            )
         fallbacks += int(graph.fallback)
         failure_categories[graph.failure_category] = (
             failure_categories.get(graph.failure_category, 0) + 1
@@ -943,6 +954,9 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
                     "fallback": graph.fallback,
                     "failure_category": graph.failure_category,
                     "planner_failure_reason": graph.planner_failure_reason,
+                    "vetoed": vetoed,
+                    "judge_calls": graph.judge_calls,
+                    "judge_failure_category": graph.judge_failure_category,
                 },
                 sort_keys=True,
             ),
@@ -956,6 +970,8 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
                 "case": "compare_summary",
                 "case_count": len(cases),
                 "subset_failures": subset_failures,
+                "veto_count": vetoes,
+                "judge_failures": dict(sorted(judge_failures.items())),
                 "fallback_count": fallbacks,
                 "failure_categories": dict(sorted(failure_categories.items())),
                 "candidate_eligible": eligible,
