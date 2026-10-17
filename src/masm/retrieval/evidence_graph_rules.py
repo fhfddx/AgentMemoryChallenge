@@ -212,6 +212,15 @@ def discriminative_units(text: str) -> frozenset[str]:
     return frozenset(units)
 
 
+def _is_name_part(part: str) -> bool:
+    """判定用的名字部分：字母部分需 >=5 字符，纯数字部分 2 位即可（如 item-47 的 47）。"""
+
+    if not part:
+        return False
+    if part.isdigit():
+        return len(part) >= 2
+    return len(part) >= _NAME_STEM_MIN_CHARS
+
 def _part_is_name_shaped(part: str, *, sentence_initial: bool = False) -> bool:
     """名字的一部分是否带"名字"特征：数字、词内大写，或非句首的首字母大写；且不在小词表内。"""
 
@@ -251,7 +260,7 @@ def absent_name_tokens(question: str, pool_texts: Sequence[str]) -> frozenset[st
         name_parts = [
             normalize_text(part)
             for part in _NAME_PART.findall(token)
-            if len(part) >= _NAME_STEM_MIN_CHARS
+            if _is_name_part(part)
             and _part_is_name_shaped(part, sentence_initial=sentence_initial)
         ]
         if not name_parts:

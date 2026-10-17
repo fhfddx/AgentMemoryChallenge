@@ -524,3 +524,14 @@ def test_absent_name_tokens_uses_name_parts_not_shared_modifiers() -> None:
     assert absent_name_tokens("Which office is the Lisbon-office contact for?", pool) == frozenset()
     # 日历与代词不是主体名，不得据此拒答。
     assert absent_name_tokens("What did I file on Monday?", pool) == frozenset()
+
+def test_absent_name_tokens_uses_numeric_parts_for_short_names() -> None:
+    pool = ("The access code for the item-42 locker is code-7.",)
+
+    # 区分部分是短数字时也要判定：item-47 未存、item-42 已存。
+    assert absent_name_tokens(
+        "What is the code for the item-47 locker?", pool
+    ) == frozenset({"item-47"})
+    assert absent_name_tokens("What is the code for the item-42 locker?", pool) == frozenset()
+    # 整词仍要求 4 字符：极短数字不会被当成名字。
+    assert absent_name_tokens("List my 3 most recent notes.", pool) == frozenset()
