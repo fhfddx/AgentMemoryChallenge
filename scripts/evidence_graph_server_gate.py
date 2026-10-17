@@ -758,8 +758,8 @@ def _verify_candidate(
 
 # 运行前预注册的修正判据（交接文档第 22 节）：planner 已经是 temperature=0.0，但 Provider 侧仍存在
 # 不可消除的抖动，且有两个负例的期望状态取决于模型判断。判据因此改为：逐例（两个豁免用例除外）
-# 五轮中至少四轮通过、每轮至少 25/26 通过，并且任何一轮都不得出现 forbidden_evidence_selected。
-_AMENDED_MIN_CASES_PER_ROUND = 25
+# 五轮中至少四轮通过、每轮至少（用例总数 − 豁免数）通过，并且任何一轮都不得出现
+# forbidden_evidence_selected。每轮下限由数据推导，避免与豁免数量自相矛盾。
 _AMENDED_MIN_ROUNDS_PER_CASE = 4
 _AMENDED_EXEMPT_CASES = frozenset({"missing_value_negative", "chinese_context_negative"})
 
@@ -815,13 +815,17 @@ def _amended_stability_criterion(rendered: str) -> Mapping[str, object] | None:
     for round_cases in rounds:
         for case_name, passed in round_cases.items():
             per_case[case_name] = per_case.get(case_name, 0) + int(passed)
+    # 每轮下限 = 用例总数 − 豁免用例数：豁免只应放宽"逐例"要求，不能同时吃掉每轮的余量。
+    # 硬编码常量会与豁免数量自相矛盾（26 例豁免 2 个时下限必须是 24，见交接文档第 23.3、29 节）。
+    exempt_present = len(_AMENDED_EXEMPT_CASES & per_case.keys())
+    minimum_per_round = len(per_case) - exempt_present
     rounds_meeting = 0
     for row in round_summaries:
         positive = row.get("positive_passed")
         negative = row.get("negative_passed")
         if type(positive) is not int or type(negative) is not int:
             return None
-        if positive + negative >= _AMENDED_MIN_CASES_PER_ROUND:
+        if positive + negative >= minimum_per_round:
             rounds_meeting += 1
     graded = sorted(name for name in per_case if name not in _AMENDED_EXEMPT_CASES)
     if not graded:
@@ -840,8 +844,9 @@ def _amended_stability_criterion(rendered: str) -> Mapping[str, object] | None:
         "candidate_eligible": eligible,
         "cases_meeting_minimum": cases_meeting,
         "cases_total": len(graded),
-        "exempt_cases": len(_AMENDED_EXEMPT_CASES & per_case.keys()),
+        "exempt_cases": exempt_present,
         "forbidden_evidence_total": forbidden_total,
+        "minimum_per_round": minimum_per_round,
         "round_count": len(rounds),
         "rounds_meeting_minimum": rounds_meeting,
     }

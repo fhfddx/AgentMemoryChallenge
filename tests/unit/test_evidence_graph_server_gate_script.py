@@ -294,14 +294,32 @@ def test_amended_criterion_rejects_any_round_with_forbidden_evidence() -> None:
 
 def test_amended_criterion_rejects_a_round_below_the_case_minimum() -> None:
     rounds = [_stability_round(number) for number in range(1, 6)]
-    rounds[4] = _stability_round(5, {"case-01", "case-02"})
+    rounds[4] = _stability_round(5, {"case-01", "case-02", "case-03"})
     document = _stability_document(rounds)
 
     verdict = gate._amended_stability_criterion(document)
 
     assert verdict is not None
     assert verdict["candidate_eligible"] is False
+    assert verdict["minimum_per_round"] == 24
     assert verdict["rounds_meeting_minimum"] == 4
+
+
+def test_amended_criterion_tolerates_both_exempt_cases_failing_together() -> None:
+    # 下限由“用例总数 − 豁免数”推导：两个豁免用例同轮失败（24/26）仍应满足每轮下限。
+    document = _stability_document(
+        [
+            _stability_round(number, {"missing_value_negative", "chinese_context_negative"})
+            for number in range(1, 6)
+        ]
+    )
+
+    verdict = gate._amended_stability_criterion(document)
+
+    assert verdict is not None
+    assert verdict["minimum_per_round"] == 24
+    assert verdict["rounds_meeting_minimum"] == 5
+    assert verdict["candidate_eligible"] is True
 
 
 def test_amended_criterion_rejects_unknown_failure_reason_keys() -> None:
