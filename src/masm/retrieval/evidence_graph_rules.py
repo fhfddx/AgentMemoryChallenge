@@ -212,38 +212,47 @@ def discriminative_units(text: str) -> frozenset[str]:
     return frozenset(units)
 
 
-def _part_is_name_shaped(part: str) -> bool:
-    """名字的一部分是否带"名字"特征：数字、词内大写或首字母大写（且不在停用词表内）。"""
+def _part_is_name_shaped(part: str, *, sentence_initial: bool = False) -> bool:
+    """名字的一部分是否带"名字"特征：数字、词内大写，或非句首的首字母大写；且不在小词表内。"""
 
     if part.casefold() in _NAME_DENYLIST:
         return False
-    return (
-        any(char.isdigit() for char in part)
-        or any(char.isupper() for char in part[1:])
-        or part[0].isupper()
-    )
+    if any(char.isdigit() for char in part) or any(char.isupper() for char in part[1:]):
+        return True
+    return part[0].isupper() and not sentence_initial
+
 
 def absent_name_tokens(question: str, pool_texts: Sequence[str]) -> frozenset[str]:
     """问题中的"名字样"记号若在整个候选池中从未出现，则池内证据回答不了这个问题。
 
-    只看名字（含数字或词内大写）：普通内容词换一种说法就可能不在池里，据此拒答会误伤可回答问题；
-    而一个问题点名的主体若在池里根本不存在，任何"同属性、不同主体"的证据都答非所问。
+    只看名字（含数字、词内大写或句中首字母大写）：普通内容词换一种说法就可能不在池里，据此拒答会
+    误伤可回答问题；而一个问题点名的主体若在池里根本不存在，任何"同属性、不同主体"的证据都答非所问。
+    句首大写只是排版（例如 "Follow ..." 这类祈使句），不构成名字信号。
     """
 
     normalized_pool = " ".join(normalize_text(text) for text in pool_texts)
+    payload = unicodedata.normalize("NFKC", question)
     absent: set[str] = set()
-    for match in _NAME_LIKE.finditer(unicodedata.normalize("NFKC", question)):
+    for match in _NAME_LIKE.finditer(payload):
         token = match.group()
         if len(token) < _NAME_PART_MIN_CHARS:
             continue
-        if not _part_is_name_shaped(token):
+        sentence_initial = match.start() == 0 or payload[: match.start()].rstrip()[-1:] in {
+            ".",
+            "?",
+            "!",
+            ";",
+            ":",
+        }
+        if not _part_is_name_shaped(token, sentence_initial=sentence_initial):
             continue
         # 只看名字样的部分：共享的修饰词（例如都含 office）不得把缺失的主体说成存在；
         # 任一名模样部分（>=5 字符）在整个池中缺失，即判定这个名字未被存过。
         name_parts = [
             normalize_text(part)
             for part in _NAME_PART.findall(token)
-            if len(part) >= _NAME_STEM_MIN_CHARS and _part_is_name_shaped(part)
+            if len(part) >= _NAME_STEM_MIN_CHARS
+            and _part_is_name_shaped(part, sentence_initial=sentence_initial)
         ]
         if not name_parts:
             continue

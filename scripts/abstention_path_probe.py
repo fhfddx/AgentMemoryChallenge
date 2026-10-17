@@ -184,8 +184,7 @@ def run_probe(
             matched_marker_count = sum(
                 marker in returned_text for marker in expected_markers
             )
-            diagnostics = body.get("diagnostics")
-            graph = diagnostics if isinstance(diagnostics, dict) else {}
+
             if expected_markers:
                 passed = matched_marker_count == len(expected_markers)
             else:
@@ -199,11 +198,7 @@ def run_probe(
                     "matched_marker_count": matched_marker_count,
                     "expected_marker_count": len(expected_markers),
                     "refusal_expected": not expected_markers,
-                    "graph_enabled": bool(graph.get("graph_enabled")),
-                    "graph_state": str(graph.get("graph_state")),
-                    "graph_vetoed": bool(graph.get("graph_vetoed")),
-                    "graph_fallback": bool(graph.get("graph_fallback")),
-                    "graph_failure_category": str(graph.get("graph_failure_category")),
+
                     "passed": passed,
                 },
             )
