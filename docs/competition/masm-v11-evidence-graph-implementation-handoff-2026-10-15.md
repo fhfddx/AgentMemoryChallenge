@@ -1312,6 +1312,40 @@ positives_ok = True   veto = 0 次（vetoed = []）
 - 线上应为加法式镜像 `a4ade0d` + 两个开关打开；
 - 全部证据、每次运行前判读规则、失败模式记录在第 16–36 节。
 
+## 37. 官网规则核对与 Qwen3-Rerank 实验（技术可用，因安全回归否决）
+
+### 37.1 官网规则（agentmemories.ai 第二期）
+
+| 规则 | 内容 | 影响 |
+| --- | --- | --- |
+| 模型限制 | Embedding 必须 `text-embedding-v4`；LLM 组件必须 `gpt-4o-mini`；**Reranker 不作限制** | 换模型不可行；**换 Reranker 合规** |
+| 评测额度 | 每个 Key 每赛道**最多 2 次 Full**，第 2 次须在首次完成满 30 天后 | 官方窗口极稀缺，必须先做前置测量 |
+| 禁止项 | 不得在 Search 内生成最终答案；不得针对公开题目硬编码或跨样本共享状态 | 现有实现合规 |
+| 判分 | 平台统一 Answer + Eval；能力含 RECALL/ADAPT/ACT，H 为"稳健拒答、最小披露与证据边界" | abstention 属 H 项 |
+
+权重 `(3×R + 9×A + M)/13` 仍为三次实测反推（三点全中），官网页面为客户端渲染，未取到公开定义。
+
+### 37.2 实现与真实环境验证
+
+`HttpReranker`（DashScope 兼容 `qwen3-rerank`），默认关闭；需三项齐全且 HTTPS；只产出分数，
+异常一律由 `EvidenceReranker` 退回规则排序。真实容器验证：`scores=[0.8916, 0.1716]`、**单次 520 ms**。
+
+### 37.3 真实管线 A/B（`multi_session_path_probe`，经真实 Add/Search）
+
+| 用例 | A 无重排 | B 有重排 | 判定 |
+| --- | --- | --- | --- |
+| `storage` | passed | passed | ✓ |
+| `connected_chain` | passed（4/4、forbidden 0、returned 3） | passed（数值相同） | ✓ 无增益 |
+| `disconnected_chain` | passed（returned **0**） | **FAILED（returned 1）** | ✗ 多出无关证据 |
+| `cleanup` | passed | passed | ✓ |
+
+### 37.4 否决理由：权重不对称
+
+重排对 multi-session（权重 1/13）**没有可见增益**，却在"应返回空"的用例上多返回证据，而这类退化直接打击
+abstention（权重 **9/13**）：收益/风险 ≈ **1:9**，不采用。代码保留、默认关闭，线上回到 `a4ade0d`。
+将来若要启用，必须先实现"只能在已通过相关性闸门的候选内重排、不得改变候选集合"的受限模式，
+并在更难的多会话测量上证明它不引入无关证据。
+
 
 
 
