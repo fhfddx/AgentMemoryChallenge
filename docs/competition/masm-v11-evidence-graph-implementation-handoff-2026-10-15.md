@@ -1006,6 +1006,47 @@ canary 与套件数据一致指向同一个机制：原子/多部分问题上，
 两次模型调用（v7 selection + planner），与已批准设计中的"仅一次 planner 调用"不同，因此需要用户
 明确批准后才能实施。
 
+## 29. 加法式架构的 Smoke 前验证：无回归证明通过、门槛判据算术缺陷被修正
+
+### 29.1 第 1 步：无回归证明（真实 Provider，26 例，78 次调用）——通过
+
+新增探针模式 `--compare`：每例先跑冻结 v7 selector，再跑加法式图路径（v7 + planner），比较
+"v7 返回的证据是否被加法式返回整体包含"。真实 Provider 结果：
+
+```
+compare_exit = 0
+"subset_ok": true  计数 = 26
+（无 subset_ok: false 行）
+```
+
+即：**在真实模型下，加法式路径在每一例上都没有比冻结 v7 少返回一条证据**，且零回退
+（`--compare` 只有在 `subset_failures == 0 且 fallback_count == 0` 时返回 0）。
+
+### 29.2 第 2 步：五轮门槛（130 次调用）——按冻结判据不合格
+
+```
+verification_exit_code=0     probe_exit_code=1
+round_count=5                rounds_meeting_minimum=4      ← 需要 5
+cases_meeting_minimum=24 / 24                                ← 每个非豁免用例 ≥4/5
+forbidden_evidence_total=0
+```
+
+失败点正是第 23.3 节**在该次运行之前**记录的算术缺陷：两个豁免用例在同一轮失败时该轮上限为
+24，而预注册写的是 "每轮 ≥25/26"，两者自相矛盾。按纪律，**本次运行仍记为不合格、不改判**；
+第 23.3 节已注明修正必须绑定新提交，因此本次提交 `2a19007`：
+
+- 每轮下限改为由数据推导：`minimum_per_round = 用例总数 − 豁免用例数`，并打印在判据输出里，
+  使实际阈值始终可见；
+- 回归测试：`test_amended_criterion_tolerates_both_exempt_cases_failing_together`
+  （两个豁免用例五轮全失败仍应合格）；原"某轮低于下限"测试改为单轮 3 例失败（2 例在推导下限内）。
+
+**注意**：`src/masm` 与 probe 均未改动，三个 pin 保持有效，线上镜像无需重建。
+
+### 29.3 待做
+
+由 `2a19007`（仅判据修正）重跑一次五轮门槛；通过后，官方 Smoke 的时间由用户在冷却窗口内决定。
+
+
 
 
 
