@@ -27,6 +27,7 @@ from masm.retrieval.evidence_graph import (
     GraphEvidenceSelector,
     GraphSelection,
 )
+from masm.retrieval.evidence_judge import EvidenceSufficiencyJudge
 from masm.retrieval.evidence_selector import EvidenceSelector
 from masm.retrieval.reranker import RankedEvidence
 
@@ -886,6 +887,7 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
         EvidenceGraphPlanner(llm),
         EvidenceSelector(llm),
         additive=True,
+        judge=EvidenceSufficiencyJudge(llm),
     )
     cases = list(CASES)
     subset_failures = 0
