@@ -56,7 +56,7 @@ def test_diagnostics_never_logs_payload_or_identity(caplog) -> None:
         "graph_requirement_count", "graph_support_count", "graph_link_count",
         "graph_component_count", "graph_selected_count", "graph_selected_source_count",
         "graph_state", "graph_fallback", "graph_failure_category",
-        "graph_planner_failure_reason", "graph_planner_latency_ms",
+        "graph_planner_failure_reason", "graph_vetoed", "graph_planner_latency_ms",
     }
 
 

@@ -75,6 +75,7 @@ class SearchDiagnostics:
     graph_fallback: bool = False
     graph_failure_category: str = "none"
     graph_planner_failure_reason: str = "none"
+    graph_vetoed: bool = False
     graph_planner_latency_ms: float = 0.0
 
 
@@ -137,6 +138,7 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
             if value.graph_planner_failure_reason in _GRAPH_PLANNER_FAILURE_REASONS
             else "unknown"
         ),
+        "graph_vetoed": bool(value.graph_vetoed),
         "graph_planner_latency_ms": round(max(0.0, float(value.graph_planner_latency_ms)), 2),
     }
     _LOGGER.info(

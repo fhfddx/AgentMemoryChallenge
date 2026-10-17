@@ -889,6 +889,7 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
     )
     cases = list(CASES)
     subset_failures = 0
+    vetoes = 0
     fallbacks = 0
     failure_categories: dict[str, int] = {}
     for case in cases:
@@ -924,9 +925,13 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
             continue
         baseline_ids = {item.memory_id for item in baseline.evidence}
         merged_ids = {item.memory_id for item in outcome.selection.evidence}
-        subset_ok = baseline_ids <= merged_ids
-        subset_failures += int(not subset_ok)
         graph = outcome.graph
+        # 证明式否决是唯一被允许的"更少证据"情形：它必须同时满足 insufficient 判定与
+        # "基线非空"，否则视为退化并计入 subset_failures。
+        vetoed = graph.vetoed and graph.state == "insufficient" and bool(baseline.evidence)
+        subset_ok = baseline_ids <= merged_ids or vetoed
+        subset_failures += int(not subset_ok)
+        vetoes += int(vetoed)
         fallbacks += int(graph.fallback)
         failure_categories[graph.failure_category] = (
             failure_categories.get(graph.failure_category, 0) + 1
@@ -936,6 +941,7 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
                 {
                     "case": case.name,
                     "subset_ok": subset_ok,
+                    "vetoed": vetoed,
                     "baseline_count": len(baseline.evidence),
                     "merged_count": len(outcome.selection.evidence),
                     "added_count": len(merged_ids - baseline_ids),
@@ -956,6 +962,7 @@ def run_compare(llm: StructuredLLM, output: TextIO) -> int:
                 "case": "compare_summary",
                 "case_count": len(cases),
                 "subset_failures": subset_failures,
+                "veto_count": vetoes,
                 "fallback_count": fallbacks,
                 "failure_categories": dict(sorted(failure_categories.items())),
                 "candidate_eligible": eligible,
