@@ -320,8 +320,8 @@ class CandidateExpectations:
 
 
 DEFAULT_EXPECTATIONS = CandidateExpectations(
-    probe_blob="fafa1d130c1b7c5af89c0dcc160a439129e9c5af",
-    probe_sha256="41f088d49b618aaec8ef19ff11cf052f7f33b450c4b70d7d3033c79828491357",
+    probe_blob="140887a17c98712ea4478500e02bafc8c3b6677b",
+    probe_sha256="07d7d00afe33fbea27495d866c81d866fcca7a3292741313894fd1579458e560",
     source_digest="30704a51f65164c1d34cc2150440880a918bdf4ab29963f578167958332eb638",
 )
 
