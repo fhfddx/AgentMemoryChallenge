@@ -17,7 +17,6 @@ from masm.providers.openai_embeddings import OpenAICompatibleEmbeddingProvider
 from masm.providers.reranker import LexicalReranker
 from masm.retrieval.baseline import BaselineRetriever, load_channel_weights
 from masm.retrieval.evidence_graph import EvidenceGraphPlanner, GraphEvidenceSelector
-from masm.retrieval.evidence_judge import EvidenceSufficiencyJudge
 from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
@@ -173,10 +172,6 @@ def build_runtime(
                     evidence_selector,
                     max_candidates=settings.selector_max_candidates,
                     max_selected=settings.selector_max_selected,
-                    judge=EvidenceSufficiencyJudge(
-                        selected_llm,
-                        timeout_seconds=settings.evidence_graph_timeout_seconds,
-                    ),
                 )
 
     return RuntimeComponents(

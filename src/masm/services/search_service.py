@@ -185,13 +185,6 @@ class SearchService:
                 graph_planner_failure_reason=(
                     graph_diagnostics.planner_failure_reason if graph_diagnostics else "none"
                 ),
-                graph_judge_calls=(
-                    graph_diagnostics.judge_calls if graph_diagnostics else 0
-                ),
-                graph_judge_failure_category=(
-                    graph_diagnostics.judge_failure_category if graph_diagnostics else "none"
-                ),
-                graph_vetoed=graph_diagnostics.vetoed if graph_diagnostics else False,
                 graph_planner_latency_ms=(
                     graph_diagnostics.planner_latency_ms if graph_diagnostics else 0.0
                 ),
