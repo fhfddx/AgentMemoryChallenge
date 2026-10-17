@@ -950,6 +950,63 @@ canary 与套件数据一致指向同一个机制：原子/多部分问题上，
 （例如在无任何可证明连接时不接管选择、或把 inclusion 扩到选定分量的已证明邻域并设上限），
 而不是继续放宽连接证明——后者会破坏本架构唯一的安全性质。
 
+## 28. 第二次 Smoke：7.69，R6/R6b 被撤销（`01feed7`）
+
+### 28.1 结果
+
+为验证 R6/R6b 对 atomic 的效果而执行的第二次官方 Smoke：
+
+| 指标 | 第一次 Smoke（图开，`2e389e7`） | 第二次 Smoke（图开，`0019f55`） |
+| --- | --- | --- |
+| 总分 | 23.08 | **7.69** |
+| Retrieval | 66.67 | **33.33** |
+| direct_recall | 100 | **0** |
+| atomic_retrieval | 50 | 50 |
+| multi_session_reasoning | 0 | 0 |
+| abstention | 11.11 | **0** |
+
+第 27 节运行前定好的规则是"任何指标回归即回滚"，`direct_recall` 由 100 掉到 0、`abstention` 掉到 0，
+因此**本次改动判定无效**。
+
+### 28.2 回滚（含一次操作失误与更正）
+
+- 第一次回滚复用了 `/opt/masm-v11/config/image.override.e80eb59.yml`，但该文件在打开开关时已被写入
+  flags，因此只换回旧镜像、`graph_flag` 仍为 `1`。**教训：每次都写一份完整目标状态的 override，
+  绝不复用旧文件名**；
+- 更正后写入 `image.override.e80eb59-off.yml`（只含 image），复验：
+  `MASM_RUNTIME_PROFILE: official-masm`（无 graph/context 行）、`graph_flag=None`、`context_flag=None`、
+  `DB_UNCHANGED`、`healthy`、`restarts=0`；
+- 代码层面 `01feed7` 撤销 R6/R6b：`git diff --stat 15d9c2f -- src scripts tests` 为空，即分支恢复到
+  产生 23.08 那次 Smoke 的完全一致状态（含 pin）。
+
+### 28.3 机制判断（假设，证据有限）
+
+`--force-recreate` 把带图的容器连同日志删掉，`request_ledger` 只记 Add 幂等状态，因此没有该次 Smoke
+的逐请求遥测。基于可复现证据的判断：
+
+1. **abstention 归零**：R6 把同源 `context` 记忆与其消息合并成分量后，原本 `insufficient`/`partial`
+   的问题达到 `sufficient` 并返回证据 → 该拒答的没有拒答；
+2. **direct 归零**：R6b 把整段同源窗口塞进返回集，而 `max_selected` 为 12、打包只保留 `top_k`，
+   精确答案可能被挤出 → 直接事实问题也拿不到正确证据。
+
+### 28.4 结论：当前架构不可能达到 Retrieval = 100
+
+| 配置 | 总分 | direct | atomic | multi-session |
+| --- | --- | --- | --- | --- |
+| 图**关闭**（`a7b08fc` 时期最好观测） | 30.77 | 100 | 100 | 0 |
+| 图**开启**（本设计，最好一次 `2e389e7`） | 23.08 | 100 | 50 | 0 |
+
+图路径两次真实运行都**没有把 multi_session 从 0 抬起来**，而它在 atomic 上稳定付出代价：这是
+"替换 v7 + 单一分量 sufficiency"这一架构的固有性质——原子多事实问题在没有可证明连接时必然被拆开。
+
+### 28.5 唯一可行的下一步设计（需用户批准成本模型变更）
+
+**加法式架构**：先跑冻结的 v7 选择作为基线（保证 direct/atomic 与 30.77 配置持平），planner 只**追加**
+其证明出的多跳证据，绝不删除 v7 的选择。这样"保底不退化 + 只在能证明时增益"，代价是每次 Search
+两次模型调用（v7 selection + planner），与已批准设计中的"仅一次 planner 调用"不同，因此需要用户
+明确批准后才能实施。
+
+
 
 
 
