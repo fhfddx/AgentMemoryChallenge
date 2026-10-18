@@ -2532,3 +2532,61 @@ def test_named_subject_present_in_the_store_keeps_the_evidence() -> None:
 
     assert outcome.graph.vetoed is False
     assert outcome.selection.evidence == (stored,)
+# --- R11: append the bridging session when the question names only one side ------------------
+
+
+def test_additive_mode_appends_the_bridging_session() -> None:
+    sister = _evidence(1, "source-a", "My sister Nora works at the Zephyr office.")
+    party = _evidence(2, "source-b", "The Zephyr holiday party is on 14 December.")
+    baseline = _StubBaseline((party,))
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("When is my sister's company holiday party", "time")],
+                supports=[_support(0, 0, "holiday party is on 14 December", "direct")],
+            )
+        ]
+    )
+
+    outcome = _additive_selector(llm, baseline).select(
+        "When is my sister's company holiday party?",
+        None,
+        [sister, party],
+        _anchors(sister, party),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    ids = [item.memory_id for item in outcome.selection.evidence]
+    assert ids[0] == party.memory_id
+    # 桥接证据被追加：问题里的 "sister" 与已选证据里的稀有单元 Zephyr 由它连接。
+    assert sister.memory_id in ids
+
+
+def test_additive_mode_does_not_append_when_sessions_already_span_two() -> None:
+    sister = _evidence(1, "source-a", "My sister Nora works at the Zephyr office.")
+    party = _evidence(2, "source-b", "The Zephyr holiday party is on 14 December.")
+    third = _evidence(3, "source-c", "The Zephyr office has twelve desks.")
+    baseline = _StubBaseline((party, sister))
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("When is my sister's company holiday party", "time")],
+                supports=[_support(0, 0, "holiday party is on 14 December", "direct")],
+            )
+        ]
+    )
+
+    outcome = _additive_selector(llm, baseline).select(
+        "When is my sister's company holiday party?",
+        None,
+        [sister, party, third],
+        _anchors(sister, party, third),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert [item.memory_id for item in outcome.selection.evidence] == [
+        party.memory_id,
+        sister.memory_id,
+    ]

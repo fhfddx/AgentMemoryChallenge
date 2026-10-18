@@ -10,7 +10,7 @@ selector so the graph path sees byte-identical question text and the same opaque
 """
 
 import math
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Literal
@@ -25,6 +25,7 @@ from masm.retrieval.evidence_graph_rules import (
     MAX_GRAPH_LINKS,
     MAX_GRAPH_REQUIREMENTS,
     MAX_GRAPH_SUPPORTS,
+    CandidateView,
     GraphFailureCategory,
     LinkKind,
     PlannerFailureReason,
@@ -35,6 +36,7 @@ from masm.retrieval.evidence_graph_rules import (
     bounded_persisted_pairs,
     candidate_views,
     derived_links,
+    discriminative_units,
     name_tokens,
     planner_candidate_text,
     question_has_clause_marker,
@@ -337,6 +339,51 @@ def _reported_state(state: str) -> "ReportedGraphState":
     return "unknown"
 
 
+def _strip_possessive(unit: str) -> str:
+    """把 "sister's" 归一到 "sister"：只用于桥接候选与问题的相关性比较。"""
+
+    return unit.replace("'s", "").replace("\u2019s", "").replace("'", "").replace("\u2019", "")
+
+def _bridge_additions(
+    selected: Sequence[RankedEvidence],
+    candidates: Sequence[CandidateView],
+    question_units: Collection[str],
+    frequencies: Mapping[str, int],
+) -> tuple[RankedEvidence, ...]:
+    """追加一条"把问题与已选证据连起来"的异会话证据（R11）。
+
+    官方跨会话题问的是"A 的 B"，而 A 只在另一个会话里被提到：只返回 B 所在的那条看似可答，
+    实际缺少"哪个 A"这一步。这里要求候选同时满足两条：与问题共享区分单元（与问题相关），
+    且与已选证据共享一个池内稀有单元（已证明的连接，沿用 R2 的稀有度约束）。
+    """
+
+    if not selected or not question_units:
+        return ()
+    selected_sources = {item.request_id or str(item.memory_id) for item in selected}
+    selected_ids = {item.memory_id for item in selected}
+    selected_units: set[str] = set()
+    for item in selected:
+        selected_units |= discriminative_units(str(item.source_context or item.content))
+    if not selected_units:
+        return ()
+    for view in candidates:
+        if view.memory_id in selected_ids:
+            continue
+        if (view.request_id or str(view.memory_id)) in selected_sources:
+            continue
+        # 所有格归一化："sister's" 与 "sister" 必须视为同一单元，否则问题与桥接证据永远对不上。
+        candidate_stems = {
+            _strip_possessive(unit) for unit in attested_units(view.text, frequencies)
+        }
+        question_stems = {_strip_possessive(unit) for unit in question_units}
+        if not (candidate_stems & question_stems):
+            continue
+        shared = discriminative_units(view.text) & selected_units
+        if not any(frequencies.get(unit, 0) <= 2 for unit in shared):
+            continue
+        return (view.evidence,)
+    return ()
+
 def _additive_selection(
     baseline: SelectionResult,
     additions: Sequence[RankedEvidence],
@@ -533,6 +580,7 @@ class GraphEvidenceSelector:
                 ),
             )
             frequencies = unit_frequencies(views)
+            question_units = attested_units(question, frequencies)
             assembled = assemble(
                 requirement_count=len(outcome.requirements),
                 supports=outcome.supports,
@@ -581,9 +629,16 @@ class GraphEvidenceSelector:
                     evidence_state="insufficient",
                 )
             else:
+                additions = list(evidence if assembled.state == "sufficient" else ())
+                # R11：把"问题点名的 A"与"已选证据里的 B"之间的桥接证据补进来（只追加）。
+                additions.extend(
+                    _bridge_additions(
+                        baseline.evidence, views, question_units, frequencies
+                    )
+                )
                 selection = _additive_selection(
                     baseline,
-                    evidence if assembled.state == "sufficient" else (),
+                    additions,
                     graph_state=assembled.state,
                     max_selected=self._max_selected,
                 )
