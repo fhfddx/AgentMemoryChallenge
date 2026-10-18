@@ -46,6 +46,8 @@ class _Client(Protocol):
 
 class _StoredCandidate(Protocol):
     content: str
+    memory_id: Any
+    request_id: str
 
 
 class _Repository(Protocol):
@@ -131,6 +133,12 @@ def run_probe(
                 raise RuntimeError("Add contract")
 
         contexts = repository.context_candidates_for_requests(user_id, run_ids)
+        messages = repository.message_candidates_for_requests(user_id, run_ids, 256)
+        # memory_id → 会话（request_id）：用于统计返回项覆盖了几个会话。
+        session_of: dict[str, str] = {
+            str(candidate.memory_id): candidate.request_id
+            for candidate in [*contexts, *messages]
+        }
         stored_text = " ".join(candidate.content for candidate in contexts)
         storage_markers = (sister, office, date)
         stored_marker_count = sum(marker in stored_text for marker in storage_markers)
@@ -162,15 +170,28 @@ def run_probe(
             data = body.get("data")
             if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
                 raise RuntimeError("Search contract")
-            returned_text = " ".join(_content_text(row.get("content")) for row in data)
+            texts = [_content_text(row.get("content")) for row in data]
+            returned_text = " ".join(texts)
             matched_marker_count = sum(
                 marker in returned_text for marker in expected_markers
             )
             forbidden_marker_count = int(distractor in returned_text)
+            returned_ids = [str(row.get("id")) for row in data if row.get("id")]
+            distinct_session_count = len(
+                {session_of.get(item, item) for item in returned_ids}
+            )
+            # 桥接要求：两个标记都出现，且不在同一个返回项里（否则说明答案项自带桥接实体）。
+            shares_item = any(
+                all(marker in text for marker in expected_markers) for text in texts
+            )
+            # 桥接的判据是"两个会话都出现在返回里"：桥接句本身提到桥接实体是正常的，
+            # 因此不要求标记分处不同项，只要求覆盖的会话数达到 2。
+            requires_two_sessions = len(expected_markers) >= 2
             if expected_markers:
                 passed = (
                     matched_marker_count == len(expected_markers)
                     and forbidden_marker_count == 0
+                    and (not requires_two_sessions or distinct_session_count >= 2)
                 )
             else:
                 passed = len(data) == 0
@@ -183,6 +204,8 @@ def run_probe(
                     "matched_marker_count": matched_marker_count,
                     "expected_marker_count": len(expected_markers),
                     "forbidden_marker_count": forbidden_marker_count,
+                    "distinct_session_count": distinct_session_count,
+                    "markers_share_one_item": shares_item,
                     "passed": passed,
                 },
             )

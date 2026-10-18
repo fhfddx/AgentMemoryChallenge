@@ -38,17 +38,25 @@ class _Backend:
         office = f"Office-{self.run_tag}"
         date = f"Date-{self.run_tag}"
         sister = f"Sister-{self.run_tag}"
+        sister_session = f"multi-session-bridge-probe-{self.run_tag}-0"
+        party_session = f"multi-session-bridge-probe-{self.run_tag}-1"
         bridges = [
-            {"id": "a", "content": f"My sister {sister} works at the {office} office."},
-            {"id": "b", "content": f"The {office} holiday party is on {date}."},
+            {"id": sister_session, "content": f"My sister {sister} works at the {office} office."},
+            {"id": party_session, "content": f"The {office} holiday party is on {date}."},
         ]
         if "sister" in query:
             if self.drop_bridge:
-                # 桥接失败时只拿到日期，另一段（含 office）没有出现。
-                return _Response(200, {"data": [{"id": "b", "content": f"Party on {date}."}]})
+                # 桥接失败：只拿到日期一项（不含 office），会话数也只有 1。
+                return _Response(
+                    200,
+                    {"data": [{"id": party_session, "content": f"Party on {date}."}]},
+                )
             return _Response(200, {"data": bridges})
         if office in query:
-            return _Response(200, {"data": [{"id": "b", "content": f"Party on {date}."}]})
+            return _Response(
+                200,
+                {"data": [{"id": party_session, "content": f"Party on {date}."}]},
+            )
         return _Response(200, {"data": []})
 
 
@@ -61,7 +69,15 @@ class _Repository:
     ) -> list[Any]:
         del user_id
         return [
-            type("Candidate", (), {"content": payload["messages"][0]["content"]})()
+            type(
+                "Candidate",
+                (),
+                {
+                    "content": payload["messages"][0]["content"],
+                    "memory_id": run_id,
+                    "request_id": run_id,
+                },
+            )()
             for run_id, payload in self._backend.runs.items()
             if run_id in request_ids
         ]
