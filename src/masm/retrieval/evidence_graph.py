@@ -459,6 +459,9 @@ class GraphEvidenceSelector:
         max_selected: int = MAX_SELECTED_EVIDENCE,
         additive: bool = True,
         presence: Callable[[str, Sequence[str]], frozenset[str]] | None = None,
+        retrieve_more: (
+            Callable[[str, Sequence[str], int], Sequence[RankedEvidence]] | None
+        ) = None,
     ) -> None:
         if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
@@ -471,6 +474,8 @@ class GraphEvidenceSelector:
         self._additive = additive
         # 全库存在性回调：判断"问题的主体是否在库里出现过"，缺省则不做任何拒答。
         self._presence = presence
+        # 图路径专用的补充召回（OR 语义）：基线全文检索是 AND，桥接证据常被漏掉。
+        self._retrieve_more = retrieve_more
 
     def select(
         self,
@@ -645,8 +650,26 @@ class GraphEvidenceSelector:
             else:
                 additions = list(evidence if assembled.state == "sufficient" else ())
                 # R11：把"问题点名的 A"与"已选证据里的 B"之间的桥接证据补进来（只追加）。
+                # 基线全文检索是 AND 语义，桥接证据常被漏出池，故允许一次有界 OR 补召回。
+                extra_views: list[CandidateView] = []
+                if self._retrieve_more is not None and question_units:
+                    try:
+                        extra = self._retrieve_more(
+                            request_user_id, sorted(question_units), 8
+                        )
+                    except Exception:
+                        extra = ()
+                    extra_views = list(
+                        candidate_views(
+                            list(extra),
+                            max_chars=self._planner.max_chars_per_candidate,
+                        )
+                    )
                 bridge_evidence, bridge_skip = _bridge_additions(
-                    baseline.evidence, views, question_units, frequencies
+                    baseline.evidence,
+                    [*views, *extra_views],
+                    question_units,
+                    frequencies,
                 )
                 bridge_added = len(bridge_evidence)
                 additions.extend(bridge_evidence)

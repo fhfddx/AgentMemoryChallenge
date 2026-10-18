@@ -1,6 +1,6 @@
 """按运行档位装配模型、AddPipeline 与 Search 组件。"""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from masm.agents.curator import MemoryCuratorAgent
@@ -21,7 +21,7 @@ from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, Evid
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
-from masm.retrieval.reranker import EvidenceReranker
+from masm.retrieval.reranker import EvidenceReranker, RankedEvidence
 from masm.storage.repositories import MemoryRepository
 
 
@@ -184,6 +184,7 @@ def build_runtime(
                     max_candidates=settings.selector_max_candidates,
                     max_selected=settings.selector_max_selected,
                     presence=repository.present_tokens,
+                    retrieve_more=_supplementary_recall(repository),
                 )
 
     return RuntimeComponents(
@@ -199,3 +200,30 @@ def build_runtime(
         evidence_selector=evidence_selector,
         evidence_graph=evidence_graph,
     )
+
+def _supplementary_recall(
+    repository: MemoryRepository,
+) -> "Callable[[str, Sequence[str], int], Sequence[RankedEvidence]]":
+    """图路径专用的有界补召回：把 OR 语义的候选包装成重排后的证据。"""
+
+    def retrieve(
+        user_id: str, units: Sequence[str], limit: int
+    ) -> Sequence[RankedEvidence]:
+        candidates = repository.or_lexical_candidates(
+            user_id, " ".join(units), limit
+        )
+        return tuple(
+            RankedEvidence(
+                memory_id=candidate.memory_id,
+                user_id=candidate.user_id,
+                content=candidate.content,
+                score=candidate.score,
+                rank=index,
+                granularity=candidate.granularity,
+                request_id=candidate.request_id,
+                source_position=candidate.source_position,
+            )
+            for index, candidate in enumerate(candidates)
+        )
+
+    return retrieve

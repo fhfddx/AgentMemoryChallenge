@@ -4,6 +4,7 @@
 绝不依赖查询后的 Python 过滤。关系写入前必须校验两端节点存在且属于同一用户。
 """
 
+import re
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, suppress
 from dataclasses import dataclass
@@ -337,6 +338,9 @@ class _IntentTarget:
     user_id: str
     request_id: str
     object_uri: str
+
+
+_TOKEN_SPLIT = re.compile(r"[a-z0-9']+")
 
 
 class MemoryRepository:
@@ -801,6 +805,46 @@ class MemoryRepository:
             if granularity is not None:
                 stmt = stmt.where(Memory.granularity == granularity)
             stmt = stmt.order_by(rank.desc()).limit(limit)
+            rows = session.execute(stmt).all()
+        return [
+            MemoryCandidate(
+                memory_id=row.Memory.id,
+                user_id=row.Memory.user_id,
+                content=row.Memory.summary,
+                score=float(row.rank),
+                supersedes=row.Memory.supersedes,
+                status=row.Memory.status,
+                conflict_group_id=row.Memory.conflict_group_id,
+                duplicate_of=row.Memory.duplicate_of,
+                granularity=_memory_granularity(row.Memory.granularity),
+                request_id=row.Memory.request_id,
+                source_position=row.Memory.source_position,
+            )
+            for row in rows
+        ]
+
+    def or_lexical_candidates(
+        self, user_id: str, text: str, limit: int = 8
+    ) -> list[MemoryCandidate]:
+        """OR 语义的补充召回：任一词命中即可（默认全文检索是 AND，桥接证据常被漏掉）。
+
+        只用于图路径的桥接补全，不改变基线检索行为；查询阶段仍按 user_id 过滤。
+        """
+
+        tokens = [token for token in _TOKEN_SPLIT.findall(text.lower()) if token]
+        if not tokens:
+            return []
+        expression = " | ".join(tokens[:8])
+        with self._database.session() as session:
+            ts_vector = func.to_tsvector("simple", Memory.summary)
+            ts_query = func.to_tsquery("simple", expression)
+            rank = func.ts_rank(ts_vector, ts_query)
+            stmt = (
+                select(Memory, rank.label("rank"))
+                .where(Memory.user_id == user_id, ts_vector.op("@@")(ts_query))
+                .order_by(rank.desc())
+                .limit(limit)
+            )
             rows = session.execute(stmt).all()
         return [
             MemoryCandidate(
