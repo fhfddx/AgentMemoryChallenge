@@ -378,9 +378,9 @@ def _bridge_additions(
             continue
         if (view.request_id or str(view.memory_id)) in selected_sources:
             continue
-        # 所有格归一化："sister's" 与 "sister" 必须视为同一单元，否则问题与桥接证据永远对不上。
+        # 桥接候选可能来自池外补召回：不能用"池内频次"过滤它的单元，否则 sister 会被丢掉。
         candidate_stems = {
-            _strip_possessive(unit) for unit in attested_units(view.text, frequencies)
+            _strip_possessive(unit) for unit in discriminative_units(view.text)
         }
         if not (candidate_stems & question_stems):
             skipped_question = True
