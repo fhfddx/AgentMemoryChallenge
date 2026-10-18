@@ -819,6 +819,30 @@ class MemoryRepository:
             for row in rows
         ]
 
+    def present_tokens(
+        self, user_id: str, tokens: Sequence[str], *, limit: int = 8
+    ) -> frozenset[str]:
+        """返回这些 token 中在该用户任一记忆里出现过的那些（全库级别，最多 ``limit`` 次查询）。
+
+        用于判断"问题的主体是否在库里存在"：只在候选池里缺失说明的是排序问题，不足以拒答。
+        """
+
+        present: set[str] = set()
+        with self._database.session() as session:
+            ts_vector = func.to_tsvector("simple", Memory.summary)
+            for token in list(tokens)[:limit]:
+                if not token.strip():
+                    continue
+                ts_query = func.plainto_tsquery("simple", token)
+                stmt = (
+                    select(Memory.id)
+                    .where(Memory.user_id == user_id, ts_vector.op("@@")(ts_query))
+                    .limit(1)
+                )
+                if session.execute(stmt).first() is not None:
+                    present.add(token)
+        return frozenset(present)
+
     def vector_candidates(
         self,
         user_id: str,

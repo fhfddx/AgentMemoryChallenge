@@ -10,7 +10,7 @@ selector so the graph path sees byte-identical question text and the same opaque
 """
 
 import math
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Literal
@@ -31,11 +31,11 @@ from masm.retrieval.evidence_graph_rules import (
     RequirementKind,
     SupportRole,
     ValidatedLink,
-    absent_name_tokens,
     attested_units,
     bounded_persisted_pairs,
     candidate_views,
     derived_links,
+    name_tokens,
     planner_candidate_text,
     question_has_clause_marker,
     unit_frequencies,
@@ -399,6 +399,7 @@ class GraphEvidenceSelector:
         max_candidates: int = DEFAULT_SELECTOR_CANDIDATES,
         max_selected: int = MAX_SELECTED_EVIDENCE,
         additive: bool = True,
+        presence: Callable[[str, Sequence[str]], frozenset[str]] | None = None,
     ) -> None:
         if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
@@ -409,6 +410,8 @@ class GraphEvidenceSelector:
         self._max_candidates = max_candidates
         self._max_selected = max_selected
         self._additive = additive
+        # 全库存在性回调：判断"问题的主体是否在库里出现过"，缺省则不做任何拒答。
+        self._presence = presence
 
     def select(
         self,
@@ -556,12 +559,15 @@ class GraphEvidenceSelector:
 
         evidence = tuple(view.evidence for view in assembled.selected)
         selected_sources = len({view.source_group for view in assembled.selected})
-        # R10：问题点名的主体（名字样记号）在整个候选池里从未出现时，池内证据答非所问，直接拒答。
-        absent_names = (
-            absent_name_tokens(question, [view.text for view in views])
-            if self._additive and baseline is not None
-            else frozenset()
-        )
+        # R10：问题点名的主体（名字样记号）在**整个库**里都没出现过时，库里没有任何记忆能回答它。
+        # 判据必须是全库而非候选池：只在池内缺失通常只说明排序，据此拒答会误伤可回答问题。
+        absent_names: frozenset[str] = frozenset()
+        if self._additive and baseline is not None and self._presence is not None:
+            names = name_tokens(question)
+            if names:
+                present = self._presence(request_user_id, sorted(names))
+                if not (names & present):
+                    absent_names = names
         if self._additive and baseline is not None:
             if absent_names:
                 selection = SelectionResult(

@@ -231,6 +231,39 @@ def _part_is_name_shaped(part: str, *, sentence_initial: bool = False) -> bool:
     return part[0].isupper() and not sentence_initial
 
 
+def name_tokens(question: str) -> frozenset[str]:
+    """问题里的"名字样"记号（含数字、词内大写或句中首字母大写；排除句首排版与日历/代词）。
+
+    缺失判定必须交给"全库"级别：只在候选池里缺失只说明排序，不代表库里没有这个主体。
+    """
+
+    payload = unicodedata.normalize("NFKC", question)
+    tokens: set[str] = set()
+    for match in _NAME_LIKE.finditer(payload):
+        token = match.group()
+        if len(token) < _NAME_PART_MIN_CHARS:
+            continue
+        sentence_initial = match.start() == 0 or payload[: match.start()].rstrip()[-1:] in {
+            ".",
+            "?",
+            "!",
+            ";",
+            ":",
+        }
+        if not _part_is_name_shaped(token, sentence_initial=sentence_initial):
+            continue
+        parts = [
+            part
+            for part in _NAME_PART.findall(token)
+            if _is_name_part(part)
+            and _part_is_name_shaped(part, sentence_initial=sentence_initial)
+        ]
+        if not parts:
+            continue
+        tokens.add(normalize_text(token))
+    return frozenset(tokens)
+
+
 def absent_name_tokens(question: str, pool_texts: Sequence[str]) -> frozenset[str]:
     """问题中的"名字样"记号若在整个候选池中从未出现，则池内证据回答不了这个问题。
 

@@ -183,6 +183,7 @@ def build_runtime(
                     evidence_selector,
                     max_candidates=settings.selector_max_candidates,
                     max_selected=settings.selector_max_selected,
+                    presence=repository.present_tokens,
                 )
 
     return RuntimeComponents(

@@ -1020,7 +1020,13 @@ def test_additive_mode_refuses_when_the_named_subject_is_absent() -> None:
         ]
     )
 
-    outcome = _additive_selector(llm, baseline).select(
+    selector = GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        baseline,  # type: ignore[arg-type]
+        additive=True,
+        presence=lambda user_id, tokens: frozenset(),
+    )
+    outcome = selector.select(
         "What is the access code for the lockB-77 locker?",
         None,
         [stored],
@@ -2496,3 +2502,33 @@ def test_cycles_and_diamonds_terminate_with_one_component() -> None:
         assert outcome.selection.evidence_state == "sufficient"
         assert outcome.selection.evidence == (first, second, third)
     assert outcomes[0].selection.evidence == outcomes[2].selection.evidence
+def test_named_subject_present_in_the_store_keeps_the_evidence() -> None:
+    stored = _evidence(1, "source-a", "The access code for the lockB-77 locker is code-7.")
+    baseline = _StubBaseline((stored,))
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("What is the access code", "location")],
+                supports=[_support(0, 0, "The access code for the lockB-77 locker", "direct")],
+            )
+        ]
+    )
+
+    selector = GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        baseline,  # type: ignore[arg-type]
+        additive=True,
+        # 库里存在这个主体（即使它没被召回进候选池）时绝不允许拒答。
+        presence=lambda user_id, tokens: frozenset(tokens),
+    )
+    outcome = selector.select(
+        "What is the access code for the lockB-77 locker?",
+        None,
+        [stored],
+        _anchors(stored),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert outcome.graph.vetoed is False
+    assert outcome.selection.evidence == (stored,)
