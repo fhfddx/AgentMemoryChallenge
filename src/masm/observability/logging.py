@@ -58,6 +58,8 @@ ALLOWED_LOG_FIELDS = frozenset(
         "graph_failure_category",
         "graph_planner_failure_reason",
         "graph_vetoed",
+        "graph_bridge_added",
+        "graph_bridge_skip",
         "graph_planner_latency_ms",
         "channel",
         "model_name",

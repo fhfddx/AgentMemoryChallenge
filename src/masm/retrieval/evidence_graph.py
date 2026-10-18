@@ -318,6 +318,8 @@ class GraphDiagnostics:
     failure_category: GraphFailureCategory = "none"
     planner_failure_reason: PlannerFailureReason = "none"
     vetoed: bool = False
+    bridge_added: int = 0
+    bridge_skip: str = "none"
     planner_latency_ms: float = 0.0
 
 
@@ -349,7 +351,7 @@ def _bridge_additions(
     candidates: Sequence[CandidateView],
     question_units: Collection[str],
     frequencies: Mapping[str, int],
-) -> tuple[RankedEvidence, ...]:
+) -> tuple[tuple[RankedEvidence, ...], str]:
     """追加一条"把问题与已选证据连起来"的异会话证据（R11）。
 
     官方跨会话题问的是"A 的 B"，而 A 只在另一个会话里被提到：只返回 B 所在的那条看似可答，
@@ -357,15 +359,20 @@ def _bridge_additions(
     且与已选证据共享一个池内稀有单元（已证明的连接，沿用 R2 的稀有度约束）。
     """
 
-    if not selected or not question_units:
-        return ()
+    if not selected:
+        return (), "no_selected"
+    if not question_units:
+        return (), "no_question_unit"
     selected_sources = {item.request_id or str(item.memory_id) for item in selected}
     selected_ids = {item.memory_id for item in selected}
     selected_units: set[str] = set()
     for item in selected:
         selected_units |= discriminative_units(str(item.source_context or item.content))
     if not selected_units:
-        return ()
+        return (), "no_selected_unit"
+    question_stems = {_strip_possessive(unit) for unit in question_units}
+    skipped_question = False
+    skipped_link = False
     for view in candidates:
         if view.memory_id in selected_ids:
             continue
@@ -375,14 +382,19 @@ def _bridge_additions(
         candidate_stems = {
             _strip_possessive(unit) for unit in attested_units(view.text, frequencies)
         }
-        question_stems = {_strip_possessive(unit) for unit in question_units}
         if not (candidate_stems & question_stems):
+            skipped_question = True
             continue
         shared = discriminative_units(view.text) & selected_units
         if not any(frequencies.get(unit, 0) <= 2 for unit in shared):
+            skipped_link = True
             continue
-        return (view.evidence,)
-    return ()
+        return (view.evidence,), "none"
+    if skipped_link:
+        return (), "no_rare_link"
+    if skipped_question:
+        return (), "no_question_overlap"
+    return (), "no_cross_session_candidate"
 
 def _additive_selection(
     baseline: SelectionResult,
@@ -610,6 +622,8 @@ class GraphEvidenceSelector:
         # R10：问题点名的主体（名字样记号）在**整个库**里都没出现过时，库里没有任何记忆能回答它。
         # 判据必须是全库而非候选池：只在池内缺失通常只说明排序，据此拒答会误伤可回答问题。
         absent_names: frozenset[str] = frozenset()
+        bridge_skip = "none"
+        bridge_added = 0
         if self._additive and baseline is not None and self._presence is not None:
             names = name_tokens(question)
             if names:
@@ -631,11 +645,11 @@ class GraphEvidenceSelector:
             else:
                 additions = list(evidence if assembled.state == "sufficient" else ())
                 # R11：把"问题点名的 A"与"已选证据里的 B"之间的桥接证据补进来（只追加）。
-                additions.extend(
-                    _bridge_additions(
-                        baseline.evidence, views, question_units, frequencies
-                    )
+                bridge_evidence, bridge_skip = _bridge_additions(
+                    baseline.evidence, views, question_units, frequencies
                 )
+                bridge_added = len(bridge_evidence)
+                additions.extend(bridge_evidence)
                 selection = _additive_selection(
                     baseline,
                     additions,
@@ -669,6 +683,8 @@ class GraphEvidenceSelector:
                 fallback=False,
                 failure_category="none",
                 vetoed=bool(absent_names),
+                bridge_added=bridge_added,
+                bridge_skip=bridge_skip,
                 planner_latency_ms=latency_ms,
             ),
         )

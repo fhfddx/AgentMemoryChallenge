@@ -38,6 +38,18 @@ _GRAPH_PLANNER_FAILURE_REASONS = frozenset(
     }
 )
 _TAG_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+# 桥接（R11）未命中的固定原因枚举：用于定位"为什么没补上第二会话"，不含任何文本。
+_GRAPH_BRIDGE_SKIPS = frozenset(
+    {
+        "none",
+        "no_selected",
+        "no_question_unit",
+        "no_selected_unit",
+        "no_rare_link",
+        "no_question_overlap",
+        "no_cross_session_candidate",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -76,6 +88,8 @@ class SearchDiagnostics:
     graph_failure_category: str = "none"
     graph_planner_failure_reason: str = "none"
     graph_vetoed: bool = False
+    graph_bridge_added: int = 0
+    graph_bridge_skip: str = "none"
     graph_planner_latency_ms: float = 0.0
 
 
@@ -139,6 +153,12 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
             else "unknown"
         ),
         "graph_vetoed": bool(value.graph_vetoed),
+        "graph_bridge_added": max(0, int(value.graph_bridge_added)),
+        "graph_bridge_skip": (
+            value.graph_bridge_skip
+            if value.graph_bridge_skip in _GRAPH_BRIDGE_SKIPS
+            else "unknown"
+        ),
         "graph_planner_latency_ms": round(max(0.0, float(value.graph_planner_latency_ms)), 2),
     }
     _LOGGER.info(

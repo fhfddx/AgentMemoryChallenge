@@ -186,6 +186,12 @@ class SearchService:
                     graph_diagnostics.planner_failure_reason if graph_diagnostics else "none"
                 ),
                 graph_vetoed=graph_diagnostics.vetoed if graph_diagnostics else False,
+                graph_bridge_added=(
+                    graph_diagnostics.bridge_added if graph_diagnostics else 0
+                ),
+                graph_bridge_skip=(
+                    graph_diagnostics.bridge_skip if graph_diagnostics else "none"
+                ),
                 graph_planner_latency_ms=(
                     graph_diagnostics.planner_latency_ms if graph_diagnostics else 0.0
                 ),
