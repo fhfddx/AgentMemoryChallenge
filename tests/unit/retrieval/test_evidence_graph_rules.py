@@ -514,14 +514,18 @@ def test_absent_name_tokens_ignores_present_names_and_plain_words() -> None:
     assert absent_name_tokens("What is the access code for the locker?", pool) == frozenset()
     assert absent_name_tokens("Which city hosts the workshop?", pool) == frozenset()
 
-def test_absent_name_tokens_uses_name_parts_not_shared_modifiers() -> None:
+def test_plain_capitalised_names_are_not_subject_identifiers() -> None:
     pool = ("The Lisbon-office contact is Ana.",)
 
-    # 共享修饰词 office 已存在，但主体 Porto 缺失，仍须判定为无法回答。
+    # 普通首字母大写（Porto、Alice）不算标识符：官方 direct 问题普遍如此，据此拒答会清零 direct。
     assert absent_name_tokens(
         "Which office is the Porto-office contact for?", pool
-    ) == frozenset({"porto-office"})
-    assert absent_name_tokens("Which office is the Lisbon-office contact for?", pool) == frozenset()
+    ) == frozenset()
+    assert absent_name_tokens("What did Alice say about her sister?", pool) == frozenset()
+    # 标识符（含数字或词内大写）仍然参与判定。
+    assert absent_name_tokens(
+        "What is the code for the AbsentSubject-zz99yy88xx locker?", pool
+    ) == frozenset({"absentsubject-zz99yy88xx"})
     # 日历与代词不是主体名，不得据此拒答。
     assert absent_name_tokens("What did I file on Monday?", pool) == frozenset()
 

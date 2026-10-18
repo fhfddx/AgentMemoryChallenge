@@ -222,13 +222,19 @@ def _is_name_part(part: str) -> bool:
     return len(part) >= _NAME_STEM_MIN_CHARS
 
 def _part_is_name_shaped(part: str, *, sentence_initial: bool = False) -> bool:
-    """名字的一部分是否带"名字"特征：数字、词内大写，或非句首的首字母大写；且不在小词表内。"""
+    """只有"标识符"才算名字：含数字或词内大写，且不在小词表内。
 
+    普通的首字母大写（Alice、Porto）不算：官方 direct 类问题普遍用名字指代用户或实体，而记忆多以第一
+    人称书写，那个名字在库里根本不存在，据此拒答会把 direct recall 清零（已由官方运行证实）。
+    句首大写只是排版信号，仅为接口一致性保留该参数。
+    """
+
+    del sentence_initial
     if part.casefold() in _NAME_DENYLIST:
         return False
-    if any(char.isdigit() for char in part) or any(char.isupper() for char in part[1:]):
-        return True
-    return part[0].isupper() and not sentence_initial
+    return any(char.isdigit() for char in part) or any(
+        char.isupper() for char in part[1:]
+    )
 
 
 def name_tokens(question: str) -> frozenset[str]:
