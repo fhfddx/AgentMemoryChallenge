@@ -25,7 +25,7 @@ from masm.services.search_service import SearchService
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 from masm.storage.repositories import MemoryRepository
-from masm.storage.types import MemoryBundle, MemoryDraft
+from masm.storage.types import EmbeddingDraft, MemoryBundle, MemoryDraft
 
 GRAPH_FIELDS = (
     "graph_enabled",
@@ -77,7 +77,9 @@ def run(argv: Sequence[str] | None = None) -> int:
     deletion = DeletionService(repository, AssetStore(settings.asset_dir))
     run_ids: list[str] = []
     try:
-        for text in texts:
+        runtime = build_runtime(settings, repository)
+        vectors = runtime.embeddings.embed_texts(list(texts))
+        for text, vector in zip(texts, vectors, strict=True):
             request_id = f"{user_id}-{len(run_ids)}"
             run_ids.append(request_id)
             repository.add_bundle(
@@ -86,10 +88,23 @@ def run(argv: Sequence[str] | None = None) -> int:
                     session_id=f"{user_id}-session-{len(run_ids) - 1}",
                     request_id=request_id,
                     messages=(),
-                    memories=[MemoryDraft(summary=text, original_text=text)],
+                    memories=[
+                        MemoryDraft(
+                            summary=text,
+                            original_text=text,
+                            embedding=EmbeddingDraft(
+                                modality="text",
+                                model_name=runtime.embeddings.model_name,
+                                model_version=getattr(
+                                    runtime.embeddings, "model_version", "v1"
+                                ),
+                                dimensions=len(vector),
+                                vector=vector,
+                            ),
+                        )
+                    ],
                 ),
             )
-        runtime = build_runtime(settings, repository)
         service = SearchService(
             runtime.retriever,
             max_image_bytes=settings.max_image_bytes,
@@ -101,6 +116,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             graph_selector=runtime.evidence_graph,
             runtime_profile=settings.runtime_profile.value,
         )
+        logging.getLogger("masm.search").setLevel(logging.INFO)
         capture = _Capture()
         logging.getLogger("masm.search").addHandler(capture)
         try:
