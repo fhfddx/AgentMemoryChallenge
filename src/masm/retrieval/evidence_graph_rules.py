@@ -100,6 +100,14 @@ _LATIN_TOKEN = re.compile(r"[a-z0-9][a-z0-9'\-]*")
 _CJK_RUN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 _DIGITS = re.compile(r"[0-9]+")
 # 原始问题里的"名字样"记号：允许词内大写、数字、连字符与下划线。
+# 疑问词与填充词：出现在问题里但不会出现在陈述记忆里，模板对齐前必须剔除。
+_QUESTION_WORDS = frozenset(
+    {
+        "what", "who", "when", "where", "which", "why", "how", "is", "are", "was", "were",
+        "do", "does", "did", "can", "could", "should", "would", "will", "please", "tell",
+        "remind", "me", "my", "you", "your", "and", "about",
+    }
+)
 _NAME_LIKE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-]*")
 _NAME_PART = re.compile(r"[A-Za-z0-9]+")
 # 句中大写但通常不是"主体名"的词：据此拒答只会误伤可回答问题。
@@ -336,6 +344,52 @@ def frame_slot_conflict(question: str, memory_texts: Sequence[str]) -> bool:
         if len(frame & units) >= needed:
             return True
     return False
+
+def slot_template_conflict(question: str, memory_texts: Sequence[str]) -> bool:
+    """库里是否存在"同一模板、不同主体"的记忆：名字位置通配，其余词序与相邻位置必须对齐。
+
+    这是"该拒答"的强判据。仅是"内容词重叠"不够：direct 问题与它的来源记忆也大量重叠，但两者的
+    模板不同（问题是 "what did <名> say about ..."，记忆是 "my sister <名> works at ..."）。
+    """
+
+    names = name_tokens(question)
+    if not names:
+        return False
+    tokens = [
+        token
+        for token in normalize_text(question).split()
+        if _strip_possessive(token.strip(",.?!;:\'")) not in _QUESTION_WORDS
+    ]
+    if len(tokens) < 4:
+        return False
+    name_parts = {part for name in names for part in name.split()}
+    pattern: list[str | None] = []
+    for token in tokens:
+        bare = _strip_possessive(token.strip(",.?!;:\'"))
+        pattern.append(None if bare in name_parts else bare)
+    slots = sum(1 for item in pattern if item is None)
+    if slots == 0 or len(pattern) - slots < 3:
+        return False
+    for text in memory_texts:
+        memory_tokens = [
+            _strip_possessive(token.strip(",.?!;:\'"))
+            for token in normalize_text(text).split()
+        ]
+        width = len(pattern)
+        for start in range(0, len(memory_tokens) - width + 1):
+            window = memory_tokens[start : start + width]
+            if all(
+                expected is None or expected == actual
+                for expected, actual in zip(pattern, window, strict=True)
+            ):
+                return True
+    return False
+
+
+def _strip_possessive(unit: str) -> str:
+    """把 "sister's" 归一到 "sister"（仅用于模板对齐比较）。"""
+
+    return unit.replace("'s", "").replace("\u2019s", "").replace("'", "").replace("\u2019", "")
 
 def shared_discriminative_unit(
     left_quote: str,

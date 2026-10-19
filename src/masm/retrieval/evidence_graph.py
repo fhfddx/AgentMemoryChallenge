@@ -37,10 +37,10 @@ from masm.retrieval.evidence_graph_rules import (
     candidate_views,
     derived_links,
     discriminative_units,
-    frame_slot_conflict,
     name_tokens,
     planner_candidate_text,
     question_has_clause_marker,
+    slot_template_conflict,
     unit_frequencies,
     validate_proposal,
 )
@@ -643,13 +643,13 @@ class GraphEvidenceSelector:
             if names:
                 present = self._presence(request_user_id, sorted(names))
                 # 名字缺席还不够：direct 问题常用普通大写名指代用户，而记忆是第一人称写的。
-                # 只有当库里存在"同框架、不同主体"的记忆（近失配）时才判定不可回答。
+                # 只有库里存在"同一模板、不同主体"的记忆（槽位近失配）时才判定不可回答。
                 if not (names & present):
                     try:
                         frame_texts = self._frames(request_user_id, question)
                     except Exception:
                         frame_texts = ()
-                    if frame_slot_conflict(question, frame_texts):
+                    if slot_template_conflict(question, frame_texts):
                         absent_names = names
         if self._additive and baseline is not None:
             if absent_names:
