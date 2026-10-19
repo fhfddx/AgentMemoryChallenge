@@ -391,6 +391,37 @@ def _strip_possessive(unit: str) -> str:
 
     return unit.replace("'s", "").replace("\u2019s", "").replace("'", "").replace("\u2019", "")
 
+_RELATION_WORDS = frozenset(
+    {
+        "sister", "brother", "mother", "father", "mom", "dad", "wife", "husband",
+        "partner", "son", "daughter", "friend", "boss", "manager", "colleague",
+        "coworker", "neighbor", "neighbour", "landlord", "doctor", "dentist",
+        "teacher", "cousin", "aunt", "uncle", "grandmother", "grandfather",
+    }
+)
+_RELATION_NAME = re.compile(
+    r"\b(?i:"
+    + "|".join(sorted(_RELATION_WORDS, key=len, reverse=True))
+    + r")\s+([A-Z][A-Za-z0-9'\u2019_-]{2,})"
+)
+
+
+def relation_capitalized_names(question: str) -> frozenset[str]:
+    """提取"关系词 + 首字母大写词"里的名字（如 "my sister Maya"），用于关系人缺失判定。
+
+    与 ``name_tokens`` 不同：这里接受 3 个字母以上的短名字，因为关系前缀本身就是强信号；用户自己
+    的名字不会以这种形式出现，因此不会误伤以用户为主语的 direct 问题。
+    """
+
+    payload = unicodedata.normalize("NFKC", question)
+    found: set[str] = set()
+    for match in _RELATION_NAME.finditer(payload):
+        name = match.group(1)
+        if name.casefold() in _NAME_DENYLIST:
+            continue
+        found.add(normalize_text(name))
+    return frozenset(found)
+
 def shared_discriminative_unit(
     left_quote: str,
     right_quote: str,

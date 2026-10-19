@@ -40,6 +40,7 @@ from masm.retrieval.evidence_graph_rules import (
     name_tokens,
     planner_candidate_text,
     question_has_clause_marker,
+    relation_capitalized_names,
     slot_template_conflict,
     unit_frequencies,
     validate_proposal,
@@ -640,11 +641,17 @@ class GraphEvidenceSelector:
             and self._frames is not None
         ):
             names = name_tokens(question)
-            if names:
-                present = self._presence(request_user_id, sorted(names))
-                # 名字缺席还不够：direct 问题常用普通大写名指代用户，而记忆是第一人称写的。
-                # 只有库里存在"同一模板、不同主体"的记忆（槽位近失配）时才判定不可回答。
-                if not (names & present):
+            relation_names = relation_capitalized_names(question)
+            subject_names = names | relation_names
+            if subject_names:
+                present = self._presence(request_user_id, sorted(subject_names))
+                # 判据 A：缺席且带关系前缀的名字（"my sister Maya"）。用户自己不会以这种形式出现，
+                # 所以不会误伤以用户为主语的 direct 问题（官方运行已证实那类误伤会让 direct 清零）。
+                relation_absent = relation_names - present
+                if relation_absent:
+                    absent_names = frozenset(relation_absent)
+                elif names and not (names & present):
+                    # 判据 B：全部名字缺席，且库里存在"同一模板、不同主体"的记忆（槽位近失配）。
                     try:
                         frame_texts = self._frames(request_user_id, question)
                     except Exception:

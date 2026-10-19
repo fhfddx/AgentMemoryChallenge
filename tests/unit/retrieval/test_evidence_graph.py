@@ -2598,7 +2598,7 @@ def test_named_subject_absent_without_a_sibling_frame_keeps_the_evidence() -> No
     llm = FakeStructuredLLM(
         [
             _proposal(
-                requirements=[_requirement("What did Alice say", "other")],
+                requirements=[_requirement("What did Alice say", "location")],
                 supports=[_support(0, 0, "My sister Nora works at the office", "context")],
             )
         ]
@@ -2623,3 +2623,34 @@ def test_named_subject_absent_without_a_sibling_frame_keeps_the_evidence() -> No
 
     assert outcome.graph.vetoed is False
     assert outcome.selection.evidence == (stored,)
+def test_relation_prefixed_absent_name_is_refused_without_a_template() -> None:
+    stored = _evidence(1, "source-a", "My sister Nora works at the office as an architect.")
+    baseline = _StubBaseline((stored,))
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("What does my sister Maya do", "location")],
+                supports=[_support(0, 0, "My sister Nora works at the office", "context")],
+            )
+        ]
+    )
+
+    selector = GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        baseline,  # type: ignore[arg-type]
+        additive=True,
+        # 关系前缀名 Maya 全库缺席 → 判据 A 生效，无需模板近失配。
+        presence=lambda user_id, tokens: frozenset(),
+        frames=lambda user_id, question: (),
+    )
+    outcome = selector.select(
+        "What does my sister Maya do for work?",
+        None,
+        [stored],
+        _anchors(stored),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert outcome.graph.vetoed is True
+    assert outcome.selection.evidence == ()
