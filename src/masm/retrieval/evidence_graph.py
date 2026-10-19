@@ -37,6 +37,7 @@ from masm.retrieval.evidence_graph_rules import (
     candidate_views,
     derived_links,
     discriminative_units,
+    frame_slot_conflict,
     name_tokens,
     planner_candidate_text,
     question_has_clause_marker,
@@ -462,6 +463,7 @@ class GraphEvidenceSelector:
         retrieve_more: (
             Callable[[str, Sequence[str], int], Sequence[RankedEvidence]] | None
         ) = None,
+        frames: Callable[[str, str], Sequence[str]] | None = None,
     ) -> None:
         if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
@@ -476,6 +478,8 @@ class GraphEvidenceSelector:
         self._presence = presence
         # 图路径专用的补充召回（OR 语义）：基线全文检索是 AND，桥接证据常被漏掉。
         self._retrieve_more = retrieve_more
+        # 同框架近失配检索：用于判断"库里只有同属性、不同主体的记忆"。
+        self._frames = frames
 
     def select(
         self,
@@ -629,12 +633,24 @@ class GraphEvidenceSelector:
         absent_names: frozenset[str] = frozenset()
         bridge_skip = "none"
         bridge_added = 0
-        if self._additive and baseline is not None and self._presence is not None:
+        if (
+            self._additive
+            and baseline is not None
+            and self._presence is not None
+            and self._frames is not None
+        ):
             names = name_tokens(question)
             if names:
                 present = self._presence(request_user_id, sorted(names))
+                # 名字缺席还不够：direct 问题常用普通大写名指代用户，而记忆是第一人称写的。
+                # 只有当库里存在"同框架、不同主体"的记忆（近失配）时才判定不可回答。
                 if not (names & present):
-                    absent_names = names
+                    try:
+                        frame_texts = self._frames(request_user_id, question)
+                    except Exception:
+                        frame_texts = ()
+                    if frame_slot_conflict(question, frame_texts):
+                        absent_names = names
         if self._additive and baseline is not None:
             if absent_names:
                 selection = SelectionResult(

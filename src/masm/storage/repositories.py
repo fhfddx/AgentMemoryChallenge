@@ -863,6 +863,16 @@ class MemoryRepository:
             for row in rows
         ]
 
+    def frame_matches(
+        self, user_id: str, text: str, *, limit: int = 5
+    ) -> list[MemoryCandidate]:
+        """返回与问题"同框架"的记忆：用于判断是否存在"同属性、不同主体"的近失配。
+
+        只做 OR 召回，由调用方判断是否共享足够多的非名字内容词。
+        """
+
+        return self.or_lexical_candidates(user_id, text, limit)
+
     def present_tokens(
         self, user_id: str, tokens: Sequence[str], *, limit: int = 8
     ) -> frozenset[str]:

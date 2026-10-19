@@ -185,6 +185,7 @@ def build_runtime(
                     max_selected=settings.selector_max_selected,
                     presence=repository.present_tokens,
                     retrieve_more=_supplementary_recall(repository),
+                    frames=_frame_texts(repository),
                 )
 
     return RuntimeComponents(
@@ -227,3 +228,12 @@ def _supplementary_recall(
         )
 
     return retrieve
+
+def _frame_texts(repository: MemoryRepository) -> "Callable[[str, str], Sequence[str]]":
+    """返回"同框架近失配"候选的文本：供 R10 判断是否真的无法回答。"""
+
+    def frame_texts(user_id: str, question: str) -> Sequence[str]:
+        candidates = repository.frame_matches(user_id, question, limit=5)
+        return tuple(str(candidate.content) for candidate in candidates)
+
+    return frame_texts

@@ -1025,6 +1025,8 @@ def test_additive_mode_refuses_when_the_named_subject_is_absent() -> None:
         baseline,  # type: ignore[arg-type]
         additive=True,
         presence=lambda user_id, tokens: frozenset(),
+        # 库里存在"同框架、不同主体"的记忆（近失配）才允许拒答。
+        frames=lambda user_id, question: ("The access code for the item-42 locker is code-7.",),
     )
     outcome = selector.select(
         "What is the access code for the lockB-77 locker?",
@@ -2590,3 +2592,34 @@ def test_additive_mode_does_not_append_when_sessions_already_span_two() -> None:
         party.memory_id,
         sister.memory_id,
     ]
+def test_named_subject_absent_without_a_sibling_frame_keeps_the_evidence() -> None:
+    stored = _evidence(1, "source-a", "My sister Nora works at the office as an architect.")
+    baseline = _StubBaseline((stored,))
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("What did Alice say", "other")],
+                supports=[_support(0, 0, "My sister Nora works at the office", "context")],
+            )
+        ]
+    )
+
+    selector = GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        baseline,  # type: ignore[arg-type]
+        additive=True,
+        # 用户自己的名字不在库里，但库里没有"同框架、另一个名字"的记忆 → 不得拒答。
+        presence=lambda user_id, tokens: frozenset(),
+        frames=lambda user_id, question: (),
+    )
+    outcome = selector.select(
+        "What did Alice say about her sister?",
+        None,
+        [stored],
+        _anchors(stored),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert outcome.graph.vetoed is False
+    assert outcome.selection.evidence == (stored,)

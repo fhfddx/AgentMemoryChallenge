@@ -310,6 +310,33 @@ def absent_name_tokens(question: str, pool_texts: Sequence[str]) -> frozenset[st
     return frozenset(absent)
 
 
+def frame_slot_conflict(question: str, memory_texts: Sequence[str]) -> bool:
+    """库里是否存在"同框架、不同主体"的记忆：问题的非名字内容词大多出现在同一条记忆里。
+
+    这是"该拒答"的判据：例如库里只有 item-42 的口令，问题问 item-47 的口令。用户自己名字缺失
+    不属于这种情况——库里没有"同框架、另一个名字"的记忆，因此不会被误判成不可答。
+    """
+
+    names = name_tokens(question)
+    if not names:
+        return False
+    lowered = normalize_text(question)
+    for name in names:
+        lowered = lowered.replace(name, " ")
+    frame = {
+        unit
+        for unit in discriminative_units(lowered)
+        if not any(unit in name for name in names)
+    }
+    if len(frame) < 2:
+        return False
+    needed = max(2, (len(frame) + 1) // 2)
+    for text in memory_texts:
+        units = discriminative_units(text)
+        if len(frame & units) >= needed:
+            return True
+    return False
+
 def shared_discriminative_unit(
     left_quote: str,
     right_quote: str,
