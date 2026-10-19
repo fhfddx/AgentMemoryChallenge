@@ -340,7 +340,7 @@ class _IntentTarget:
     object_uri: str
 
 
-_TOKEN_SPLIT = re.compile(r"[a-z0-9']+")
+_TOKEN_SPLIT = re.compile(r"[a-z0-9]+")
 
 
 class MemoryRepository:
@@ -831,7 +831,11 @@ class MemoryRepository:
         只用于图路径的桥接补全，不改变基线检索行为；查询阶段仍按 user_id 过滤。
         """
 
-        tokens = [token for token in _TOKEN_SPLIT.findall(text.lower()) if token]
+        tokens = [
+            token
+            for token in _TOKEN_SPLIT.findall(text.lower())
+            if len(token) >= 2
+        ]
         if not tokens:
             return []
         expression = " | ".join(tokens[:8])
