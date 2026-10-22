@@ -82,12 +82,13 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         query = "When is my sister's company holiday party?"
     else:
-        # 语义桥接：两段没有任何共同区分单元，只有 planner 能建立连接。
+        # 语义桥接：答案在第二条（西班牙 offsite），第一条只提供"谁批准了这次出行"。
+        # 两段没有任何共同区分单元，只有 planner 能建立连接。
         texts = (
             "Priya signed off on the Barcelona trip for the whole design team.",
-            "The Spanish offsite in November is confirmed for everyone.",
+            "The Spanish offsite is confirmed for the week of 10 November.",
         )
-        query = "When did Priya approve the Barcelona trip?"
+        query = "When is the Spanish offsite?"
     database = Database.create(settings.database_url)
     repository = MemoryRepository(database)
     deletion = DeletionService(repository, AssetStore(settings.asset_dir))
