@@ -753,8 +753,10 @@ class GraphEvidenceSelector:
                             max_chars=self._planner.max_chars_per_candidate,
                         )
                     )
+                # 锚点优先用 v7 基线；基线为空时退回图组装证据，否则桥接无处可挂。
+                anchor_evidence = list(baseline.evidence) or list(evidence)
                 bridge_evidence, bridge_skip = _bridge_additions(
-                    baseline.evidence,
+                    anchor_evidence,
                     [*views, *extra_views],
                     question_units,
                     frequencies,
@@ -768,7 +770,7 @@ class GraphEvidenceSelector:
                 ]
                 append_links.extend(_grounded_link_pairs(proposal, views))
                 link_evidence = _link_additions(
-                    baseline.evidence, views, append_links, limit=2
+                    anchor_evidence, views, append_links, limit=2
                 )
                 link_added = len(link_evidence)
                 additions.extend(link_evidence)

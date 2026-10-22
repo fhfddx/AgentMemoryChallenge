@@ -33,6 +33,7 @@ GRAPH_FIELDS = (
     "graph_candidate_count",
     "graph_selected_count",
     "graph_bridge_added",
+    "graph_link_added",
     "graph_bridge_skip",
     "graph_vetoed",
     "graph_fallback",

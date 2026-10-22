@@ -2663,7 +2663,7 @@ def test_additive_mode_appends_a_planner_linked_candidate() -> None:
             _proposal(
                 requirements=[
                     _requirement("Where do new starters collect", "location"),
-                    _requirement("their passes", "attribute"),
+                    _requirement("when are badge photos taken", "time"),
                 ],
                 supports=[
                     _support(0, 1, "New starters collect passes at the north gate.", "direct")
@@ -2682,7 +2682,7 @@ def test_additive_mode_appends_a_planner_linked_candidate() -> None:
     )
 
     outcome = _additive_selector(llm, baseline).select(
-        "Where do new starters collect their passes?",
+        "Where do new starters collect their passes and when are badge photos taken?",
         None,
         [first, second],
         _anchors(first, second),
@@ -2691,7 +2691,8 @@ def test_additive_mode_appends_a_planner_linked_candidate() -> None:
     )
 
     ids = [item.memory_id for item in outcome.selection.evidence]
-    # planner 声明并校验过的 link 让第二会话被追加，即使两段文字没有共同词面单元。
+    # 部分覆盖时装配证据不会追加，因此第二条只可能来自 planner link 的追加路径。
+    assert outcome.graph.state == "partial"
     assert first.memory_id in ids
     assert second.memory_id in ids
     assert outcome.graph.link_added >= 1
