@@ -186,7 +186,6 @@ def build_runtime(
                     presence=repository.present_tokens,
                     retrieve_more=_supplementary_recall(repository),
                     frames=_frame_texts(repository),
-                    expand_from=_neighbour_recall(repository, selected_embeddings),
                 )
 
     return RuntimeComponents(
@@ -238,36 +237,3 @@ def _frame_texts(repository: MemoryRepository) -> "Callable[[str, str], Sequence
         return tuple(str(candidate.content) for candidate in candidates)
 
     return frame_texts
-
-def _neighbour_recall(
-    repository: MemoryRepository, embeddings: EmbeddingProvider
-) -> "Callable[[str, str], Sequence[RankedEvidence]]":
-    """从已选证据出发的一跳邻居召回：多跳问题的第二段常与问题无共同词，只有与证据相近。"""
-
-    def expand(user_id: str, text: str) -> Sequence[RankedEvidence]:
-        vectors = embeddings.embed_texts([text])
-        if not vectors:
-            return ()
-        candidates = repository.vector_candidates(
-            user_id,
-            vectors[0],
-            modality="text",
-            model_name=embeddings.model_name,
-            model_version=getattr(embeddings, "model_version", "v1"),
-            limit=6,
-        )
-        return tuple(
-            RankedEvidence(
-                memory_id=candidate.memory_id,
-                user_id=candidate.user_id,
-                content=candidate.content,
-                score=candidate.score,
-                rank=index,
-                granularity=candidate.granularity,
-                request_id=candidate.request_id,
-                source_position=candidate.source_position,
-            )
-            for index, candidate in enumerate(candidates)
-        )
-
-    return expand

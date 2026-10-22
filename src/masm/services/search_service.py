@@ -189,9 +189,6 @@ class SearchService:
                 graph_bridge_added=(
                     graph_diagnostics.bridge_added if graph_diagnostics else 0
                 ),
-                graph_link_added=(
-                    graph_diagnostics.link_added if graph_diagnostics else 0
-                ),
                 graph_bridge_skip=(
                     graph_diagnostics.bridge_skip if graph_diagnostics else "none"
                 ),

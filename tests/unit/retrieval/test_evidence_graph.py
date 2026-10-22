@@ -157,7 +157,7 @@ def test_direct_single_source_fact_is_sufficient() -> None:
     assert outcome.graph.selected_count == 1
     assert outcome.graph.selected_source_count == 1
     assert len(llm.requests) == 1
-    assert llm.requests[0].prompt_version == "evidence-graph-planner-v3"
+    assert llm.requests[0].prompt_version == "evidence-graph-planner-v2"
     assert llm.requests[0].max_attempts == 1
     assert llm.requests[0].temperature == 0.0
 
@@ -2042,7 +2042,7 @@ def test_planner_transport_failure_falls_back_to_the_frozen_selector_once() -> N
     assert outcome.graph.failure_category == "planner_unavailable"
     assert outcome.selection.evidence == (direct,)
     assert [request.prompt_version for request in llm.requests] == [
-        "evidence-graph-planner-v3",
+        "evidence-graph-planner-v2",
         "evidence-selector-v7",
     ]
 
@@ -2072,7 +2072,7 @@ def test_planner_failure_falls_back_once_over_the_same_bounded_pool() -> None:
     assert outcome.graph.failure_category == "planner_unavailable"
     assert outcome.selection.candidate_count == 32
     assert [request.prompt_version for request in llm.requests] == [
-        "evidence-graph-planner-v3",
+        "evidence-graph-planner-v2",
         "evidence-selector-v7",
     ]
 
@@ -2219,7 +2219,7 @@ def test_structurally_invalid_proposals_fall_back_once(response: Mapping[str, ob
     assert outcome.graph.failure_category == "planner_invalid"
     assert outcome.selection.evidence == (direct,)
     assert [request.prompt_version for request in llm.requests] == [
-        "evidence-graph-planner-v3",
+        "evidence-graph-planner-v2",
         "evidence-selector-v7",
     ]
 
@@ -2654,45 +2654,71 @@ def test_relation_prefixed_absent_name_is_refused_without_a_template() -> None:
 
     assert outcome.graph.vetoed is True
     assert outcome.selection.evidence == ()
-def test_additive_mode_appends_a_planner_linked_candidate() -> None:
-    first = _evidence(1, "source-a", "The onboarding handbook covers badge pickup.")
-    second = _evidence(2, "source-b", "New starters collect passes at the north gate.")
-    baseline = _StubBaseline((first,))
+def test_missing_asked_value_kind_refuses_a_single_part_question() -> None:
+    stored = _evidence(1, "source-a", "I keep the spare keys in the hallway drawer.")
     llm = FakeStructuredLLM(
         [
             _proposal(
-                requirements=[
-                    _requirement("Where do new starters collect", "location"),
-                    _requirement("when are badge photos taken", "time"),
-                ],
+                requirements=[_requirement("How much did the hallway drawer cost", "attribute")],
                 supports=[
-                    _support(0, 1, "New starters collect passes at the north gate.", "direct")
-                ],
-                links=[
-                    _link(
-                        0,
-                        1,
-                        "The onboarding handbook covers badge pickup.",
-                        "New starters collect passes at the north gate.",
-                        "persisted_relation",
-                    )
+                    _support(0, 0, "I keep the spare keys in the hallway drawer.", "direct")
                 ],
             )
         ]
     )
+    selector = GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        _StubBaseline((stored,)),  # type: ignore[arg-type]
+        additive=True,
+        presence=lambda user_id, tokens: frozenset(),
+        frames=lambda user_id, question: (),
+    )
 
-    outcome = _additive_selector(llm, baseline).select(
-        "Where do new starters collect their passes and when are badge photos taken?",
+    outcome = selector.select(
+        "How much did the hallway drawer cost?",
         None,
-        [first, second],
-        _anchors(first, second),
-        GraphContext(relation_source_pairs=(("source-a", "source-b"),)),
+        [stored],
+        _anchors(stored),
+        GraphContext(),
         request_user_id="user-1",
     )
 
-    ids = [item.memory_id for item in outcome.selection.evidence]
-    # 部分覆盖时装配证据不会追加，因此第二条只可能来自 planner link 的追加路径。
-    assert outcome.graph.state == "partial"
-    assert first.memory_id in ids
-    assert second.memory_id in ids
-    assert outcome.graph.link_added >= 1
+    # 证据里没有任何金额：单部分问题应判定不可回答。
+    assert outcome.selection.evidence == ()
+    assert outcome.selection.abstained is True
+
+
+def test_multi_part_question_keeps_evidence_even_without_the_asked_value() -> None:
+    stored = _evidence(1, "source-a", "I keep the spare keys in the hallway drawer.")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("Where do I keep the spare keys", "location"),
+                    _requirement("how much did it cost", "attribute"),
+                ],
+                supports=[
+                    _support(0, 0, "I keep the spare keys in the hallway drawer.", "direct")
+                ],
+            )
+        ]
+    )
+    selector = GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        _StubBaseline((stored,)),  # type: ignore[arg-type]
+        additive=True,
+        presence=lambda user_id, tokens: frozenset(),
+        frames=lambda user_id, question: (),
+    )
+
+    outcome = selector.select(
+        "Where do I keep the spare keys and how much did it cost?",
+        None,
+        [stored],
+        _anchors(stored),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    # 多部分问题：另一问有答案，不得整体拒答。
+    assert stored.memory_id in {item.memory_id for item in outcome.selection.evidence}

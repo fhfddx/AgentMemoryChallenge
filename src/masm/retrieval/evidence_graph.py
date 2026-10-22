@@ -32,6 +32,7 @@ from masm.retrieval.evidence_graph_rules import (
     RequirementKind,
     SupportRole,
     ValidatedLink,
+    asked_value_kind,
     attested_units,
     bounded_persisted_pairs,
     candidate_views,
@@ -40,8 +41,10 @@ from masm.retrieval.evidence_graph_rules import (
     name_tokens,
     planner_candidate_text,
     question_has_clause_marker,
+    question_is_multi_part,
     relation_capitalized_names,
     slot_template_conflict,
+    states_value_of_kind,
     unit_frequencies,
     validate_proposal,
 )
@@ -64,9 +67,7 @@ from masm.retrieval.selector_pool import DEFAULT_SELECTOR_CANDIDATES, build_sele
 from masm.schemas.content import ContentPart
 from masm.storage.types import MemoryCandidate
 
-PROMPT_VERSION = "evidence-graph-planner-v3"
-# 一跳邻居召回的最大条数：只用于让 planner 看到跨会话候选，数量必须有界。
-NEIGHBOUR_LIMIT = 6
+PROMPT_VERSION = "evidence-graph-planner-v2"
 # 遥测只记录该固定枚举；"unknown" 表示本次没有图判定（纯图片查询或 v7 回退）。
 ReportedGraphState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
@@ -115,11 +116,7 @@ _PROMPT = (
     "propose persisted_relation as a hypothesis; deterministic provenance validation will reject "
     "it unless "
     "a stored relation exists. Never link candidates that merely share a generic word, topic, "
-    "ranking, option or time. When two candidates describe the same event, entity or trip in "
-    "different words, for example a city trip and a country offsite in the same month, emit a link "
-    "of kind shared_explicit_mention, quoting both exactly, since the second session is "
-    "often the only place the requested value is stated. Propose a requirement only when the "
-    "question asks for it, and "
+    "ranking, option or time. Propose a requirement only when the question asks for it, and "
     "propose support only when the candidate text states it. Omit support rather than guess: an "
     "incomplete "
     "proposal is safer than an invented one."
@@ -327,7 +324,6 @@ class GraphDiagnostics:
     planner_failure_reason: PlannerFailureReason = "none"
     vetoed: bool = False
     bridge_added: int = 0
-    link_added: int = 0
     bridge_skip: str = "none"
     planner_latency_ms: float = 0.0
 
@@ -405,77 +401,10 @@ def _bridge_additions(
         return (), "no_question_overlap"
     return (), "no_cross_session_candidate"
 
-def _link_additions(
-    selected: Sequence[RankedEvidence],
-    candidates: Sequence[CandidateView],
-    links: Sequence[tuple[int, int]],
-    *,
-    limit: int = 2,
-) -> tuple[RankedEvidence, ...]:
-    """追加"被已校验 link 连到已选证据"的候选（R12 的基础）。
+def _view_text(view: CandidateView) -> str:
+    """候选可见文本：用于确定性值类型判定。"""
 
-    与 R11 不同：这里不要求词面共享稀有单元，而是采用 planner 已声明并通过校验的连接，
-    因此改写、代词与时序类的跨会话证据也能被追加。
-    """
-
-    if not selected or not links:
-        return ()
-    selected_ids = {item.memory_id for item in selected}
-    if not selected_ids:
-        return ()
-    index_of = {view.memory_id: index for index, view in enumerate(candidates)}
-    selected_indexes = {
-        index_of[memory_id] for memory_id in selected_ids if memory_id in index_of
-    }
-    if not selected_indexes:
-        return ()
-    additions: list[RankedEvidence] = []
-    seen: set = set()
-    for left, right in links:
-        for anchor, other in ((left, right), (right, left)):
-            if anchor not in selected_indexes or not 0 <= other < len(candidates):
-                continue
-            view = candidates[other]
-            if view.memory_id in selected_ids or view.memory_id in seen:
-                continue
-            seen.add(view.memory_id)
-            additions.append(view.evidence)
-            if len(additions) >= limit:
-                return tuple(additions)
-    return tuple(additions)
-
-def _first_text(evidence: Sequence[RankedEvidence]) -> str:
-    """取第一条证据的纯文本：用于从已选证据出发做邻居召回。"""
-
-    for item in evidence:
-        content = item.content
-        if isinstance(content, str):
-            return content
-    return ""
-
-def _grounded_link_pairs(
-    proposal: EvidenceGraphProposal, candidates: Sequence[CandidateView]
-) -> tuple[tuple[int, int], ...]:
-    """planner 声明、且两段引文逐字落地的跨会话 link（仅用于追加，不用于证明）。
-
-    语义桥接（改写、代词、时序）没有任何共同词面单元，严格校验必然丢弃；追加上限为 2 条、
-    只在不同会话之间发生，因此风险有界，且仍要求两段引文都是候选文本的逐字子串。
-    """
-
-    pairs: list[tuple[int, int]] = []
-    for link in proposal.links:
-        left_index = link.left_candidate_index
-        right_index = link.right_candidate_index
-        if not (0 <= left_index < len(candidates) and 0 <= right_index < len(candidates)):
-            continue
-        left = candidates[left_index]
-        right = candidates[right_index]
-        if left.source_group == right.source_group:
-            continue
-        if link.left_quote not in left.text or link.right_quote not in right.text:
-            continue
-        pairs.append((left_index, right_index))
-    return tuple(pairs)
+    return view.text
 
 def _additive_selection(
     baseline: SelectionResult,
@@ -544,7 +473,6 @@ class GraphEvidenceSelector:
             Callable[[str, Sequence[str], int], Sequence[RankedEvidence]] | None
         ) = None,
         frames: Callable[[str, str], Sequence[str]] | None = None,
-        expand_from: Callable[[str, str], Sequence[RankedEvidence]] | None = None,
     ) -> None:
         if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
@@ -561,8 +489,6 @@ class GraphEvidenceSelector:
         self._retrieve_more = retrieve_more
         # 同框架近失配检索：用于判断"库里只有同属性、不同主体的记忆"。
         self._frames = frames
-        # 从已选证据出发的一跳邻居召回：多跳第二段常只与证据相近，与问题无共同词。
-        self._expand_from = expand_from
 
     def select(
         self,
@@ -589,27 +515,6 @@ class GraphEvidenceSelector:
             scoped_ranked,
             max_candidates=self._max_candidates,
         )
-        # 多跳的第二段常只与已选证据相近、与问题无共同词：必须在 planner 之前补一跳邻居，
-        # 否则 planner 看不到它，也就无从声明跨会话连接。仅当证据只覆盖一个会话时触发。
-        if self._expand_from is not None and baseline is not None and baseline.evidence:
-            anchor_sources = {
-                item.request_id or str(item.memory_id) for item in baseline.evidence
-            }
-            if len(anchor_sources) == 1:
-                try:
-                    neighbours = self._expand_from(
-                        request_user_id, _first_text(baseline.evidence)
-                    )
-                except Exception:
-                    neighbours = ()
-                known = {item.memory_id for item in pool}
-                extra_items = [
-                    item
-                    for item in neighbours
-                    if item.memory_id not in known and item.user_id == request_user_id
-                ]
-                if extra_items:
-                    pool = list(pool) + extra_items[:NEIGHBOUR_LIMIT]
         pool_anchor_ids = {
             item.memory_id for item in pool if item.memory_id in strong_anchor_ids
         }
@@ -735,7 +640,6 @@ class GraphEvidenceSelector:
         # R10：问题点名的主体（名字样记号）在**整个库**里都没出现过时，库里没有任何记忆能回答它。
         # 判据必须是全库而非候选池：只在池内缺失通常只说明排序，据此拒答会误伤可回答问题。
         absent_names: frozenset[str] = frozenset()
-        link_added = 0
         bridge_skip = "none"
         bridge_added = 0
         if (
@@ -762,8 +666,28 @@ class GraphEvidenceSelector:
                         frame_texts = ()
                     if slot_template_conflict(question, frame_texts):
                         absent_names = names
+        # 判据 C：问题所问的值类型（日期/金额/数量/时长/颜色）在候选与相关记忆里都不存在。
+        # 与名字判据正交：direct 问题的答案就在证据里，因此不会误伤可回答问题。
+        missing_value_kind = ""
+        if self._additive and baseline is not None and not absent_names:
+            asked_kind = asked_value_kind(question)
+            # 只在单部分问题上启用：多部分问题里某一问缺值，不应连累另一问的答案。
+            if asked_kind != "none" and not question_is_multi_part(question):
+                stated = any(
+                    states_value_of_kind(view.text, asked_kind) for view in views
+                )
+                if not stated and self._frames is not None:
+                    try:
+                        related = self._frames(request_user_id, question)
+                    except Exception:
+                        related = ()
+                    stated = any(
+                        states_value_of_kind(text, asked_kind) for text in related
+                    )
+                if not stated:
+                    missing_value_kind = asked_kind
         if self._additive and baseline is not None:
-            if absent_names:
+            if absent_names or missing_value_kind:
                 selection = SelectionResult(
                     evidence=(),
                     candidate_count=baseline.candidate_count,
@@ -792,45 +716,14 @@ class GraphEvidenceSelector:
                             max_chars=self._planner.max_chars_per_candidate,
                         )
                     )
-                # 锚点优先用 v7 基线；基线为空时退回图组装证据，否则桥接无处可挂。
-                anchor_evidence = list(baseline.evidence) or list(evidence)
-                # 多跳的第二段常与问题无共同词、只与已选证据相近：从证据出发补一跳邻居。
-                if self._expand_from is not None and len(anchor_evidence) > 0:
-                    sources = {
-                        item.request_id or str(item.memory_id) for item in anchor_evidence
-                    }
-                    if len(sources) == 1:
-                        try:
-                            neighbours = self._expand_from(
-                                request_user_id, _first_text(anchor_evidence)
-                            )
-                        except Exception:
-                            neighbours = ()
-                        extra_views.extend(
-                            candidate_views(
-                                list(neighbours),
-                                max_chars=self._planner.max_chars_per_candidate,
-                            )
-                        )
                 bridge_evidence, bridge_skip = _bridge_additions(
-                    anchor_evidence,
+                    baseline.evidence,
                     [*views, *extra_views],
                     question_units,
                     frequencies,
                 )
                 bridge_added = len(bridge_evidence)
                 additions.extend(bridge_evidence)
-                # R12：planner 声明的 link 也能追加。严格校验通过的 link 优先；语义桥接（改写、
-                # 代词、时序）没有共同词面单元，只要两段引文逐字落地且跨会话就允许追加，上限 2 条。
-                append_links: list[tuple[int, int]] = [
-                    (link.left_index, link.right_index) for link in outcome.links
-                ]
-                append_links.extend(_grounded_link_pairs(proposal, views))
-                link_evidence = _link_additions(
-                    anchor_evidence, views, append_links, limit=2
-                )
-                link_added = len(link_evidence)
-                additions.extend(link_evidence)
                 selection = _additive_selection(
                     baseline,
                     additions,
@@ -865,7 +758,6 @@ class GraphEvidenceSelector:
                 failure_category="none",
                 vetoed=bool(absent_names),
                 bridge_added=bridge_added,
-                link_added=link_added,
                 bridge_skip=bridge_skip,
                 planner_latency_ms=latency_ms,
             ),

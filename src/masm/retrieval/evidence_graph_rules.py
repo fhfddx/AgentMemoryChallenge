@@ -422,6 +422,84 @@ def relation_capitalized_names(question: str) -> frozenset[str]:
         found.add(normalize_text(name))
     return frozenset(found)
 
+_MONTHS = (
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+)
+_COLOURS = frozenset(
+    {
+        "red", "blue", "green", "black", "white", "grey", "gray", "yellow", "orange",
+        "purple", "pink", "brown", "silver", "gold", "beige", "navy", "teal",
+    }
+)
+_KIND_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("date", ("when", "what day", "what date", "which day", "which month", "how long until")),
+    ("money", ("how much", "what price", "price", "cost", "how expensive", "fee", "fare")),
+    ("duration", ("how long", "how many hours", "how many minutes", "how many days", "duration")),
+    ("count", ("how many", "how often", "number of")),
+    ("colour", ("what colour", "what color", "which colour", "which color")),
+)
+_MONTH_PATTERN = "|".join(_MONTHS)
+_DATE_VALUE = re.compile(
+    r"\b(\d{1,2}(st|nd|rd|th)?\s+(" + _MONTH_PATTERN + r")"
+    r"|(" + _MONTH_PATTERN + r")\s+\d{1,2}"
+    r"|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}|(19|20)\d{2}"
+    r"|today|tomorrow|yesterday|next week|last week|next month|last month)\b",
+    re.IGNORECASE,
+)
+_NUMBER_VALUE = re.compile(
+    r"\b(\d+(\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+    r"|dozen)\b",
+    re.IGNORECASE,
+)
+_MONEY_VALUE = re.compile(
+    r"([$€£¥]\s?\d|\b\d+(\.\d+)?\s?(dollars|euros|pounds|yuan|usd|eur)\b)",
+    re.IGNORECASE,
+)
+_PUNCTUATION = ".,!?;:\"'()[]{}"
+
+
+def asked_value_kind(question: str) -> str:
+    """问题要求的值类型（date/money/duration/count/colour/none）；用于"所问之值是否存在"判定。"""
+
+    lowered = normalize_text(question)
+    for kind, cues in _KIND_CUES:
+        if any(cue in lowered for cue in cues):
+            return kind
+    return "none"
+
+
+def states_value_of_kind(text: str, kind: str) -> bool:
+    """文本是否给出该类值：只做确定性字面判定，不做语义推断。"""
+
+    # 值类型判定必须看原文：归一化会去掉数字与货币符号。
+    lowered = text.casefold()
+    if kind == "date":
+        return bool(_DATE_VALUE.search(lowered))
+    if kind == "money":
+        if _MONEY_VALUE.search(lowered):
+            return True
+        # 归一化可能去掉货币符号，因此接受"数字 + 价格线索词"的组合。
+        cues = ("cost", "price", "paid", "pay", "fee", "fare", "charge")
+        return bool(_NUMBER_VALUE.search(lowered)) and any(cue in lowered for cue in cues)
+    if kind in {"duration", "count"}:
+        return bool(_NUMBER_VALUE.search(lowered))
+    if kind == "colour":
+        words = {word.strip(_PUNCTUATION) for word in lowered.split()}
+        return any(colour in words for colour in _COLOURS)
+    return True
+
+def question_is_multi_part(question: str) -> bool:
+    """问题是否在问多件事：多部分问题里某一问缺值，不应连累另一问的答案。"""
+
+    lowered = question.casefold()
+    if question_has_clause_marker(question):
+        return True
+    if " and " in lowered or ";" in lowered or "," in lowered:
+        return True
+    return lowered.count("?") > 1
+
 def shared_discriminative_unit(
     left_quote: str,
     right_quote: str,

@@ -89,7 +89,6 @@ class SearchDiagnostics:
     graph_planner_failure_reason: str = "none"
     graph_vetoed: bool = False
     graph_bridge_added: int = 0
-    graph_link_added: int = 0
     graph_bridge_skip: str = "none"
     graph_planner_latency_ms: float = 0.0
 
@@ -155,7 +154,6 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
         ),
         "graph_vetoed": bool(value.graph_vetoed),
         "graph_bridge_added": max(0, int(value.graph_bridge_added)),
-        "graph_link_added": max(0, int(value.graph_link_added)),
         "graph_bridge_skip": (
             value.graph_bridge_skip
             if value.graph_bridge_skip in _GRAPH_BRIDGE_SKIPS
