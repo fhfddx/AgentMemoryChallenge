@@ -111,7 +111,7 @@ class _PayloadPlannerLLM(FakeStructuredLLM):
         self.payloads: list[Mapping[str, Any]] = []
 
     def complete_json(self, request: Any, output_type: Any) -> Any:
-        if request.prompt_version == "evidence-graph-planner-v2":
+        if request.prompt_version == "evidence-graph-planner-v3":
             self.payloads.append(request.payload)
             self.queue(self._proposal(request.payload))
         return super().complete_json(request, output_type)
@@ -236,7 +236,7 @@ def test_additive_mode_keeps_v7_selection_and_appends_graph_evidence(
 
         assert [request.prompt_version for request in llm.requests] == [
             "evidence-selector-v7",
-            "evidence-graph-planner-v2",
+            "evidence-graph-planner-v3",
         ]
         returned = {item.content for item in response.data}
         # v7 的基线选择必须保留，图的已证明证据追加在后。
@@ -282,7 +282,7 @@ def test_persisted_relation_sidecar_enables_a_cross_source_chain(
             response = service.search(SearchRequest(query=_QUESTION, user_id=user, top_k=10))
 
         assert [request.prompt_version for request in llm.requests] == [
-            "evidence-graph-planner-v2"
+            "evidence-graph-planner-v3"
         ]
         returned = {item.content for item in response.data}
         assert any(_CODE_TEXT in text for text in returned)
