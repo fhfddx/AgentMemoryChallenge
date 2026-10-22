@@ -157,7 +157,7 @@ def test_direct_single_source_fact_is_sufficient() -> None:
     assert outcome.graph.selected_count == 1
     assert outcome.graph.selected_source_count == 1
     assert len(llm.requests) == 1
-    assert llm.requests[0].prompt_version == "evidence-graph-planner-v2"
+    assert llm.requests[0].prompt_version == "evidence-graph-planner-v3"
     assert llm.requests[0].max_attempts == 1
     assert llm.requests[0].temperature == 0.0
 
@@ -2042,7 +2042,7 @@ def test_planner_transport_failure_falls_back_to_the_frozen_selector_once() -> N
     assert outcome.graph.failure_category == "planner_unavailable"
     assert outcome.selection.evidence == (direct,)
     assert [request.prompt_version for request in llm.requests] == [
-        "evidence-graph-planner-v2",
+        "evidence-graph-planner-v3",
         "evidence-selector-v7",
     ]
 
@@ -2072,7 +2072,7 @@ def test_planner_failure_falls_back_once_over_the_same_bounded_pool() -> None:
     assert outcome.graph.failure_category == "planner_unavailable"
     assert outcome.selection.candidate_count == 32
     assert [request.prompt_version for request in llm.requests] == [
-        "evidence-graph-planner-v2",
+        "evidence-graph-planner-v3",
         "evidence-selector-v7",
     ]
 
@@ -2219,7 +2219,7 @@ def test_structurally_invalid_proposals_fall_back_once(response: Mapping[str, ob
     assert outcome.graph.failure_category == "planner_invalid"
     assert outcome.selection.evidence == (direct,)
     assert [request.prompt_version for request in llm.requests] == [
-        "evidence-graph-planner-v2",
+        "evidence-graph-planner-v3",
         "evidence-selector-v7",
     ]
 

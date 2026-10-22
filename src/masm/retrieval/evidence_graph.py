@@ -64,7 +64,7 @@ from masm.retrieval.selector_pool import DEFAULT_SELECTOR_CANDIDATES, build_sele
 from masm.schemas.content import ContentPart
 from masm.storage.types import MemoryCandidate
 
-PROMPT_VERSION = "evidence-graph-planner-v2"
+PROMPT_VERSION = "evidence-graph-planner-v3"
 # 遥测只记录该固定枚举；"unknown" 表示本次没有图判定（纯图片查询或 v7 回退）。
 ReportedGraphState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
@@ -113,7 +113,11 @@ _PROMPT = (
     "propose persisted_relation as a hypothesis; deterministic provenance validation will reject "
     "it unless "
     "a stored relation exists. Never link candidates that merely share a generic word, topic, "
-    "ranking, option or time. Propose a requirement only when the question asks for it, and "
+    "ranking, option or time. When two candidates describe the same event, entity or trip in "
+    "different words, for example a city trip and a country offsite in the same month, emit a link "
+    "of kind shared_explicit_mention, quoting both exactly, since the second session is "
+    "often the only place the requested value is stated. Propose a requirement only when the "
+    "question asks for it, and "
     "propose support only when the candidate text states it. Omit support rather than guess: an "
     "incomplete "
     "proposal is safer than an invented one."

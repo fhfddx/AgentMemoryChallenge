@@ -258,7 +258,7 @@ def test_search_with_graph_mode_issues_exactly_one_planner_call() -> None:
     )
 
     assert [request.prompt_version for request in llm.requests] == [
-        "evidence-graph-planner-v2"
+        "evidence-graph-planner-v3"
     ]
     assert [item.content for item in response.data] == [
         "I stored the amber key in drawer three."
