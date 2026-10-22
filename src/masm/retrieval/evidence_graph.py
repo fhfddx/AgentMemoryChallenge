@@ -402,7 +402,7 @@ def _bridge_additions(
 def _link_additions(
     selected: Sequence[RankedEvidence],
     candidates: Sequence[CandidateView],
-    links: Sequence[ValidatedLink],
+    links: Sequence[tuple[int, int]],
     *,
     limit: int = 2,
 ) -> tuple[RankedEvidence, ...]:
@@ -425,11 +425,8 @@ def _link_additions(
         return ()
     additions: list[RankedEvidence] = []
     seen: set = set()
-    for link in links:
-        for anchor, other in (
-            (link.left_index, link.right_index),
-            (link.right_index, link.left_index),
-        ):
+    for left, right in links:
+        for anchor, other in ((left, right), (right, left)):
             if anchor not in selected_indexes or not 0 <= other < len(candidates):
                 continue
             view = candidates[other]
@@ -440,6 +437,30 @@ def _link_additions(
             if len(additions) >= limit:
                 return tuple(additions)
     return tuple(additions)
+
+def _grounded_link_pairs(
+    proposal: EvidenceGraphProposal, candidates: Sequence[CandidateView]
+) -> tuple[tuple[int, int], ...]:
+    """planner 声明、且两段引文逐字落地的跨会话 link（仅用于追加，不用于证明）。
+
+    语义桥接（改写、代词、时序）没有任何共同词面单元，严格校验必然丢弃；追加上限为 2 条、
+    只在不同会话之间发生，因此风险有界，且仍要求两段引文都是候选文本的逐字子串。
+    """
+
+    pairs: list[tuple[int, int]] = []
+    for link in proposal.links:
+        left_index = link.left_candidate_index
+        right_index = link.right_candidate_index
+        if not (0 <= left_index < len(candidates) and 0 <= right_index < len(candidates)):
+            continue
+        left = candidates[left_index]
+        right = candidates[right_index]
+        if left.source_group == right.source_group:
+            continue
+        if link.left_quote not in left.text or link.right_quote not in right.text:
+            continue
+        pairs.append((left_index, right_index))
+    return tuple(pairs)
 
 def _additive_selection(
     baseline: SelectionResult,
@@ -740,9 +761,14 @@ class GraphEvidenceSelector:
                 )
                 bridge_added = len(bridge_evidence)
                 additions.extend(bridge_evidence)
-                # R12：只采用 planner 已声明的 link（词面/派生连接由 R11 负责），接住语义桥接。
+                # R12：planner 声明的 link 也能追加。严格校验通过的 link 优先；语义桥接（改写、
+                # 代词、时序）没有共同词面单元，只要两段引文逐字落地且跨会话就允许追加，上限 2 条。
+                append_links: list[tuple[int, int]] = [
+                    (link.left_index, link.right_index) for link in outcome.links
+                ]
+                append_links.extend(_grounded_link_pairs(proposal, views))
                 link_evidence = _link_additions(
-                    baseline.evidence, views, outcome.links, limit=2
+                    baseline.evidence, views, append_links, limit=2
                 )
                 link_added = len(link_evidence)
                 additions.extend(link_evidence)

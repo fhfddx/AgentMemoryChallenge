@@ -57,6 +57,12 @@ class _Capture(logging.Handler):
 def run(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Print graph diagnostics for one search")
     parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument(
+        "--case",
+        choices=("lexical", "semantic"),
+        default="lexical",
+        help="lexical: shared rare unit; semantic: paraphrase with no shared unit",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
     settings = Settings.from_env()
     settings.validate_runtime()
@@ -65,13 +71,22 @@ def run(argv: Sequence[str] | None = None) -> int:
         return 2
     user_id = f"graph-diagnostics-probe-{uuid4().hex[:12]}"
     tag = uuid4().hex[:8]
-    sister = f"Sister-{tag}"
-    office = f"Office-{tag}"
-    date = f"Date-{tag}"
-    texts = (
-        f"My sister {sister} works at the {office} office as an architect.",
-        f"The {office} holiday party is scheduled for {date}.",
-    )
+    if args.case == "lexical":
+        sister = f"Sister-{tag}"
+        office = f"Office-{tag}"
+        date = f"Date-{tag}"
+        texts = (
+            f"My sister {sister} works at the {office} office as an architect.",
+            f"The {office} holiday party is scheduled for {date}.",
+        )
+        query = "When is my sister's company holiday party?"
+    else:
+        # 语义桥接：两段没有任何共同区分单元，只有 planner 能建立连接。
+        texts = (
+            "Priya signed off on the Barcelona trip for the whole design team.",
+            "The Spanish offsite in November is confirmed for everyone.",
+        )
+        query = "When did Priya approve the Barcelona trip?"
     database = Database.create(settings.database_url)
     repository = MemoryRepository(database)
     deletion = DeletionService(repository, AssetStore(settings.asset_dir))
@@ -122,7 +137,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         try:
             response = service.search(
                 SearchRequest(
-                    query="When is my sister's company holiday party?",
+                    query=query,
                     user_id=user_id,
                     top_k=args.top_k,
                 )
@@ -135,7 +150,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         print(
             json.dumps(
                 {
-                    "case": "graph_diagnostics",
+                    "case": f"graph_diagnostics_{args.case}",
                     "returned_count": len(response.data),
                     "seeded_session_count": len(sessions),
                     "graph": {field: payload.get(field) for field in GRAPH_FIELDS},
