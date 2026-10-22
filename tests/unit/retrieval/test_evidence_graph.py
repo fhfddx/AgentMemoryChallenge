@@ -2654,3 +2654,44 @@ def test_relation_prefixed_absent_name_is_refused_without_a_template() -> None:
 
     assert outcome.graph.vetoed is True
     assert outcome.selection.evidence == ()
+def test_additive_mode_appends_a_planner_linked_candidate() -> None:
+    first = _evidence(1, "source-a", "The onboarding handbook covers badge pickup.")
+    second = _evidence(2, "source-b", "New starters collect passes at the north gate.")
+    baseline = _StubBaseline((first,))
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[
+                    _requirement("Where do new starters collect", "location"),
+                    _requirement("their passes", "attribute"),
+                ],
+                supports=[
+                    _support(0, 1, "New starters collect passes at the north gate.", "direct")
+                ],
+                links=[
+                    _link(
+                        0,
+                        1,
+                        "The onboarding handbook covers badge pickup.",
+                        "New starters collect passes at the north gate.",
+                        "persisted_relation",
+                    )
+                ],
+            )
+        ]
+    )
+
+    outcome = _additive_selector(llm, baseline).select(
+        "Where do new starters collect their passes?",
+        None,
+        [first, second],
+        _anchors(first, second),
+        GraphContext(relation_source_pairs=(("source-a", "source-b"),)),
+        request_user_id="user-1",
+    )
+
+    ids = [item.memory_id for item in outcome.selection.evidence]
+    # planner 声明并校验过的 link 让第二会话被追加，即使两段文字没有共同词面单元。
+    assert first.memory_id in ids
+    assert second.memory_id in ids
+    assert outcome.graph.link_added >= 1

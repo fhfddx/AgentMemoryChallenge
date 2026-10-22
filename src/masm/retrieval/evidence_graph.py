@@ -321,6 +321,7 @@ class GraphDiagnostics:
     planner_failure_reason: PlannerFailureReason = "none"
     vetoed: bool = False
     bridge_added: int = 0
+    link_added: int = 0
     bridge_skip: str = "none"
     planner_latency_ms: float = 0.0
 
@@ -397,6 +398,48 @@ def _bridge_additions(
     if skipped_question:
         return (), "no_question_overlap"
     return (), "no_cross_session_candidate"
+
+def _link_additions(
+    selected: Sequence[RankedEvidence],
+    candidates: Sequence[CandidateView],
+    links: Sequence[ValidatedLink],
+    *,
+    limit: int = 2,
+) -> tuple[RankedEvidence, ...]:
+    """追加"被已校验 link 连到已选证据"的候选（R12 的基础）。
+
+    与 R11 不同：这里不要求词面共享稀有单元，而是采用 planner 已声明并通过校验的连接，
+    因此改写、代词与时序类的跨会话证据也能被追加。
+    """
+
+    if not selected or not links:
+        return ()
+    selected_ids = {item.memory_id for item in selected}
+    if not selected_ids:
+        return ()
+    index_of = {view.memory_id: index for index, view in enumerate(candidates)}
+    selected_indexes = {
+        index_of[memory_id] for memory_id in selected_ids if memory_id in index_of
+    }
+    if not selected_indexes:
+        return ()
+    additions: list[RankedEvidence] = []
+    seen: set = set()
+    for link in links:
+        for anchor, other in (
+            (link.left_index, link.right_index),
+            (link.right_index, link.left_index),
+        ):
+            if anchor not in selected_indexes or not 0 <= other < len(candidates):
+                continue
+            view = candidates[other]
+            if view.memory_id in selected_ids or view.memory_id in seen:
+                continue
+            seen.add(view.memory_id)
+            additions.append(view.evidence)
+            if len(additions) >= limit:
+                return tuple(additions)
+    return tuple(additions)
 
 def _additive_selection(
     baseline: SelectionResult,
@@ -632,6 +675,7 @@ class GraphEvidenceSelector:
         # R10：问题点名的主体（名字样记号）在**整个库**里都没出现过时，库里没有任何记忆能回答它。
         # 判据必须是全库而非候选池：只在池内缺失通常只说明排序，据此拒答会误伤可回答问题。
         absent_names: frozenset[str] = frozenset()
+        link_added = 0
         bridge_skip = "none"
         bridge_added = 0
         if (
@@ -696,6 +740,12 @@ class GraphEvidenceSelector:
                 )
                 bridge_added = len(bridge_evidence)
                 additions.extend(bridge_evidence)
+                # R12：只采用 planner 已声明的 link（词面/派生连接由 R11 负责），接住语义桥接。
+                link_evidence = _link_additions(
+                    baseline.evidence, views, outcome.links, limit=2
+                )
+                link_added = len(link_evidence)
+                additions.extend(link_evidence)
                 selection = _additive_selection(
                     baseline,
                     additions,
@@ -730,6 +780,7 @@ class GraphEvidenceSelector:
                 failure_category="none",
                 vetoed=bool(absent_names),
                 bridge_added=bridge_added,
+                link_added=link_added,
                 bridge_skip=bridge_skip,
                 planner_latency_ms=latency_ms,
             ),
