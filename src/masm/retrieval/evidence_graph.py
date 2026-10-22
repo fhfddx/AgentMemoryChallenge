@@ -438,6 +438,15 @@ def _link_additions(
                 return tuple(additions)
     return tuple(additions)
 
+def _first_text(evidence: Sequence[RankedEvidence]) -> str:
+    """取第一条证据的纯文本：用于从已选证据出发做邻居召回。"""
+
+    for item in evidence:
+        content = item.content
+        if isinstance(content, str):
+            return content
+    return ""
+
 def _grounded_link_pairs(
     proposal: EvidenceGraphProposal, candidates: Sequence[CandidateView]
 ) -> tuple[tuple[int, int], ...]:
@@ -529,6 +538,7 @@ class GraphEvidenceSelector:
             Callable[[str, Sequence[str], int], Sequence[RankedEvidence]] | None
         ) = None,
         frames: Callable[[str, str], Sequence[str]] | None = None,
+        expand_from: Callable[[str, str], Sequence[RankedEvidence]] | None = None,
     ) -> None:
         if not 1 <= max_candidates <= DEFAULT_SELECTOR_CANDIDATES:
             raise ValueError("max_candidates must be in 1..32")
@@ -545,6 +555,8 @@ class GraphEvidenceSelector:
         self._retrieve_more = retrieve_more
         # 同框架近失配检索：用于判断"库里只有同属性、不同主体的记忆"。
         self._frames = frames
+        # 从已选证据出发的一跳邻居召回：多跳第二段常只与证据相近，与问题无共同词。
+        self._expand_from = expand_from
 
     def select(
         self,
@@ -755,6 +767,24 @@ class GraphEvidenceSelector:
                     )
                 # 锚点优先用 v7 基线；基线为空时退回图组装证据，否则桥接无处可挂。
                 anchor_evidence = list(baseline.evidence) or list(evidence)
+                # 多跳的第二段常与问题无共同词、只与已选证据相近：从证据出发补一跳邻居。
+                if self._expand_from is not None and len(anchor_evidence) > 0:
+                    sources = {
+                        item.request_id or str(item.memory_id) for item in anchor_evidence
+                    }
+                    if len(sources) == 1:
+                        try:
+                            neighbours = self._expand_from(
+                                request_user_id, _first_text(anchor_evidence)
+                            )
+                        except Exception:
+                            neighbours = ()
+                        extra_views.extend(
+                            candidate_views(
+                                list(neighbours),
+                                max_chars=self._planner.max_chars_per_candidate,
+                            )
+                        )
                 bridge_evidence, bridge_skip = _bridge_additions(
                     anchor_evidence,
                     [*views, *extra_views],
