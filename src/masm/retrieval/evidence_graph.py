@@ -65,6 +65,8 @@ from masm.schemas.content import ContentPart
 from masm.storage.types import MemoryCandidate
 
 PROMPT_VERSION = "evidence-graph-planner-v3"
+# 一跳邻居召回的最大条数：只用于让 planner 看到跨会话候选，数量必须有界。
+NEIGHBOUR_LIMIT = 6
 # 遥测只记录该固定枚举；"unknown" 表示本次没有图判定（纯图片查询或 v7 回退）。
 ReportedGraphState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
@@ -587,6 +589,27 @@ class GraphEvidenceSelector:
             scoped_ranked,
             max_candidates=self._max_candidates,
         )
+        # 多跳的第二段常只与已选证据相近、与问题无共同词：必须在 planner 之前补一跳邻居，
+        # 否则 planner 看不到它，也就无从声明跨会话连接。仅当证据只覆盖一个会话时触发。
+        if self._expand_from is not None and baseline is not None and baseline.evidence:
+            anchor_sources = {
+                item.request_id or str(item.memory_id) for item in baseline.evidence
+            }
+            if len(anchor_sources) == 1:
+                try:
+                    neighbours = self._expand_from(
+                        request_user_id, _first_text(baseline.evidence)
+                    )
+                except Exception:
+                    neighbours = ()
+                known = {item.memory_id for item in pool}
+                extra_items = [
+                    item
+                    for item in neighbours
+                    if item.memory_id not in known and item.user_id == request_user_id
+                ]
+                if extra_items:
+                    pool = list(pool) + extra_items[:NEIGHBOUR_LIMIT]
         pool_anchor_ids = {
             item.memory_id for item in pool if item.memory_id in strong_anchor_ids
         }
