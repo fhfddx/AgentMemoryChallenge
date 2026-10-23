@@ -436,6 +436,18 @@ _QUANTITY_WORDS = (
     "half", "quarter", "pair", "dozen", "several", "many", "few",
 )
 _COLOUR_WORDS = ("colour", "color", "shade", "paint")
+_PLACE_WORDS = (
+    "office", "street", "road", "city", "country", "room", "building", "address",
+    "hotel", "airport", "station", "home", "house", "flat", "floor", "gate", "store",
+    "shop", "school", "university", "hospital", "park", "campus", "branch", "location",
+    "venue", "headquarters", "downtown", "uptown", "north", "south", "east", "west",
+)
+_PERSON_WORDS = (
+    "sister", "brother", "mother", "father", "mom", "dad", "wife", "husband",
+    "partner", "son", "daughter", "friend", "boss", "manager", "colleague", "coworker",
+    "neighbor", "neighbour", "landlord", "doctor", "dentist", "teacher", "cousin",
+    "aunt", "uncle", "she", "he", "they", "person", "people", "someone", "team",
+)
 _MONTHS = (
     "january", "february", "march", "april", "may", "june", "july", "august",
     "september", "october", "november", "december",
@@ -507,6 +519,11 @@ def states_value_of_kind(text: str, kind: str) -> bool:
         if any(colour in words for colour in _COLOURS):
             return True
         return any(word in lowered for word in _COLOUR_WORDS)
+    if kind in {"place", "person"}:
+        # 按整词匹配：子串匹配会让 "the" 命中 "he"，造成误判。
+        words = {word.strip(_PUNCTUATION) for word in lowered.split()}
+        vocabulary = _PLACE_WORDS if kind == "place" else _PERSON_WORDS
+        return any(word in words for word in vocabulary)
     return True
 
 def question_is_multi_part(question: str) -> bool:
