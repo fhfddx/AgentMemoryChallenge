@@ -536,6 +536,28 @@ def question_is_multi_part(question: str) -> bool:
         return True
     return lowered.count("?") > 1
 
+_IDENTIFIER = re.compile(
+    r"\b(?=[a-z0-9'_-]{3,})"
+    r"(?:[a-z]+[0-9]|[0-9]+[a-z]|[a-z]+[A-Z]|[A-Z][a-z]*[A-Z])"
+    r"[a-z0-9'_-]*\b"
+)
+
+
+def identifier_tokens(question: str) -> frozenset[str]:
+    """问题里像编号的标识符（含数字、词内大写或连字符）。
+
+    direct 问题几乎不会出现库里不存在的编号，因此该判据可以作为旁路拒答信号使用。
+    """
+
+    payload = unicodedata.normalize("NFKC", question)
+    found: set[str] = set()
+    for match in _IDENTIFIER.finditer(payload):
+        token = match.group(0)
+        if token.casefold() in _NAME_DENYLIST:
+            continue
+        found.add(token.casefold())
+    return frozenset(found)
+
 def shared_discriminative_unit(
     left_quote: str,
     right_quote: str,

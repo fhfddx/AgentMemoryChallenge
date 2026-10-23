@@ -2654,40 +2654,6 @@ def test_relation_prefixed_absent_name_is_refused_without_a_template() -> None:
 
     assert outcome.graph.vetoed is True
     assert outcome.selection.evidence == ()
-def test_missing_asked_value_kind_refuses_a_single_part_question() -> None:
-    stored = _evidence(1, "source-a", "I keep the spare keys in the hallway drawer.")
-    llm = FakeStructuredLLM(
-        [
-            _proposal(
-                requirements=[_requirement("How much did the hallway drawer cost", "attribute")],
-                supports=[
-                    _support(0, 0, "I keep the spare keys in the hallway drawer.", "direct")
-                ],
-            )
-        ]
-    )
-    selector = GraphEvidenceSelector(
-        EvidenceGraphPlanner(llm),
-        _StubBaseline((stored,)),  # type: ignore[arg-type]
-        additive=True,
-        presence=lambda user_id, tokens: frozenset(),
-        frames=lambda user_id, question: (),
-    )
-
-    outcome = selector.select(
-        "How much did the hallway drawer cost?",
-        None,
-        [stored],
-        _anchors(stored),
-        GraphContext(),
-        request_user_id="user-1",
-    )
-
-    # 证据里没有任何金额：单部分问题应判定不可回答。
-    assert outcome.selection.evidence == ()
-    assert outcome.selection.abstained is True
-
-
 def test_multi_part_question_keeps_evidence_even_without_the_asked_value() -> None:
     stored = _evidence(1, "source-a", "I keep the spare keys in the hallway drawer.")
     llm = FakeStructuredLLM(
@@ -2721,4 +2687,67 @@ def test_multi_part_question_keeps_evidence_even_without_the_asked_value() -> No
     )
 
     # 多部分问题：另一问有答案，不得整体拒答。
+    assert stored.memory_id in {item.memory_id for item in outcome.selection.evidence}
+def test_absent_identifier_refuses_even_without_a_shared_template() -> None:
+    stored = _evidence(1, "source-a", "My sister Nora works at the office as an architect.")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("What is the code", "attribute")],
+                supports=[
+                    _support(0, 0, "My sister Nora works at the office", "context")
+                ],
+            )
+        ]
+    )
+    selector = GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        _StubBaseline((stored,)),  # type: ignore[arg-type]
+        additive=True,
+        # 编号 Code-9f3 全库不存在 → 旁路扳机拒答，无需模板近失配。
+        presence=lambda user_id, tokens: frozenset(),
+        frames=lambda user_id, question: (),
+    )
+
+    outcome = selector.select(
+        "What is the code for the Code-9f3 badge?",
+        None,
+        [stored],
+        _anchors(stored),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    assert outcome.selection.evidence == ()
+    assert outcome.selection.abstained is True
+
+
+def test_present_identifier_keeps_the_evidence() -> None:
+    stored = _evidence(1, "source-a", "The badge Code-9f3 opens the north gate.")
+    llm = FakeStructuredLLM(
+        [
+            _proposal(
+                requirements=[_requirement("What does the badge open", "location")],
+                supports=[_support(0, 0, "The badge Code-9f3 opens the north gate.", "direct")],
+            )
+        ]
+    )
+    selector = GraphEvidenceSelector(
+        EvidenceGraphPlanner(llm),
+        _StubBaseline((stored,)),  # type: ignore[arg-type]
+        additive=True,
+        presence=lambda user_id, tokens: frozenset(tokens),
+        frames=lambda user_id, question: (),
+    )
+
+    outcome = selector.select(
+        "What does the badge Code-9f3 open?",
+        None,
+        [stored],
+        _anchors(stored),
+        GraphContext(),
+        request_user_id="user-1",
+    )
+
+    # 编号存在 → 不拒答，证据保留。
     assert stored.memory_id in {item.memory_id for item in outcome.selection.evidence}

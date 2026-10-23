@@ -32,19 +32,17 @@ from masm.retrieval.evidence_graph_rules import (
     RequirementKind,
     SupportRole,
     ValidatedLink,
-    asked_value_kind,
     attested_units,
     bounded_persisted_pairs,
     candidate_views,
     derived_links,
     discriminative_units,
+    identifier_tokens,
     name_tokens,
     planner_candidate_text,
     question_has_clause_marker,
-    question_is_multi_part,
     relation_capitalized_names,
     slot_template_conflict,
-    states_value_of_kind,
     unit_frequencies,
     validate_proposal,
 )
@@ -666,28 +664,21 @@ class GraphEvidenceSelector:
                         frame_texts = ()
                     if slot_template_conflict(question, frame_texts):
                         absent_names = names
-        # 判据 C：问题所问的值类型（日期/金额/数量/时长/颜色）在候选与相关记忆里都不存在。
-        # 与名字判据正交：direct 问题的答案就在证据里，因此不会误伤可回答问题。
-        missing_value_kind = ""
-        if self._additive and baseline is not None and not absent_names:
-            asked_kind = asked_value_kind(question)
-            # 只在单部分问题上启用：多部分问题里某一问缺值，不应连累另一问的答案。
-            if asked_kind != "none" and not question_is_multi_part(question):
-                stated = any(
-                    states_value_of_kind(view.text, asked_kind) for view in views
-                )
-                if not stated and self._frames is not None:
-                    try:
-                        related = self._frames(request_user_id, question)
-                    except Exception:
-                        related = ()
-                    stated = any(
-                        states_value_of_kind(text, asked_kind) for text in related
-                    )
-                if not stated:
-                    missing_value_kind = asked_kind
+        # 旁路扳机：A/B 都没有触发时才执行，且只做一次已存在的存在性查询。
+        # 判据是问题里的编号在库中不存在：direct 问题几乎不会出现这种形状。
+        if (
+            self._additive
+            and baseline is not None
+            and not absent_names
+            and self._presence is not None
+        ):
+            codes = identifier_tokens(question)
+            if codes:
+                present_codes = self._presence(request_user_id, sorted(codes))
+                if not (codes & present_codes):
+                    absent_names = frozenset(codes)
         if self._additive and baseline is not None:
-            if absent_names or missing_value_kind:
+            if absent_names:
                 selection = SelectionResult(
                     evidence=(),
                     candidate_count=baseline.candidate_count,
