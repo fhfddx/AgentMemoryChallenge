@@ -102,6 +102,7 @@ def run_probe(
     sister = f"Sister-{run_tag}"
     office = f"Office-{run_tag}"
     absent_subject = f"AbsentSubject-{uuid4().hex[:8]}"
+    absent_person = f"Nell{uuid4().hex[:6].capitalize()}"
     brother = f"Brother-{run_tag}"
     topic = f"Topic-{run_tag}"
 
@@ -164,6 +165,12 @@ def run_probe(
                 (),
             ),
             ("absent_attribute", f"What colour is the {item}?", ()),
+            # 判据 A 的形状：关系前缀 + 库中不存在的名字。
+            (
+                "relation_absent",
+                f"What does my sister {absent_person} do for work?",
+                (),
+            ),
             ("wrong_subject", f"Which company does my brother {brother} work for?", ()),
             (
                 "option_overlap",
