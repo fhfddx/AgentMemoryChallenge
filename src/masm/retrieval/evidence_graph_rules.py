@@ -422,6 +422,20 @@ def relation_capitalized_names(question: str) -> frozenset[str]:
         found.add(normalize_text(name))
     return frozenset(found)
 
+_DATE_WORDS = (
+    "date", "day", "week", "month", "year", "time", "today", "tomorrow", "yesterday",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "morning", "afternoon", "evening", "night", "deadline", "schedule",
+)
+_MONEY_WORDS = (
+    "cost", "price", "paid", "pay", "fee", "fare", "charge", "budget", "refund",
+    "expensive", "cheap", "bill", "invoice", "salary",
+)
+_QUANTITY_WORDS = (
+    "number", "count", "times", "hour", "minute", "day", "week", "month", "year",
+    "half", "quarter", "pair", "dozen", "several", "many", "few",
+)
+_COLOUR_WORDS = ("colour", "color", "shade", "paint")
 _MONTHS = (
     "january", "february", "march", "april", "may", "june", "july", "august",
     "september", "october", "november", "december",
@@ -471,23 +485,28 @@ def asked_value_kind(question: str) -> str:
 
 
 def states_value_of_kind(text: str, kind: str) -> bool:
-    """文本是否给出该类值：只做确定性字面判定，不做语义推断。"""
+    """文本是否给出该类值（保守判定：只要出现该类词族就算"有"，以免误拒可回答问题）。"""
 
-    # 值类型判定必须看原文：归一化会去掉数字与货币符号。
     lowered = text.casefold()
     if kind == "date":
-        return bool(_DATE_VALUE.search(lowered))
+        if _DATE_VALUE.search(lowered):
+            return True
+        if any(month in lowered for month in _MONTHS):
+            return True
+        return any(word in lowered for word in _DATE_WORDS)
     if kind == "money":
         if _MONEY_VALUE.search(lowered):
             return True
-        # 归一化可能去掉货币符号，因此接受"数字 + 价格线索词"的组合。
-        cues = ("cost", "price", "paid", "pay", "fee", "fare", "charge")
-        return bool(_NUMBER_VALUE.search(lowered)) and any(cue in lowered for cue in cues)
+        return any(word in lowered for word in _MONEY_WORDS)
     if kind in {"duration", "count"}:
-        return bool(_NUMBER_VALUE.search(lowered))
+        if _NUMBER_VALUE.search(lowered):
+            return True
+        return any(word in lowered for word in _QUANTITY_WORDS)
     if kind == "colour":
         words = {word.strip(_PUNCTUATION) for word in lowered.split()}
-        return any(colour in words for colour in _COLOURS)
+        if any(colour in words for colour in _COLOURS):
+            return True
+        return any(word in lowered for word in _COLOUR_WORDS)
     return True
 
 def question_is_multi_part(question: str) -> bool:
