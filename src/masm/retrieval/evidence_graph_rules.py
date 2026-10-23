@@ -399,10 +399,16 @@ _RELATION_WORDS = frozenset(
         "teacher", "cousin", "aunt", "uncle", "grandmother", "grandfather",
     }
 )
+_RELATION_PATTERN = "|".join(sorted(_RELATION_WORDS, key=len, reverse=True))
+# 关系前缀名：支持 "my sister Maya" 以及 "the sister named Maya"、"sister called Maya"。
 _RELATION_NAME = re.compile(
     r"\b(?i:"
-    + "|".join(sorted(_RELATION_WORDS, key=len, reverse=True))
-    + r")\s+([A-Z][A-Za-z0-9'\u2019_-]{2,})"
+    + _RELATION_PATTERN
+    + r")\s+(?:named\s+|called\s+)?([A-Z][A-Za-z0-9'\u2019_-]{2,})"
+)
+# 所有格前置名：Maya's sister 同样指向一个具体关系人。
+_POSSESSIVE_NAME = re.compile(
+    r"\b([A-Z][A-Za-z0-9'-]{2,})['\u2019]s\s+(?i:" + _RELATION_PATTERN + r")\b"
 )
 
 
@@ -415,147 +421,12 @@ def relation_capitalized_names(question: str) -> frozenset[str]:
 
     payload = unicodedata.normalize("NFKC", question)
     found: set[str] = set()
-    for match in _RELATION_NAME.finditer(payload):
-        name = match.group(1)
-        if name.casefold() in _NAME_DENYLIST:
-            continue
-        found.add(normalize_text(name))
-    return frozenset(found)
-
-_DATE_WORDS = (
-    "date", "day", "week", "month", "year", "time", "today", "tomorrow", "yesterday",
-    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-    "morning", "afternoon", "evening", "night", "deadline", "schedule",
-)
-_MONEY_WORDS = (
-    "cost", "price", "paid", "pay", "fee", "fare", "charge", "budget", "refund",
-    "expensive", "cheap", "bill", "invoice", "salary",
-)
-_QUANTITY_WORDS = (
-    "number", "count", "times", "hour", "minute", "day", "week", "month", "year",
-    "half", "quarter", "pair", "dozen", "several", "many", "few",
-)
-_COLOUR_WORDS = ("colour", "color", "shade", "paint")
-_PLACE_WORDS = (
-    "office", "street", "road", "city", "country", "room", "building", "address",
-    "hotel", "airport", "station", "home", "house", "flat", "floor", "gate", "store",
-    "shop", "school", "university", "hospital", "park", "campus", "branch", "location",
-    "venue", "headquarters", "downtown", "uptown", "north", "south", "east", "west",
-)
-_PERSON_WORDS = (
-    "sister", "brother", "mother", "father", "mom", "dad", "wife", "husband",
-    "partner", "son", "daughter", "friend", "boss", "manager", "colleague", "coworker",
-    "neighbor", "neighbour", "landlord", "doctor", "dentist", "teacher", "cousin",
-    "aunt", "uncle", "she", "he", "they", "person", "people", "someone", "team",
-)
-_MONTHS = (
-    "january", "february", "march", "april", "may", "june", "july", "august",
-    "september", "october", "november", "december",
-    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
-)
-_COLOURS = frozenset(
-    {
-        "red", "blue", "green", "black", "white", "grey", "gray", "yellow", "orange",
-        "purple", "pink", "brown", "silver", "gold", "beige", "navy", "teal",
-    }
-)
-_KIND_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("date", ("when", "what day", "what date", "which day", "which month", "how long until")),
-    ("money", ("how much", "what price", "price", "cost", "how expensive", "fee", "fare")),
-    ("duration", ("how long", "how many hours", "how many minutes", "how many days", "duration")),
-    ("count", ("how many", "how often", "number of")),
-    ("colour", ("what colour", "what color", "which colour", "which color")),
-)
-_MONTH_PATTERN = "|".join(_MONTHS)
-_DATE_VALUE = re.compile(
-    r"\b(\d{1,2}(st|nd|rd|th)?\s+(" + _MONTH_PATTERN + r")"
-    r"|(" + _MONTH_PATTERN + r")\s+\d{1,2}"
-    r"|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}|(19|20)\d{2}"
-    r"|today|tomorrow|yesterday|next week|last week|next month|last month)\b",
-    re.IGNORECASE,
-)
-_NUMBER_VALUE = re.compile(
-    r"\b(\d+(\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
-    r"|dozen)\b",
-    re.IGNORECASE,
-)
-_MONEY_VALUE = re.compile(
-    r"([$€£¥]\s?\d|\b\d+(\.\d+)?\s?(dollars|euros|pounds|yuan|usd|eur)\b)",
-    re.IGNORECASE,
-)
-_PUNCTUATION = ".,!?;:\"'()[]{}"
-
-
-def asked_value_kind(question: str) -> str:
-    """问题要求的值类型（date/money/duration/count/colour/none）；用于"所问之值是否存在"判定。"""
-
-    lowered = normalize_text(question)
-    for kind, cues in _KIND_CUES:
-        if any(cue in lowered for cue in cues):
-            return kind
-    return "none"
-
-
-def states_value_of_kind(text: str, kind: str) -> bool:
-    """文本是否给出该类值（保守判定：只要出现该类词族就算"有"，以免误拒可回答问题）。"""
-
-    lowered = text.casefold()
-    if kind == "date":
-        if _DATE_VALUE.search(lowered):
-            return True
-        if any(month in lowered for month in _MONTHS):
-            return True
-        return any(word in lowered for word in _DATE_WORDS)
-    if kind == "money":
-        if _MONEY_VALUE.search(lowered):
-            return True
-        return any(word in lowered for word in _MONEY_WORDS)
-    if kind in {"duration", "count"}:
-        if _NUMBER_VALUE.search(lowered):
-            return True
-        return any(word in lowered for word in _QUANTITY_WORDS)
-    if kind == "colour":
-        words = {word.strip(_PUNCTUATION) for word in lowered.split()}
-        if any(colour in words for colour in _COLOURS):
-            return True
-        return any(word in lowered for word in _COLOUR_WORDS)
-    if kind in {"place", "person"}:
-        # 按整词匹配：子串匹配会让 "the" 命中 "he"，造成误判。
-        words = {word.strip(_PUNCTUATION) for word in lowered.split()}
-        vocabulary = _PLACE_WORDS if kind == "place" else _PERSON_WORDS
-        return any(word in words for word in vocabulary)
-    return True
-
-def question_is_multi_part(question: str) -> bool:
-    """问题是否在问多件事：多部分问题里某一问缺值，不应连累另一问的答案。"""
-
-    lowered = question.casefold()
-    if question_has_clause_marker(question):
-        return True
-    if " and " in lowered or ";" in lowered or "," in lowered:
-        return True
-    return lowered.count("?") > 1
-
-_IDENTIFIER = re.compile(
-    r"\b(?=[a-z0-9'_-]{3,})"
-    r"(?:[a-z]+[0-9]|[0-9]+[a-z]|[a-z]+[A-Z]|[A-Z][a-z]*[A-Z])"
-    r"[a-z0-9'_-]*\b"
-)
-
-
-def identifier_tokens(question: str) -> frozenset[str]:
-    """问题里像编号的标识符（含数字、词内大写或连字符）。
-
-    direct 问题几乎不会出现库里不存在的编号，因此该判据可以作为旁路拒答信号使用。
-    """
-
-    payload = unicodedata.normalize("NFKC", question)
-    found: set[str] = set()
-    for match in _IDENTIFIER.finditer(payload):
-        token = match.group(0)
-        if token.casefold() in _NAME_DENYLIST:
-            continue
-        found.add(token.casefold())
+    for pattern in (_RELATION_NAME, _POSSESSIVE_NAME):
+        for match in pattern.finditer(payload):
+            name = match.group(1)
+            if name.casefold() in _NAME_DENYLIST:
+                continue
+            found.add(normalize_text(name))
     return frozenset(found)
 
 def shared_discriminative_unit(

@@ -37,7 +37,6 @@ from masm.retrieval.evidence_graph_rules import (
     candidate_views,
     derived_links,
     discriminative_units,
-    identifier_tokens,
     name_tokens,
     planner_candidate_text,
     question_has_clause_marker,
@@ -66,8 +65,6 @@ from masm.schemas.content import ContentPart
 from masm.storage.types import MemoryCandidate
 
 PROMPT_VERSION = "evidence-graph-planner-v2"
-# 桥接稀有度阈值：连接单元在候选池内出现的最大次数。
-BRIDGE_RARITY_LIMIT = 2
 # 遥测只记录该固定枚举；"unknown" 表示本次没有图判定（纯图片查询或 v7 回退）。
 ReportedGraphState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
@@ -76,7 +73,6 @@ __all__ = [
     "MAX_GRAPH_REQUIREMENTS",
     "MAX_GRAPH_SUPPORTS",
     "MAX_SELECTED_EVIDENCE",
-    "BRIDGE_RARITY_LIMIT",
     "PROMPT_VERSION",
     "EvidenceGraphPlanner",
     "EvidenceGraphProposal",
@@ -392,10 +388,7 @@ def _bridge_additions(
             skipped_question = True
             continue
         shared = discriminative_units(view.text) & selected_units
-        # 阈值放宽到 4：官方多会话题的连接单元常出现在多条记忆里，≤2 会漏掉大多数桥接。
-        if not any(
-            frequencies.get(unit, 0) <= BRIDGE_RARITY_LIMIT for unit in shared
-        ):
+        if not any(frequencies.get(unit, 0) <= 2 for unit in shared):
             skipped_link = True
             continue
         return (view.evidence,), "none"
@@ -404,11 +397,6 @@ def _bridge_additions(
     if skipped_question:
         return (), "no_question_overlap"
     return (), "no_cross_session_candidate"
-
-def _view_text(view: CandidateView) -> str:
-    """候选可见文本：用于确定性值类型判定。"""
-
-    return view.text
 
 def _additive_selection(
     baseline: SelectionResult,
@@ -670,19 +658,6 @@ class GraphEvidenceSelector:
                         frame_texts = ()
                     if slot_template_conflict(question, frame_texts):
                         absent_names = names
-        # 旁路扳机：A/B 都没有触发时才执行，且只做一次已存在的存在性查询。
-        # 判据是问题里的编号在库中不存在：direct 问题几乎不会出现这种形状。
-        if (
-            self._additive
-            and baseline is not None
-            and not absent_names
-            and self._presence is not None
-        ):
-            codes = identifier_tokens(question)
-            if codes:
-                present_codes = self._presence(request_user_id, sorted(codes))
-                if not (codes & present_codes):
-                    absent_names = frozenset(codes)
         if self._additive and baseline is not None:
             if absent_names:
                 selection = SelectionResult(
