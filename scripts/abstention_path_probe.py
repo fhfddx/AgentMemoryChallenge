@@ -165,6 +165,12 @@ def run_probe(
                 (),
             ),
             ("absent_attribute", f"What colour is the {item}?", ()),
+            # 扩宽后的所有格形状：X's sister，且 X 全库不存在 → 必须拒答。
+            (
+                "possessive_absent",
+                f"What did {absent_person}'s sister send?",
+                (),
+            ),
             # 判据 A 的形状：关系前缀 + 库中不存在的名字。
             (
                 "relation_absent",
