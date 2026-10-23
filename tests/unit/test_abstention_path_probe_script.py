@@ -50,7 +50,7 @@ class _Backend:
         office = f"Office-{self.run_tag}"
         if item in query and "access code" in query:
             return _Response(200, {"data": [{"id": "a", "content": f"The code is {code}."}]})
-        if "sister" in query:
+        if "sister" in query and f"Sister-{self.run_tag}" in query:
             return _Response(200, {"data": [{"id": "b", "content": f"She works at the {office}."}]})
         if self.leak is not None and self.leak in query:
             return _Response(
