@@ -67,7 +67,7 @@ from masm.storage.types import MemoryCandidate
 
 PROMPT_VERSION = "evidence-graph-planner-v2"
 # 桥接稀有度阈值：连接单元在候选池内出现的最大次数。
-BRIDGE_RARITY_LIMIT = 4
+BRIDGE_RARITY_LIMIT = 2
 # 遥测只记录该固定枚举；"unknown" 表示本次没有图判定（纯图片查询或 v7 回退）。
 ReportedGraphState = Literal["sufficient", "partial", "insufficient", "unknown"]
 
