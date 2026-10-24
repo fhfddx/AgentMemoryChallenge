@@ -4,7 +4,7 @@
 Schema 始终不变，且绝不生成最终答案。
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from time import perf_counter
 from uuid import uuid4
 
@@ -47,6 +47,7 @@ class SearchService:
         packer: ResponsePacker | None = None,
         runtime_profile: str = "unknown",
         source_context: SourceContextEnricher | None = None,
+        refusal_gate: Callable[[str, str], bool] | None = None,
     ) -> None:
         self._retriever = retriever
         self._max_image_bytes = max_image_bytes
@@ -60,6 +61,7 @@ class SearchService:
         self._packer = packer
         self._runtime_profile = runtime_profile
         self._source_context = source_context
+        self._refusal_gate = refusal_gate
 
     def search(self, request: SearchRequest) -> SearchResponse:
         """执行查询分析、混合召回、关系扩展与证据重排。"""
@@ -93,7 +95,17 @@ class SearchService:
         selection = None
         graph_diagnostics: GraphDiagnostics | None = None
         selector_latency_ms = 0.0
-        if self._graph_selector is not None:
+        # 选择器之前的拒答预检：结论只取决于问题与全库，命中就不进选择器。
+        gate = self._refusal_gate
+        refused = (
+            gate is not None
+            and isinstance(request.query, str)
+            and gate(request.user_id, request.query)
+        )
+        if refused:
+            # 召回与诊断计数保留，但证据既不交给选择器也不返回。
+            ranked = []
+        elif self._graph_selector is not None:
             # 图模式：模型只提出需求/引用/链接，确定性代码校验、组装并推导三态。
             selector_started = perf_counter()
             outcome = self._graph_selector.select(
@@ -195,6 +207,7 @@ class SearchService:
                 graph_planner_latency_ms=(
                     graph_diagnostics.planner_latency_ms if graph_diagnostics else 0.0
                 ),
+                refusal_gate=refused,
             )
         )
         return response

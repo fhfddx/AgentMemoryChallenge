@@ -17,6 +17,7 @@ from masm.providers.openai_embeddings import OpenAICompatibleEmbeddingProvider
 from masm.providers.reranker import HttpReranker, LexicalReranker
 from masm.retrieval.baseline import BaselineRetriever, load_channel_weights
 from masm.retrieval.evidence_graph import EvidenceGraphPlanner, GraphEvidenceSelector
+from masm.retrieval.evidence_graph_rules import relation_capitalized_names
 from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
@@ -40,6 +41,7 @@ class RuntimeComponents:
     relevance_gate: RelevanceGate | None
     evidence_selector: EvidenceSelector | DeterministicEvidenceSelector | None
     evidence_graph: GraphEvidenceSelector | None = None
+    refusal_gate: Callable[[str, str], bool] | None = None
 
     def close(self) -> None:
         """关闭运行时自身创建的模型与 Embedding HTTP 连接池。"""
@@ -125,6 +127,7 @@ def build_runtime(
     relevance_gate: RelevanceGate | None = None
     evidence_selector: EvidenceSelector | DeterministicEvidenceSelector | None = None
     evidence_graph: GraphEvidenceSelector | None = None
+    refusal_gate: Callable[[str, str], bool] | None = None
 
     if profile is RuntimeProfile.LOCAL_FAKE:
         evidence_selector = DeterministicEvidenceSelector()
@@ -168,6 +171,8 @@ def build_runtime(
                 max_chars_per_candidate=settings.selector_max_chars_per_candidate,
                 timeout_seconds=settings.selector_timeout_seconds,
             )
+            # 选择器之前的拒答预检：判据与 A 同源，但判在调用选择器之前。
+            refusal_gate = _relation_absent_gate(repository)
             if settings.evidence_graph_enabled:
                 # 图路径复用同一个 v7 selector 作为唯一回退；默认档位完全不构造它。
                 evidence_graph = GraphEvidenceSelector(
@@ -200,6 +205,7 @@ def build_runtime(
         relevance_gate=relevance_gate,
         evidence_selector=evidence_selector,
         evidence_graph=evidence_graph,
+        refusal_gate=refusal_gate,
     )
 
 def _supplementary_recall(
@@ -237,3 +243,19 @@ def _frame_texts(repository: MemoryRepository) -> "Callable[[str, str], Sequence
         return tuple(str(candidate.content) for candidate in candidates)
 
     return frame_texts
+
+def _relation_absent_gate(repository: MemoryRepository) -> Callable[[str, str], bool]:
+    """选择器之外的拒答预检：问题点名了全库不存在的关系前缀人。
+
+    判据与选择器内部的 A 相同，但判在调用选择器之前：全库里没有这个关系人时，任何"同属性、
+    不同主体"的证据都答非所问，且用户从不用关系前缀指代自己，因此不影响 direct 问题。
+    """
+
+    def gate(user_id: str, question: str) -> bool:
+        names = relation_capitalized_names(question)
+        if not names:
+            return False
+        present = repository.present_tokens(user_id, sorted(names))
+        return bool(names - present)
+
+    return gate

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -23,7 +24,7 @@ from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import RelationExpander
 from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker
-from masm.runtime import build_runtime
+from masm.runtime import _relation_absent_gate, build_runtime
 from masm.storage.assets import AssetStore
 from masm.storage.db import Database
 from masm.storage.repositories import MemoryRepository
@@ -62,6 +63,7 @@ def test_local_fake_builds_no_llm_or_advanced_pipeline() -> None:
     assert runtime.reranker is None
     assert runtime.relevance_gate is None
     assert isinstance(runtime.evidence_selector, DeterministicEvidenceSelector)
+    assert runtime.refusal_gate is None
     assert runtime.retriever._text_queries_search_images is False  # noqa: SLF001
 
 
@@ -203,6 +205,7 @@ def test_official_masm_builds_three_agents_and_all_search_components() -> None:
     assert isinstance(runtime.reranker, EvidenceReranker)
     assert isinstance(runtime.relevance_gate, RelevanceGate)
     assert isinstance(runtime.evidence_selector, EvidenceSelector)
+    assert callable(runtime.refusal_gate)
     assert runtime.relevance_gate.min_text_similarity == 0.48
     assert runtime.relevance_gate.min_image_similarity == 0.42
     assert runtime.relevance_gate.min_lexical_rank == 0.001
@@ -218,6 +221,7 @@ def test_official_masm_can_disable_selection_without_disabling_recall() -> None:
     )
 
     assert runtime.evidence_selector is None
+    assert runtime.refusal_gate is None
     assert isinstance(runtime.relevance_gate, RelevanceGate)
 
 
@@ -242,3 +246,25 @@ def test_official_masm_wires_fused_text_only_when_enabled() -> None:
     prompt_versions = enabled.audit_metadata()["prompt_versions"]
     assert isinstance(prompt_versions, dict)
     assert prompt_versions["fused_text"] == "fused-text-v2"
+
+
+class _PresenceRepository:
+    """只实现 present_tokens 的假库：用于验证拒答预检按"全库"判定。"""
+
+    def __init__(self, present: frozenset[str]) -> None:
+        self._present = present
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def present_tokens(self, user_id: str, tokens: Sequence[str]) -> frozenset[str]:
+        self.calls.append((user_id, list(tokens)))
+        return frozenset(token for token in tokens if token in self._present)
+
+
+def test_relation_absent_gate_only_refuses_names_the_store_lacks() -> None:
+    repository = _PresenceRepository(frozenset({"maya"}))
+    gate = _relation_absent_gate(repository)  # type: ignore[arg-type]
+
+    assert gate("user-1", "What does my sister Maya do for work?") is False
+    assert gate("user-1", "What does my sister Nellwyn do for work?") is True
+    assert gate("user-1", "What did I buy last week?") is False
+    assert repository.calls == [("user-1", ["maya"]), ("user-1", ["nellwyn"])]

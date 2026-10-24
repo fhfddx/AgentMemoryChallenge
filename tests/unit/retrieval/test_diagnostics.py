@@ -57,7 +57,7 @@ def test_diagnostics_never_logs_payload_or_identity(caplog) -> None:
         "graph_component_count", "graph_selected_count", "graph_selected_source_count",
         "graph_state", "graph_fallback", "graph_failure_category",
         "graph_planner_failure_reason", "graph_vetoed", "graph_bridge_added",
-        "graph_bridge_skip", "graph_planner_latency_ms",
+        "graph_bridge_skip", "graph_planner_latency_ms", "refusal_gate",
     }
 
 
@@ -199,4 +199,34 @@ def test_selector_diagnostics_record_the_partial_evidence_state(caplog) -> None:
     assert payload["selector_evidence_state"] == "partial"
     assert payload["selector_abstained"] is False
     assert payload["selector_fallback"] is False
+    assert "private-content" not in caplog.text
+
+
+def test_refusal_gate_refusal_is_recorded_with_the_retrieval_counts(caplog) -> None:
+    class Retriever:
+        def retrieve(self, user_id, query, limit):
+            return [
+                MemoryCandidate(
+                    memory_id=uuid4(), user_id=user_id, content="private-content",
+                    score=1.0, request_id="private-request",
+                )
+            ]
+
+    service = SearchService(
+        Retriever(), max_image_bytes=1024,
+        refusal_gate=lambda user_id, question: True,
+        runtime_profile="official-masm",
+    )
+    with caplog.at_level(logging.INFO, logger="masm.search"):
+        response = service.search(
+            SearchRequest(query="private-query", user_id="private-user", top_k=10)
+        )
+
+    assert response.data == []
+    payload = _captured(caplog)
+    assert payload["refusal_gate"] is True
+    assert payload["returned_count"] == 0
+    assert payload["candidate_count"] == 1
+    assert payload["selector_candidate_count"] == 0
+    assert payload["graph_enabled"] is False
     assert "private-content" not in caplog.text

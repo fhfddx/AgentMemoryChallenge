@@ -93,3 +93,61 @@ def test_insufficient_selection_is_successful_empty_response() -> None:
     )
 
     assert response.model_dump() == {"data": []}
+
+
+def test_refusal_gate_returns_empty_before_the_selector() -> None:
+    class Retriever:
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            return [MemoryCandidate(UUID(int=1), user_id, "Alice visited Paris", 0.9)]
+
+    seen: list[tuple[str, str]] = []
+
+    def gate(user_id: str, question: str) -> bool:
+        seen.append((user_id, question))
+        return True
+
+    service = SearchService(Retriever(), max_image_bytes=1024, refusal_gate=gate)
+
+    response = service.search(
+        SearchRequest(query="What does my sister Nellwyn do for work?", user_id="user-1", top_k=5)
+    )
+
+    assert response.model_dump() == {"data": []}
+    assert seen == [("user-1", "What does my sister Nellwyn do for work?")]
+
+
+def test_refusal_gate_that_declines_keeps_the_retrieved_evidence() -> None:
+    class Retriever:
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            return [MemoryCandidate(UUID(int=1), user_id, "Alice visited Paris", 0.9)]
+
+    service = SearchService(
+        Retriever(), max_image_bytes=1024, refusal_gate=lambda user_id, question: False
+    )
+
+    response = service.search(
+        SearchRequest(query="Where did Alice go?", user_id="user-1", top_k=5)
+    )
+
+    assert [item.content for item in response.data] == ["Alice visited Paris"]
+
+
+def test_refusal_gate_is_not_consulted_for_multimodal_queries() -> None:
+    calls: list[str] = []
+
+    def gate(user_id: str, question: str) -> bool:
+        calls.append(question)
+        return True
+
+    service = SearchService(_RecordingRetriever(), max_image_bytes=1024, refusal_gate=gate)
+
+    response = service.search(
+        SearchRequest(
+            query=[{"type": "text", "text": "What does my sister Nellwyn do?"}],
+            user_id="user-1",
+            top_k=5,
+        )
+    )
+
+    assert response.data == []
+    assert calls == []

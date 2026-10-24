@@ -114,6 +114,7 @@ def create_app(
                 repository, max_chars=settings.selector_max_chars_per_candidate,
             ) if settings.source_context_enabled else None
         ),
+        refusal_gate=runtime.refusal_gate,
     )
 
     @application.middleware("http")

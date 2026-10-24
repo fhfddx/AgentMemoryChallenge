@@ -91,6 +91,8 @@ class SearchDiagnostics:
     graph_bridge_added: int = 0
     graph_bridge_skip: str = "none"
     graph_planner_latency_ms: float = 0.0
+    # 选择器之前的拒答预检是否命中：用于区分"预检拒答"与"选择器弃答"。
+    refusal_gate: bool = False
 
 
 def emit_search_diagnostics(value: SearchDiagnostics) -> None:
@@ -160,6 +162,7 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
             else "unknown"
         ),
         "graph_planner_latency_ms": round(max(0.0, float(value.graph_planner_latency_ms)), 2),
+        "refusal_gate": bool(value.refusal_gate),
     }
     _LOGGER.info(
         json.dumps(payload, sort_keys=True, separators=(",", ":")),
