@@ -23,6 +23,7 @@ from masm.retrieval.relevance import RelevanceGate
 from masm.retrieval.reranker import EvidenceReranker
 from masm.retrieval.response_packer import ResponsePacker
 from masm.retrieval.source_context import SourceContextEnricher
+from masm.runtime import _relation_absent_gate
 from masm.schemas.api import AddRequest, SearchRequest
 from masm.services.add_service import AddService
 from masm.services.deletion_service import DeletionService
@@ -167,6 +168,8 @@ def _service(
     *,
     graph: bool,
     additive: bool = False,
+    gate: bool = False,
+    relaxed_relevance: bool = False,
 ) -> SearchService:
     retriever = BaselineRetriever(repository, embeddings, DEFAULT_CHANNEL_WEIGHTS)
     selector = EvidenceSelector(llm)
@@ -175,7 +178,11 @@ def _service(
         max_image_bytes=settings.max_image_bytes,
         expander=RelationExpander(repository),
         reranker=EvidenceReranker(provider=LexicalReranker()),
-        relevance_gate=RelevanceGate(),
+        relevance_gate=(
+            RelevanceGate(min_text_similarity=-1.0)
+            if relaxed_relevance
+            else RelevanceGate()
+        ),
         selector=selector,
         graph_selector=(
             GraphEvidenceSelector(
@@ -190,6 +197,7 @@ def _service(
         packer=ResponsePacker(),
         source_context=SourceContextEnricher(repository),
         runtime_profile="official-masm",
+        refusal_gate=_relation_absent_gate(repository) if gate else None,
     )
 
 
@@ -471,10 +479,90 @@ def test_app_assembles_the_graph_selector_from_settings(
     default_service = build(source_context_enabled=True)
     assert default_service._graph_selector is None  # noqa: SLF001
     assert isinstance(default_service._selector, EvidenceSelector)  # noqa: SLF001
+    assert callable(default_service._refusal_gate)  # noqa: SLF001
 
     graph_service = build(source_context_enabled=True, evidence_graph_enabled=True)
     assert isinstance(graph_service._graph_selector, GraphEvidenceSelector)  # noqa: SLF001
     assert isinstance(graph_service._selector, EvidenceSelector)  # noqa: SLF001
+    assert callable(graph_service._refusal_gate)  # noqa: SLF001
+
+    selection_off = build(source_context_enabled=True, selector_enabled=False)
+    assert selection_off._refusal_gate is None  # noqa: SLF001
 
     with pytest.raises(ValueError):
         build(evidence_graph_enabled=True, source_context_enabled=False)
+
+
+def test_relation_absent_gate_refuses_before_the_selector(
+    database: Database,
+    asset_store: AssetStore,
+    settings: Settings,
+    embeddings: DeterministicFakeEmbeddingProvider,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = MemoryRepository(database)
+    user = _uid("refusal-gate")
+    runs: list[tuple[str, str]] = []
+    sister_run, _ = _seed(
+        database, asset_store, settings, embeddings, user,
+        "My sister Nora works at the Zephyr office as an architect.",
+    )
+    runs.append((sister_run, user))
+    try:
+        llm = FakeStructuredLLM([{"selected_indices": [0], "sufficient_evidence": True}])
+        service = _service(
+            repository, asset_store, settings, embeddings, llm, graph=True, gate=True
+        )
+        with caplog.at_level(logging.INFO, logger="masm.search"):
+            response = service.search(
+                SearchRequest(
+                    query="What does my sister Nellwyn do for work?",
+                    user_id=user,
+                    top_k=10,
+                )
+            )
+
+        assert response.model_dump() == {"data": []}
+        # 选择器一次都没有被调用：拒答判在调用选择器之前。
+        assert llm.requests == []
+        payload = _graph_payload(caplog)
+        assert payload["refusal_gate"] is True
+        assert payload["returned_count"] == 0
+        assert payload["selector_candidate_count"] == 0
+        assert payload["graph_enabled"] is False
+    finally:
+        _cleanup(repository, asset_store, runs)
+
+
+def test_relation_present_keeps_the_selector_in_the_loop(
+    database: Database,
+    asset_store: AssetStore,
+    settings: Settings,
+    embeddings: DeterministicFakeEmbeddingProvider,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repository = MemoryRepository(database)
+    user = _uid("relation-present")
+    runs: list[tuple[str, str]] = []
+    sister_run, _ = _seed(
+        database, asset_store, settings, embeddings, user,
+        "My sister Nora works at the Zephyr office as an architect.",
+    )
+    runs.append((sister_run, user))
+    try:
+        llm = FakeStructuredLLM([{"selected_indices": [0], "sufficient_evidence": True}])
+        service = _service(
+            repository, asset_store, settings, embeddings, llm, graph=False, gate=True,
+            relaxed_relevance=True,
+        )
+        with caplog.at_level(logging.INFO, logger="masm.search"):
+            response = service.search(
+                SearchRequest(query="Where does my sister Nora work?", user_id=user, top_k=10)
+            )
+
+        # 关系人确实在库里时预检必须放行，选择器照常工作。
+        assert llm.requests, "the selector must still run when the relation person exists"
+        assert _graph_payload(caplog)["refusal_gate"] is False
+        assert response.data
+    finally:
+        _cleanup(repository, asset_store, runs)
