@@ -80,11 +80,16 @@ def _corpus(run_tag: str, topics: int) -> list[str]:
     texts = [
         f"The access code for the Item-{run_tag} locker is Code-{run_tag}.",
         f"The Item-{run_tag} locker is on the third floor of the Harbour building.",
-        # 下面五条是"近失配"素材：话题相邻、答案不成立。
+        # 下面九条是"近失配"素材：话题相邻、答案不成立。
         "The front door code for the flat is K7-42.",
         "The spare key is kept in the blue drawer.",
         "My brother Leo works at the Harbour office as a surveyor.",
         f"The Item-{run_tag} locker was installed in 2019.",
+        f"The Item-{run_tag} locker is sixty centimetres wide.",
+        "The painting in the hall was bought in Lisbon.",
+        "The invoice for the roof repair came to 480 euros.",
+        "Maya sent the parcel on Tuesday.",
+        "The plumbing work was quoted without a price.",
     ]
     for index in range(topics):
         word = _TOPIC_WORDS[index % len(_TOPIC_WORDS)]
@@ -112,8 +117,8 @@ def _cases(run_tag: str, absent: str) -> tuple[tuple[str, str], ...]:
         ("relation_absent", f"What does my sister {absent.capitalize()} do for work?"),
         # 措辞贴近库内文本、但答案不在库里。
         ("option_overlap", f"Which city hosts the newsletter {run_tag}-0 office?"),
-        # 时间从未记录。
-        ("absent_temporal", f"When did the locker Item-{run_tag} get installed?"),
+        # 时间从未记录（库里只有安装年份，没有任何"拜访"时间）。
+        ("absent_temporal", "When did I last visit the Harbour building?"),
         # 近失配陷阱：库里只有"前门"的代码。
         ("trap_other_door", "What is the code for the back door of the flat?"),
         # 近失配陷阱：blue 是抽屉的颜色，不是钥匙的颜色。
@@ -122,6 +127,14 @@ def _cases(run_tag: str, absent: str) -> tuple[tuple[str, str], ...]:
         ("trap_other_sibling", "Which office does my sister Maya work at?"),
         # 近失配陷阱：只记录了年份，问月份。
         ("trap_partial_date", f"In which month was the Item-{run_tag} locker installed?"),
+        # 近失配陷阱：只记录了宽度，问高度。
+        ("trap_attribute_swap", f"How tall is the Item-{run_tag} locker?"),
+        # 近失配陷阱：里斯本属于门厅那幅画，不是书房那幅。
+        ("trap_other_painting", "Where was the painting in the study bought?"),
+        # 近失配陷阱：480 欧是屋顶维修的账单，不是水管的。
+        ("trap_other_invoice", "How much was the plumbing invoice?"),
+        # 近失配陷阱：Maya 在库里出现过，但她的居住地从未记录。
+        ("trap_known_subject_missing_attribute", "Where does Maya live?"),
     )
 
 
