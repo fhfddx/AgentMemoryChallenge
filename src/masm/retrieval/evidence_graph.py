@@ -482,6 +482,33 @@ class GraphEvidenceSelector:
         # 同框架近失配检索：用于判断"库里只有同属性、不同主体的记忆"。
         self._frames = frames
 
+    def _absent_subject_names(self, question: str, user_id: str) -> frozenset[str]:
+        """确定性拒答判据：问题点名的主体在整个库里都不存在时返回这些名字。
+
+        该判定不依赖 planner，因此可以在规划之前执行，避免规划失败时把不可回答的问题当作可回答。
+        """
+
+        if self._presence is None or self._frames is None:
+            return frozenset()
+        names = name_tokens(question)
+        relation_names = relation_capitalized_names(question)
+        subject_names = names | relation_names
+        if not subject_names:
+            return frozenset()
+        present = self._presence(user_id, sorted(subject_names))
+        # 判据 A：缺席且带关系前缀的名字（"my sister Maya"）。用户自己不会以这种形式出现。
+        relation_absent = relation_names - present
+        if relation_absent:
+            return frozenset(relation_absent)
+        if names and not (names & present):
+            # 判据 B：全部名字缺席，且库里存在"同一模板、不同主体"的记忆。
+            try:
+                frame_texts = self._frames(user_id, question)
+            except Exception:
+                frame_texts = ()
+            if slot_template_conflict(question, frame_texts):
+                return names
+        return frozenset()
     def select(
         self,
         query: str | Sequence[ContentPart],
@@ -528,6 +555,32 @@ class GraphEvidenceSelector:
             )
 
         question, visual, has_text = _question_text(query)
+        # 确定性拒答提前到规划之前：planner 超时或结构失败时，不可回答的问题仍必须拒答。
+        if self._additive and baseline is not None:
+            early_absent = self._absent_subject_names(question, request_user_id)
+        else:
+            early_absent = frozenset()
+        if early_absent and baseline is not None:
+            return GraphSelection(
+                SelectionResult(
+                    evidence=(),
+                    candidate_count=baseline.candidate_count,
+                    source_count=baseline.source_count,
+                    selected_source_count=0,
+                    fallback=False,
+                    abstained=True,
+                    failure_category="none",
+                    evidence_state="insufficient",
+                ),
+                GraphDiagnostics(
+                    enabled=True,
+                    candidate_count=baseline.candidate_count,
+                    selected_count=0,
+                    selected_source_count=0,
+                    state="insufficient",
+                    vetoed=True,
+                ),
+            )
         if visual and not has_text:
             # 纯图片查询没有可供 planner 判断的文本问题：沿用既有 selector/回退路径。
             selection = (
@@ -629,35 +682,10 @@ class GraphEvidenceSelector:
 
         evidence = tuple(view.evidence for view in assembled.selected)
         selected_sources = len({view.source_group for view in assembled.selected})
-        # R10：问题点名的主体（名字样记号）在**整个库**里都没出现过时，库里没有任何记忆能回答它。
-        # 判据必须是全库而非候选池：只在池内缺失通常只说明排序，据此拒答会误伤可回答问题。
+        # 拒答判据已在规划之前执行（early_absent），这里保持为空以维持既有分支结构。
         absent_names: frozenset[str] = frozenset()
         bridge_skip = "none"
         bridge_added = 0
-        if (
-            self._additive
-            and baseline is not None
-            and self._presence is not None
-            and self._frames is not None
-        ):
-            names = name_tokens(question)
-            relation_names = relation_capitalized_names(question)
-            subject_names = names | relation_names
-            if subject_names:
-                present = self._presence(request_user_id, sorted(subject_names))
-                # 判据 A：缺席且带关系前缀的名字（"my sister Maya"）。用户自己不会以这种形式出现，
-                # 所以不会误伤以用户为主语的 direct 问题（官方运行已证实那类误伤会让 direct 清零）。
-                relation_absent = relation_names - present
-                if relation_absent:
-                    absent_names = frozenset(relation_absent)
-                elif names and not (names & present):
-                    # 判据 B：全部名字缺席，且库里存在"同一模板、不同主体"的记忆（槽位近失配）。
-                    try:
-                        frame_texts = self._frames(request_user_id, question)
-                    except Exception:
-                        frame_texts = ()
-                    if slot_template_conflict(question, frame_texts):
-                        absent_names = names
         if self._additive and baseline is not None:
             if absent_names:
                 selection = SelectionResult(
