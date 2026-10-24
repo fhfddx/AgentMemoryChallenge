@@ -240,3 +240,27 @@ PY
 - 预检只在 refusal 形状上命中 → 期望 abstention 从 22.22 上移一题（46.15），最坏持平 38.46。
 - 观测命令：`docker logs masm-v11-api-1 2>&1 | grep '"refusal_gate":true'`，并把 `returned_count` 与 `selector_abstained` 一起看。
 
+### 10.8 候选就绪（2026-10-24 服务器实测，镜像 `939c77f`）
+
+| 检查 | 结果 |
+| --- | --- |
+| 选择器字节 | `git diff a7b58d1 HEAD --quiet -- src/masm/retrieval/evidence_graph.py` → 一致 |
+| `gate` | PASS，`verification_exit_code=0`，pin `e7839485…`，四个 provider `set`，`graph_flag=enabled` |
+| `field` | PASS（走脱敏链路后仍有 `refusal_gate`） |
+| `abst` | 10/10，`positive_relation_returned=1` |
+| `path` | `disconnected_returned=0`、`connected_returned=3` |
+| `compare` | 三次运行：26/26、25/26（单例 `elliptical_confirmation_negative`，`forbidden=False`）、26/26 |
+| `observe` | `diagnostics=10 with_field=10 gate_hits=3 gate_hits_with_evidence=0 selector_abstained=4` |
+
+`gate_hits=3` 正好等于 abstention 探针的三个关系前缀形状（`relation_absent` / `possessive_absent` / `wrong_subject`），`selector_abstained=4` 是另外三个非关系拒答加 `disconnected_chain`；10 次诊断 = 8 次 abst 搜索 + 2 次 path 搜索。数字自洽，说明预检只接管它该接管的那三种形状。
+
+预期官方结果：**38.46**（预检对官方 abstention 无影响，持平）或 **46.15**（多救一题）。尾部风险：某道 direct 题若点名了库里不存在的关系人，会被预检拦成空响应，direct 掉到 0 → 总分 **30.77**；实际出现就立即回滚到 `a7b58d1`。
+
+一次性运行命令：
+
+```bash
+cd /root/AgentMemoryChallenge
+python3 scripts/server_verify_refusal_gate.py            # gate field bridge path compare observe
+python3 scripts/server_verify_refusal_gate.py all        # 需要连 abst 一起复跑时
+```
+
