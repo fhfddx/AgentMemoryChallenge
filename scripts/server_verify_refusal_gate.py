@@ -400,7 +400,13 @@ def summarize_detail(timed: Sequence[tuple[str | None, dict[str, object]]]) -> l
                 f"#{index} {clock} cand={row.get('candidate_count')} "
                 f"dedup={row.get('dedup_count')} returned={row.get('returned_count')} "
                 f"gate={row.get('refusal_gate')} sel_abst={row.get('selector_abstained')} "
-                f"graph={row.get('graph_state')} ch={channels}",
+                f"sel_state={row.get('selector_evidence_state')} "
+                f"gstate={row.get('graph_state')} gcand={row.get('graph_candidate_count')} "
+                f"planner={row.get('graph_planner_calls')} "
+                f"req={row.get('graph_requirement_count')} "
+                f"sup={row.get('graph_support_count')} link={row.get('graph_link_count')} "
+                f"bridge={row.get('graph_bridge_added')}/{row.get('graph_bridge_skip')} "
+                f"ch={channels}",
             )
         )
     if not rows:
@@ -624,7 +630,7 @@ def run_stages(
 
 def _print_rows(rows: Sequence[Row]) -> None:
     for row in rows:
-        print(f"[{row.stage:<7}] {row.verdict:<4} {row.detail[:240]}")
+        print(f"[{row.stage:<7}] {row.verdict:<4} {row.detail[:320]}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
