@@ -485,6 +485,7 @@ def test_app_assembles_the_graph_selector_from_settings(
     assert isinstance(graph_service._graph_selector, GraphEvidenceSelector)  # noqa: SLF001
     assert isinstance(graph_service._selector, EvidenceSelector)  # noqa: SLF001
     assert callable(graph_service._refusal_gate)  # noqa: SLF001
+    assert callable(graph_service._supplementary_recall)  # noqa: SLF001
 
     selection_off = build(source_context_enabled=True, selector_enabled=False)
     assert selection_off._refusal_gate is None  # noqa: SLF001

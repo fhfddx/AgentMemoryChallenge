@@ -16,6 +16,7 @@ from masm.retrieval.evidence_graph import (
     GraphEvidenceSelector,
     source_pairs_from_edges,
 )
+from masm.retrieval.evidence_graph_rules import discriminative_units
 from masm.retrieval.evidence_renderer import EvidenceRenderer
 from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
 from masm.retrieval.query_analyzer import QueryAnalyzer
@@ -48,6 +49,9 @@ class SearchService:
         runtime_profile: str = "unknown",
         source_context: SourceContextEnricher | None = None,
         refusal_gate: Callable[[str, str], bool] | None = None,
+        supplementary_recall: (
+            Callable[[str, Sequence[str], int], Sequence[RankedEvidence]] | None
+        ) = None,
     ) -> None:
         self._retriever = retriever
         self._max_image_bytes = max_image_bytes
@@ -62,6 +66,7 @@ class SearchService:
         self._runtime_profile = runtime_profile
         self._source_context = source_context
         self._refusal_gate = refusal_gate
+        self._supplementary_recall = supplementary_recall
 
     def search(self, request: SearchRequest) -> SearchResponse:
         """执行查询分析、混合召回、关系扩展与证据重排。"""
@@ -95,6 +100,7 @@ class SearchService:
         selection = None
         graph_diagnostics: GraphDiagnostics | None = None
         selector_latency_ms = 0.0
+        retry_added = 0
         # 选择器之前的拒答预检：结论只取决于问题与全库，命中就不进选择器。
         gate = self._refusal_gate
         refused = (
@@ -107,11 +113,12 @@ class SearchService:
             ranked = []
         elif self._graph_selector is not None:
             # 图模式：模型只提出需求/引用/链接，确定性代码校验、组装并推导三态。
+            pool = ranked
             selector_started = perf_counter()
             outcome = self._graph_selector.select(
                 request.query,
                 request.options,
-                ranked,
+                pool,
                 strong_anchor_ids,
                 GraphContext(
                     relation_source_pairs=relation_pairs,
@@ -122,6 +129,28 @@ class SearchService:
             selector_latency_ms = (perf_counter() - selector_started) * 1000.0
             selection = outcome.selection
             graph_diagnostics = outcome.graph
+            # 空结果补救：桥接只在"已经选出证据"后才工作，所以跨会话题在池子缺料时
+            # 永远卡死。这里只对今天返回空的问题用稀有词再召回一次并重跑一次选择器；
+            # 已答对的问题完全不受影响，选择器本身也一行未改。
+            if not selection.evidence and self._supplementary_recall is not None:
+                extra = self._retry_candidates(request, pool)
+                if extra:
+                    retry_added = len(extra)
+                    retry_started = perf_counter()
+                    outcome = self._graph_selector.select(
+                        request.query,
+                        request.options,
+                        [*pool, *extra],
+                        strong_anchor_ids,
+                        GraphContext(
+                            relation_source_pairs=relation_pairs,
+                            source_context_enabled=self._source_context is not None,
+                        ),
+                        request_user_id=request.user_id,
+                    )
+                    selector_latency_ms += (perf_counter() - retry_started) * 1000.0
+                    selection = outcome.selection
+                    graph_diagnostics = outcome.graph
             ranked = list(selection.evidence)
         elif self._selector is not None:
             selector_started = perf_counter()
@@ -208,9 +237,28 @@ class SearchService:
                     graph_diagnostics.planner_latency_ms if graph_diagnostics else 0.0
                 ),
                 refusal_gate=refused,
+                retry_added=retry_added,
             )
         )
         return response
+
+    def _retry_candidates(
+        self, request: SearchRequest, pool: Sequence[RankedEvidence]
+    ) -> list[RankedEvidence]:
+        """空结果时的补召回候选：只取池子里还没有的记忆，保持原顺序。"""
+
+        assert self._supplementary_recall is not None
+        if not isinstance(request.query, str):
+            return []
+        units = sorted(discriminative_units(request.query))
+        if not units:
+            return []
+        known = {item.memory_id for item in pool}
+        return [
+            item
+            for item in self._supplementary_recall(request.user_id, units[:8], 24)
+            if item.memory_id not in known
+        ]
 
     def analyze(self, request: SearchRequest) -> ParsedQuery:
         """规则化查询分析：纯文本查询或保持顺序的多模态查询。"""

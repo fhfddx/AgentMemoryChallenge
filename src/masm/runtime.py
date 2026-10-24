@@ -42,6 +42,9 @@ class RuntimeComponents:
     evidence_selector: EvidenceSelector | DeterministicEvidenceSelector | None
     evidence_graph: GraphEvidenceSelector | None = None
     refusal_gate: Callable[[str, str], bool] | None = None
+    supplementary_recall: (
+        Callable[[str, Sequence[str], int], Sequence[RankedEvidence]] | None
+    ) = None
 
     def close(self) -> None:
         """关闭运行时自身创建的模型与 Embedding HTTP 连接池。"""
@@ -128,6 +131,9 @@ def build_runtime(
     evidence_selector: EvidenceSelector | DeterministicEvidenceSelector | None = None
     evidence_graph: GraphEvidenceSelector | None = None
     refusal_gate: Callable[[str, str], bool] | None = None
+    supplementary_recall: (
+        Callable[[str, Sequence[str], int], Sequence[RankedEvidence]] | None
+    ) = None
 
     if profile is RuntimeProfile.LOCAL_FAKE:
         evidence_selector = DeterministicEvidenceSelector()
@@ -174,6 +180,8 @@ def build_runtime(
             # 选择器之前的拒答预检：判据与 A 同源，但判在调用选择器之前。
             refusal_gate = _relation_absent_gate(repository)
             if settings.evidence_graph_enabled:
+                # 桥接与空结果补救共用同一个补召回：都是 OR-lexical 的有界召回。
+                supplementary_recall = _supplementary_recall(repository)
                 # 图路径复用同一个 v7 selector 作为唯一回退；默认档位完全不构造它。
                 evidence_graph = GraphEvidenceSelector(
                     EvidenceGraphPlanner(
@@ -189,7 +197,7 @@ def build_runtime(
                     max_candidates=settings.selector_max_candidates,
                     max_selected=settings.selector_max_selected,
                     presence=repository.present_tokens,
-                    retrieve_more=_supplementary_recall(repository),
+                    retrieve_more=supplementary_recall,
                     frames=_frame_texts(repository),
                 )
 
@@ -206,6 +214,7 @@ def build_runtime(
         evidence_selector=evidence_selector,
         evidence_graph=evidence_graph,
         refusal_gate=refusal_gate,
+        supplementary_recall=supplementary_recall,
     )
 
 def _supplementary_recall(
