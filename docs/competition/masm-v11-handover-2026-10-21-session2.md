@@ -166,9 +166,25 @@ for i in $(seq 1 30); do [ -f /tmp/cmp.done ] && break; sleep 5; done; grep -c '
 
 ### 10.3 pin
 
-`source_digest` → `620669f4450323668826faf7c323df8f9c70be676e7c4a0f534b83f78b7de147`（64 个文件、**已提交字节**）。
+`source_digest` → `e7839485ac6c8edbe40a3aa8ae05ee82ee04c98b21d7f31665d5a78fc9c61ec5`（64 个文件、**已提交字节**）。
 
-⚠️ 本机工作树是 CRLF、提交是 LF：`_package_digest`(工作树) = `91acd210…` 与 `_git_package_digest`(HEAD) = `620669f4…` **不相等是正常的**。pin 必须取后者，否则门禁永远红。
+⚠️ 本机工作树是 CRLF、提交是 LF：`_package_digest`(工作树) 与 `_git_package_digest`(HEAD) **不相等是正常的**。pin 必须取后者，否则门禁永远红。
+
+### 10.3.1 候选镜像必须只含选择器之外的改动（2026-10-24 修正）
+
+第一版上线（`0104b4c`）犯了一个错：分支里带着上一会话的 `1e5ee16`「空池显式拒答」，而 §2 实测那次是 abstention 11.11（30.77）。§4 的原则是"选择器一个字节都不改"，所以候选一度混进了两个变量。
+
+`03bf446` 已把 `src/masm/retrieval/evidence_graph.py` 逐字节还原为 `a7b58d1` 的版本。现在选择器之前只剩：`refusal_gate`、它的诊断字段、以及让该字段进日志的白名单项。
+
+上线前自查（必须在服务器上输出 `selector_identical`）：
+
+```bash
+cd /root/AgentMemoryChallenge
+git diff a7b58d1 HEAD --quiet -- src/masm/retrieval/evidence_graph.py && echo selector_identical
+git diff --stat a7b58d1 HEAD -- src/masm/retrieval/
+```
+
+第二条只应看到 `diagnostics.py` 的 `+3`（新增 `refusal_gate` 字段），不应有 `evidence_graph.py`。
 
 ### 10.4 本地验证（全绿）
 
