@@ -60,7 +60,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument(
         "--case",
-        choices=("lexical", "semantic"),
+        choices=("lexical", "semantic", "refusal"),
         default="lexical",
         help="lexical: shared rare unit; semantic: paraphrase with no shared unit",
     )
@@ -81,7 +81,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             f"The {office} holiday party is scheduled for {date}.",
         )
         query = "When is my sister's company holiday party?"
-    else:
+    elif args.case == "semantic":
         # 语义桥接：答案在第二条（西班牙 offsite），第一条只提供"谁批准了这次出行"。
         # 两段没有任何共同区分单元，只有 planner 能建立连接。
         texts = (
@@ -89,6 +89,13 @@ def run(argv: Sequence[str] | None = None) -> int:
             "The Spanish offsite is confirmed for the week of 10 November.",
         )
         query = "When is the Spanish offsite?"
+    if args.case == "refusal":
+        # 拒答形状：问题点名一个全库不存在的关系人。
+        texts = (
+            "My sister Nora works at the Zephyr office as an architect.",
+            "The Zephyr holiday party is scheduled for 14 December.",
+        )
+        query = "What does my sister Nellwyn do for work?"
     database = Database.create(settings.database_url)
     repository = MemoryRepository(database)
     deletion = DeletionService(repository, AssetStore(settings.asset_dir))
