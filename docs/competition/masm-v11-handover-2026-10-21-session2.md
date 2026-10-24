@@ -125,7 +125,7 @@ for i in $(seq 1 30); do [ -f /tmp/cmp.done ] && break; sleep 5; done; grep -c '
 | --- | --- |
 | `src/masm/retrieval/evidence_graph.py` | 选择器、planner、R11 桥接、R10 拒答、诊断 |
 | `src/masm/retrieval/evidence_graph_rules.py` | `name_tokens` / `relation_capitalized_names` / `slot_template_conflict` / `asked_value_kind`（已弃用） |
-| `src/masm/services/search_service.py` | 检索 → 选择 → 打包；**待加 refusal_gate** |
+| `src/masm/services/search_service.py` | 检索 → 预检 → 选择 → 打包（`refusal_gate` 已实现，见 §10） |
 | `src/masm/runtime.py` | 组件装配（presence / frames / retrieve_more 都在这里注入） |
 | `scripts/abstention_path_probe.py` | 9 用例拒答探针（含 `relation_absent`、`possessive_absent`） |
 | `scripts/multi_session_bridge_probe.py` | 跨会话桥接探针（2 会话判据） |
@@ -140,3 +140,87 @@ for i in $(seq 1 30); do [ -f /tmp/cmp.done ] && break; sleep 5; done; grep -c '
 - 最近邻追加：official direct 0 → 否决；
 - 召回加宽 6×：探针 `relation_absent` 失败 → 否决；
 - 拒答前置到 planner 之前：官方 abstention 22.22 → 11.11（2 次）→ 否决。
+
+## 10. 第三会话（2026-10-24）：拒答预检已实现，本地全绿，未部署
+
+§4 的补丁已落地。**选择器与规则一个字节未改**：`git diff 3a6c6ed c6e6116 -- src/masm/retrieval/evidence_graph.py src/masm/retrieval/evidence_graph_rules.py` 为空；源码只动了 4 个文件（`app.py` +1、`diagnostics.py` +3、`runtime.py` +22、`search_service.py` +17/−2）。
+
+### 10.1 提交
+
+| 提交 | 内容 |
+| --- | --- |
+| `233821f` | `feat: refuse before the selector when a relation person is absent`（源码） |
+| `96c70db` | `chore: refresh the source pin for the pre-selector refusal gate` |
+| `c6e6116` | `test: cover the pre-selector refusal gate end to end`（只动测试） |
+
+分支 `codex/masm-v11-evidence-graph`，HEAD `c6e6116`。
+
+### 10.2 实现（相对 §4 的两处偏离，都只为可观测性）
+
+1. 命中预检时**不**直接 `return SearchResponse(data=[])`，而是 `ranked = []` 后继续走原有的渲染/打包/诊断收尾。响应仍是 `{"data": []}`，但被拒查询的诊断照常输出——否则它们在日志里会完全消失。
+2. `SearchDiagnostics` 新增布尔字段 `refusal_gate`，用来区分两种空响应：预检拒答是 `refusal_gate=true` + `graph_enabled=false` + `selector_*` 全 0；选择器弃答是 `selector_abstained=true`。
+
+其余与 §4 一致：`runtime._relation_absent_gate` = `relation_capitalized_names` + `repository.present_tokens`（全库级，非候选池）；`build_runtime` 只在 `OFFICIAL_MASM` 且 `selector_enabled` 时构造；`create_app` 注入 `refusal_gate=runtime.refusal_gate`。多模态 query 不判（只有 `str` 才进预检）。
+
+**`scripts/graph_diagnostics_probe.py` 故意没有接预检**：它自建 `SearchService`，保留为"看选择器内部行为"的显微镜，因此它的 `--case refusal` 依旧走选择器、`refusal_gate` 恒为 false。要看预检是否真的命中，只能看 HTTP 探针或 API 日志。
+
+### 10.3 pin
+
+`source_digest` → `620669f4450323668826faf7c323df8f9c70be676e7c4a0f534b83f78b7de147`（64 个文件、**已提交字节**）。
+
+⚠️ 本机工作树是 CRLF、提交是 LF：`_package_digest`(工作树) = `91acd210…` 与 `_git_package_digest`(HEAD) = `620669f4…` **不相等是正常的**。pin 必须取后者，否则门禁永远红。
+
+### 10.4 本地验证（全绿）
+
+| 检查 | 结果 |
+| --- | --- |
+| `ruff check .` | All checks passed |
+| `mypy src` | no issues（60 files） |
+| `pytest -q`（5433/`masm_test`/alembic `0005 head`） | **1048 passed, 1 skipped（POSIX-only）, 0 failed** |
+| 新增用例 | service 3、runtime 1（+3 处装配断言）、diagnostics 1、集成 2（真库 + fake 模型，双向：缺席必拒、在场必放行） |
+
+本机无 `.env`、无 provider key，所以 §5 的四个探针**一个都没在本机跑过**，它们必须在容器里跑。
+
+### 10.5 abstention 探针 9/9 的逐用例推演
+
+| 用例 | 预检 | 结果 |
+| --- | --- | --- |
+| `positive_direct` | 无关系前缀 → false | 与改前一致 |
+| `positive_relation` | `{sister}` 在库 → false | 与改前一致 |
+| `absent_subject` / `absent_attribute` / `option_overlap` | 无关系前缀 → false | 与改前一致 |
+| `possessive_absent` / `relation_absent` / `wrong_subject` | 全库无该人名 → true | 空响应（改前也是空） |
+
+⇒ 9/9 不应变化。**唯一新风险是 `positive_relation`**：若线上 Add 生成的 summary 丢掉姐妹名字，`present_tokens` 会判缺席 → 误拒 → 2/2 变 1/2。改前选择器的 A 判据用的是同一个 `present_tokens` 且 9/9 全绿，风险已被同一份数据压低，但仍要单独盯这一例。
+
+### 10.6 服务器上要做的事（顺序不可换）
+
+```bash
+# 0) 推送（需代理）
+git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 \
+  push origin codex/masm-v11-evidence-graph
+
+# 1) 构建 + 唯一 override 文件名（不要复用旧名）
+docker build -t masm-v11-final-candidate:c6e6116 .
+#   /opt/masm-v11/config/image.override.c6e6116-gate.yml
+#   docker compose ... up -d --no-deps --force-recreate api
+
+# 2) 确认镜像里真的有新字段（应为 true/false，而不是 KeyError）
+docker exec -i masm-v11-api-1 python - <<'PY'
+import json, logging
+from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
+logging.basicConfig(level=logging.INFO)
+emit_search_diagnostics(SearchDiagnostics(
+    request_tag="0"*32, runtime_profile="official-masm", candidate_count=0,
+    dedup_count=0, returned_count=0, response_bytes=0, latency_ms=0.0,
+    status_code=200, channel_counts={}, refusal_gate=True))
+PY
+
+# 3) §5 四项全绿（abstention 9/9、桥接 2 会话、disconnected_chain=0、compare 26/26）
+```
+
+### 10.7 官方运行前的最小判定
+
+- 预检若在**任何** direct/atomic 问题上命中（日志里 `"refusal_gate":true` 出现在本该有答案的题）→ 立即回滚：direct 不再 100，总分只会 ≤ 38.46。
+- 预检只在 refusal 形状上命中 → 期望 abstention 从 22.22 上移一题（46.15），最坏持平 38.46。
+- 观测命令：`docker logs masm-v11-api-1 2>&1 | grep '"refusal_gate":true'`，并把 `returned_count` 与 `selector_abstained` 一起看。
+
