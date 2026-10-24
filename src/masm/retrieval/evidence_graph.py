@@ -398,20 +398,6 @@ def _bridge_additions(
         return (), "no_question_overlap"
     return (), "no_cross_session_candidate"
 
-def _source_of(item: RankedEvidence) -> str:
-    """证据所属来源标识：同一 request 视为同一会话。"""
-
-    return item.request_id or str(item.memory_id)
-
-
-def _first_text(evidence: Sequence[RankedEvidence]) -> str:
-    """取第一条证据的纯文本：用于从已选证据出发做邻居召回。"""
-
-    for item in evidence:
-        if isinstance(item.content, str):
-            return item.content
-    return ""
-
 def _additive_selection(
     baseline: SelectionResult,
     additions: Sequence[RankedEvidence],
@@ -475,7 +461,6 @@ class GraphEvidenceSelector:
         max_selected: int = MAX_SELECTED_EVIDENCE,
         additive: bool = True,
         presence: Callable[[str, Sequence[str]], frozenset[str]] | None = None,
-        expand_from: Callable[[str, str], Sequence[RankedEvidence]] | None = None,
         retrieve_more: (
             Callable[[str, Sequence[str], int], Sequence[RankedEvidence]] | None
         ) = None,
@@ -492,8 +477,6 @@ class GraphEvidenceSelector:
         self._additive = additive
         # 全库存在性回调：判断"问题的主体是否在库里出现过"，缺省则不做任何拒答。
         self._presence = presence
-        # 从已选证据出发的最近邻召回：多会话题的第二段常只与证据相近，与问题无共同词。
-        self._expand_from = expand_from
         # 图路径专用的补充召回（OR 语义）：基线全文检索是 AND，桥接证据常被漏掉。
         self._retrieve_more = retrieve_more
         # 同框架近失配检索：用于判断"库里只有同属性、不同主体的记忆"。
@@ -705,22 +688,6 @@ class GraphEvidenceSelector:
                             max_chars=self._planner.max_chars_per_candidate,
                         )
                     )
-                # 最近邻追加：证据只覆盖一个会话时，用证据自身的文本召回一条异会话邻居。
-                # 不要求与问题共享词面：官方多会话题的连接常是改写或语义。
-                if self._expand_from is not None and additions:
-                    anchor_sources = {_source_of(item) for item in additions}
-                    if len(anchor_sources) == 1:
-                        try:
-                            neighbours = self._expand_from(
-                                request_user_id, _first_text(additions)
-                            )
-                        except Exception:
-                            neighbours = ()
-                        for neighbour in neighbours:
-                            if _source_of(neighbour) in anchor_sources:
-                                continue
-                            additions.append(neighbour)
-                            break
                 bridge_evidence, bridge_skip = _bridge_additions(
                     baseline.evidence,
                     [*views, *extra_views],
