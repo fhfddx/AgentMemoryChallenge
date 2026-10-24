@@ -67,7 +67,8 @@ class SearchService:
         parsed = self._analyze(request)
         top_k = request.top_k
         # 父子记忆会共同占据召回名额；所有档位都需要先扩大原始候选池。
-        pool_limit = min(256, max(top_k, top_k * 3))
+        # 多跳问题需要第二会话同时进入候选池；加宽召回宽度是安全的（不追加证据，选择器仍自行裁量）。
+        pool_limit = min(256, max(top_k, top_k * 6))
         retrieve_with_stats = getattr(self._retriever, "retrieve_with_stats", None)
         if callable(retrieve_with_stats):
             recalled, channel_counts = retrieve_with_stats(request.user_id, parsed, pool_limit)
