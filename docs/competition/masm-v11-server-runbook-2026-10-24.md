@@ -248,6 +248,20 @@ python3 scripts/server_verify_refusal_gate.py detail --since 6h
 
 这两类的修法完全相反，所以在动判据之前必须先看一眼明细。
 
+## 8.3 大库拒答探针（小库探针测不到的过答条件）
+
+官方用户库是 110 条文本 + 21 张图；而 `abstention_path_probe` 只播 4 条记忆，相关性闸门会把
+它们全部放进池子，因此那道探针在官方过答的情况下依然 10/10。噪声探针把库扩到几十条，用来在
+本地复现官方条件（不消耗官方额度）：
+
+```bash
+docker exec -i masm-v11-api-1 python - --timeout 600 \
+  < /root/AgentMemoryChallenge/scripts/abstention_noise_probe.py 2>&1 | tail -12
+```
+
+判据与 `abst` 一致：8 个用例全 `passed: true`、两个正例命中标记、`cleanup.complete=true`。
+每个拒答形状都是一行 `"refusal_expected": true`，返回任何证据即该形状失败。
+
 ## 9. 回滚
 
 同样自包含；把 `ROLLBACK_SHA` 换成你要回到的那个 tag（上一版最好成绩是 `a7b58d1`）：
