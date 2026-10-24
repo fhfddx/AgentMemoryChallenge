@@ -131,68 +131,66 @@ PY
 
 期望输出里同时有 `"refusal_gate": true` 和 `"graph_planner_latency_ms": 0.0`；出现 `KeyError`/`Unknown field` 说明镜像不是新构建的。
 
-## 7. 四项探针（缺一不可，全绿才允许动额度）
-
-### 7.1 abstention 9 用例
+## 7. 四项探针 + 观测：一条命令
 
 ```bash
-docker exec -i masm-v11-api-1 python - --timeout 240 \
-  < /root/AgentMemoryChallenge/scripts/abstention_path_probe.py 2>&1 | tail -10
-docker exec -i masm-v11-api-1 python - --timeout 240 \
-  < /root/AgentMemoryChallenge/scripts/abstention_path_probe.py 2>&1 | grep positive_relation
+cd /root/AgentMemoryChallenge
+git pull
+python3 scripts/server_verify_refusal_gate.py
 ```
 
-判据：9 行全部 `"passed": true`；**特别是 `positive_relation` 必须 `returned_count >= 1`**（这是预检唯一可能误伤的正例）。
-
-### 7.2 跨会话桥接（必须 2 会话）
+默认跑 `gate field bridge path compare observe`（abstention 探针上一轮已绿，默认不重复跑）。要单独跑：
 
 ```bash
-docker exec -i masm-v11-api-1 python - --timeout 240 \
-  < /root/AgentMemoryChallenge/scripts/multi_session_bridge_probe.py 2>&1 | tail -5
+python3 scripts/server_verify_refusal_gate.py abst        # 只跑 abstention 探针
+python3 scripts/server_verify_refusal_gate.py all         # 七个阶段全跑
+python3 scripts/server_verify_refusal_gate.py --since 6h  # 放大 observe 的日志窗口
+python3 scripts/server_verify_refusal_gate.py --container masm-v11-api-1 gate
 ```
 
-连跑两次防抖，两次都要 `bridged_question` 覆盖 2 个会话。
+输出每阶段一行、最后一行是结论，退出码 0/1：
 
-### 7.3 多会话路径（`disconnected_chain` 必须 0）
-
-```bash
-docker exec -i masm-v11-api-1 python - --timeout 240 \
-  < /root/AgentMemoryChallenge/scripts/multi_session_path_probe.py 2>&1 | tail -4
+```
+container=masm-v11-api-1 stages=gate,field,bridge,path,compare,observe repo=/root/AgentMemoryChallenge
+[gate   ] PASS exit=0 providers=4/4 graph_flag=enabled
+[field  ] PASS refusal_gate_field=present
+[bridge1] PASS exit=0 bridged_sessions=2 bridged_returned=1 fail=0 failed_cases=none
+[bridge2] PASS exit=0 bridged_sessions=2 bridged_returned=1 fail=0 failed_cases=none
+[path   ] PASS exit=0 disconnected_returned=0 connected_returned=3 fail=0 failed_cases=none
+[compare] PASS exit=0 subset_ok=26/26 false=0 forbidden_total=0 false_cases=none
+[observe] INFO searches=87 gate_hits=3 gate_hits_with_evidence=0 selector_abstained=11
+RESULT=PASS
 ```
 
-该用例有抖动，失败先重跑一次再下结论。
+红色行直接印出越界字段（`bridged_sessions=1`、`forbidden_total=6`、`positive_relation_returned=0`…），不用再翻日志。
 
-### 7.4 26 例 compare
+脚本内置的判据（与交接文档 §5 一致）：
+
+| 阶段 | 通过条件 |
+| --- | --- |
+| `gate` | `verification_exit_code=0`；`checkout_clean` / `probe_*` / `source_*` 全 `yes`；`official-masm` + `valid` + `present`；四个 provider 全 `set` |
+| `field` | 镜像诊断里有 `refusal_gate` 字段 |
+| `abst` | 所有行 `passed=true`，且 `positive_relation.returned_count >= 1` |
+| `bridge1/2` | `bridged_question.distinct_session_count = 2` 且 `passed`，连跑两次都过 |
+| `path` | `disconnected_chain.returned_count = 0` 且 `connected_chain.passed` |
+| `compare` | `subset_ok` 26/26、无 `false` 行、`forbidden_total <= 5` |
+| `observe` | 只观测；`gate_hits_with_evidence` 必须为 0（命中却带回证据＝预检逻辑被破坏） |
+
+长探针用独立会话启动、脚本从宿主流进容器，SSH 断线不会打断；重连后重跑同一条命令即可。
+
+## 8. 观测口径（`observe` 阶段已包含，这里是对照用）
 
 ```bash
-cd /root/AgentMemoryChallenge && rm -f /tmp/cmp.done /tmp/cmp.jsonl
-nohup bash -c 'docker exec -i masm-v11-api-1 python - --compare \
-  < /root/AgentMemoryChallenge/scripts/evidence_graph_probe.py \
-  > /tmp/cmp.jsonl 2>/tmp/cmp.err; echo done > /tmp/cmp.done' >/dev/null 2>&1 &
-for i in $(seq 1 30); do [ -f /tmp/cmp.done ] && break; sleep 5; done
-grep -c '"subset_ok": true' /tmp/cmp.jsonl
-grep '"subset_ok": false' /tmp/cmp.jsonl | head -3
-grep compare_summary /tmp/cmp.jsonl
-```
-
-判据：`subset_ok` 26/26、无 `false` 行、`forbidden_total <= 5`。
-
-## 8. 观测预检是否命中（决定要不要花额度）
-
-```bash
-# 命中了多少次
-docker logs --since 60m masm-v11-api-1 2>&1 | grep -c '"refusal_gate":true'
-# 命中的行（看 candidate_count 与 returned_count）
-docker logs --since 60m masm-v11-api-1 2>&1 | grep '"refusal_gate":true' | tail -5
-# 对照：走选择器的空响应长什么样
+python3 scripts/server_verify_refusal_gate.py observe                                  # 一行摘要
+docker logs --since 60m masm-v11-api-1 2>&1 | grep '"refusal_gate":true' | tail -3    # 逐行
 docker logs --since 60m masm-v11-api-1 2>&1 | grep '"selector_abstained":true' | tail -3
 ```
 
 判定：
 
-- `refusal_gate=true` **只**出现在拒答形状（问一个库里不存在的关系人）→ 预检按设计工作，可以花额度；
-- `refusal_gate=true` 出现在本该有答案的 direct/atomic 问题上 → **立即回滚**，那种情况下总分只会 ≤ 38.46；
-- 一条都没有 → 预检在这批题上没机会触发，本改动等价于没改，仍需回滚后再研究。
+- `refusal_gate=true` **只**出现在拒答形状（问库里不存在的关系人）→ 预检按设计工作，可以花额度；
+- `refusal_gate=true` 出现在本该有答案的 direct/atomic 上 → **立即回滚**，那种情况下总分只会 ≤ 38.46；
+- `gate_hits=0` → 这批请求里预检没机会触发，本改动等价于没改，回滚后再研究。
 
 ## 9. 回滚
 
