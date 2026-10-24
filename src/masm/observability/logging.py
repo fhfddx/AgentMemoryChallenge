@@ -61,6 +61,8 @@ ALLOWED_LOG_FIELDS = frozenset(
         "graph_bridge_added",
         "graph_bridge_skip",
         "graph_planner_latency_ms",
+        # 选择器之前的拒答预检是否命中：不加入白名单的话，线上永远看不到它。
+        "refusal_gate",
         "channel",
         "model_name",
         "model_version",

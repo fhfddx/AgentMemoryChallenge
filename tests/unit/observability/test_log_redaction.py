@@ -67,6 +67,14 @@ def test_graph_diagnostics_survive_redaction() -> None:
     assert redacted["graph_planner_latency_ms"] == 1234.5
 
 
+def test_refusal_gate_diagnostic_survives_redaction() -> None:
+    """预检命中标记必须真的进日志：白名单少一个键，线上就完全看不到拒答来源。"""
+
+    redacted = redact_fields({"refusal_gate": True, "returned_count": 0})
+
+    assert redacted == {"refusal_gate": True, "returned_count": 0}
+
+
 def test_nested_structures_are_redacted() -> None:
     payload = {
         "request_id": "r-1",
