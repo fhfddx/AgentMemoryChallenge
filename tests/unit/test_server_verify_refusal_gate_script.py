@@ -372,6 +372,65 @@ def test_profile_splits_probe_traffic_from_the_official_run(
     assert "cluster2 start=11:00:00 searches=4 empty=2 gate_hits=0 selector_abstained=2" in stdout
 
 
+def test_clusters_count_only_search_diagnostics(fake_runner, capsys, monkeypatch) -> None:
+    lines = [
+        _timed("2026-10-24T10:00:00.000000000Z", {"event": "http.request", "count": 1}),
+        _timed(
+            "2026-10-24T10:00:05.000000000Z",
+            _search_row(candidates=3, returned=1, gate=False, abstained=False),
+        ),
+        _timed("2026-10-24T12:00:00.000000000Z", {"event": "model.call", "attempts": 1}),
+        _timed(
+            "2026-10-24T12:00:05.000000000Z",
+            _search_row(candidates=0, returned=0, gate=False, abstained=True),
+        ),
+    ]
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, "", "\n".join(lines) + "\n")
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["profile"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "cluster1 start=10:00:00 searches=1" in stdout
+    assert "cluster2 start=12:00:00 searches=1 empty=1" in stdout
+
+
+def test_detail_lists_one_line_per_search(fake_runner, capsys, monkeypatch) -> None:
+    lines = [
+        _timed(
+            "2026-10-24T11:00:01.000000000Z",
+            {
+                "event": "search.completed",
+                "candidate_count": 0,
+                "dedup_count": 0,
+                "returned_count": 0,
+                "refusal_gate": False,
+                "selector_abstained": True,
+                "graph_state": "insufficient",
+                "channel_counts": {"lexical": 3, "text_vector": 9},
+            },
+        ),
+        _timed("2026-10-24T11:00:02.000000000Z", {"event": "model.call", "attempts": 1}),
+    ]
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, "", "\n".join(lines) + "\n")
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["detail"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "#1 11:00:01 cand=0 dedup=0 returned=0" in stdout
+    assert "ch={'lexical': 3, 'text_vector': 9}" in stdout
+    assert "#2" not in stdout
+
+
 def test_profile_summarizes_the_official_run(fake_runner, capsys, monkeypatch) -> None:
     rows = [
         {

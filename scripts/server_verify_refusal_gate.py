@@ -50,6 +50,7 @@ ALL_STAGES = (
     "compare",
     "observe",
     "profile",
+    "detail",
 )
 PROBE_TIMEOUTS = {"abst": 420.0, "bridge": 420.0, "path": 420.0, "compare": 540.0}
 PROBE_SCRIPTS = {
@@ -377,12 +378,40 @@ def _histogram(rows: Sequence[dict[str, object]], field: str, edges: Sequence[in
     return str(dict(sorted(counts.items())))
 
 
+def _is_diagnostic(row: dict[str, object]) -> bool:
+    return row.get("event") == "search.completed" or "candidate_count" in row
+
+
+def summarize_detail(timed: Sequence[tuple[str | None, dict[str, object]]]) -> list[Row]:
+    """逐题列出无文本的计数指纹：区分「检索层没给候选」与「有候选但被丢弃」。"""
+
+    rows: list[Row] = []
+    index = 0
+    for stamp, row in timed:
+        if not _is_diagnostic(row):
+            continue
+        index += 1
+        clock = stamp[11:19] if stamp else "?"
+        channels = row.get("channel_counts") or {}
+        rows.append(
+            Row(
+                INFO,
+                "detail",
+                f"#{index} {clock} cand={row.get('candidate_count')} "
+                f"dedup={row.get('dedup_count')} returned={row.get('returned_count')} "
+                f"gate={row.get('refusal_gate')} sel_abst={row.get('selector_abstained')} "
+                f"graph={row.get('graph_state')} ch={channels}",
+            )
+        )
+    if not rows:
+        return [Row(INFO, "detail", "no_search_diagnostics_in_window")]
+    return rows
+
+
 def summarize_profile(rows: Sequence[dict[str, object]]) -> list[Row]:
     """把一次官方运行的诊断折叠成不含文本的指纹：多少题、几题空、候选与图状态分布。"""
 
-    diagnostics = [
-        row for row in rows if row.get("event") == "search.completed" or "candidate_count" in row
-    ]
+    diagnostics = [row for row in rows if _is_diagnostic(row)]
     if not diagnostics:
         return [Row(INFO, "profile", "no_search_diagnostics_in_window")]
     empty = sum(1 for row in diagnostics if row.get("returned_count") == 0)
@@ -446,16 +475,14 @@ def summarize_clusters(
     clusters = [
         [(stamp, row) for stamp, row in cluster]
         for cluster in _cluster(timed, gap_seconds)
-        if any(
-            row.get("event") == "search.completed" or "candidate_count" in row
-            for _, row in cluster
-        )
+        if any(_is_diagnostic(row) for _, row in cluster)
     ]
     if len(clusters) < 2:
         return []
     rows: list[Row] = []
     for index, cluster in enumerate(clusters, start=1):
-        diagnostics = [row for _, row in cluster]
+        # 只数诊断行：普通日志（http.request / model.call）不是一次搜索。
+        diagnostics = [row for _, row in cluster if _is_diagnostic(row)]
         stamp = cluster[0][0]
         clock = stamp[11:19] if stamp else "unknown"
         empty = sum(1 for row in diagnostics if row.get("returned_count") == 0)
@@ -474,9 +501,7 @@ def summarize_clusters(
 
 
 def summarize_observe(rows: Sequence[dict[str, object]]) -> Row:
-    diagnostics = [
-        row for row in rows if row.get("event") == "search.completed" or "candidate_count" in row
-    ]
+    diagnostics = [row for row in rows if _is_diagnostic(row)]
     with_field = [row for row in diagnostics if "refusal_gate" in row]
     hits = hits_with_evidence = abstained = 0
     for row in with_field:
@@ -569,6 +594,9 @@ def run_stages(
             timed = parse_timed_rows(result.stdout + result.stderr)
             results.extend(summarize_profile([row for _, row in timed]))
             results.extend(summarize_clusters(timed))
+        elif stage == "detail":
+            result = runner(("docker", "logs", "-t", "--since", since, container))
+            results.extend(summarize_detail(parse_timed_rows(result.stdout + result.stderr)))
         elif stage == "bridge":
             # 桥接判据有抖动：连跑两次，两次都必须命中 2 个会话。
             for run in (1, 2):

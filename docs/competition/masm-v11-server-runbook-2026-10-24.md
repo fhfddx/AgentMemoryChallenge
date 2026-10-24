@@ -227,6 +227,27 @@ python3 scripts/server_verify_refusal_gate.py profile --since 6h
   的拒答题都**返回了证据**；若明显更大，说明另有题目（通常是 multi-session）在返回空；
 - `candidates` 里大量 `<=0` = 检索层没给候选；集中在 `<=16` = 有近失配候选但被接受。
 
+## 8.2 逐题明细（`detail`）
+
+```bash
+python3 scripts/server_verify_refusal_gate.py detail --since 6h
+```
+
+每个 `/search` 一行，只有计数与固定枚举、没有文本：
+
+```
+[detail ] INFO #7 16:41:03 cand=0 dedup=0 returned=0 gate=False sel_abst=True graph=insufficient ch={'lexical': 3, 'text_vector': 9}
+```
+
+用途：区分两种「空响应」——
+
+| 形态 | 含义 |
+| --- | --- |
+| `ch` 非零、`cand=0` | 召回到了东西，但被相关性闸门全部滤掉（可考虑空池兜底） |
+| `ch` 全零、`cand=0` | 检索层压根没召回（要换召回通道，不是调闸门） |
+
+这两类的修法完全相反，所以在动判据之前必须先看一眼明细。
+
 ## 9. 回滚
 
 同样自包含；把 `ROLLBACK_SHA` 换成你要回到的那个 tag（上一版最好成绩是 `a7b58d1`）：
