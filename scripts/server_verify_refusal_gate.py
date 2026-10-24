@@ -309,11 +309,12 @@ def summarize_compare(exit_code: int | str, rows: Sequence[dict[str, object]]) -
     if bad:
         shapes = ";".join(
             f"{row.get('case')}(baseline={row.get('baseline_count')},"
-            f"merged={row.get('merged_count')},added={row.get('added_count')})"
+            f"merged={row.get('merged_count')},added={row.get('added_count')},"
+            f"forbidden={row.get('forbidden')},state={row.get('graph_state')})"
             for row in cases
             if row.get("subset_ok") is False
         )
-        detail += f" shape={shapes[:160]}"
+        detail += f" shape={shapes[:200]}"
     return Row(PASS if ok else FAIL, "compare", detail)
 
 
