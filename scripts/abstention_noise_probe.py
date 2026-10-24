@@ -80,6 +80,11 @@ def _corpus(run_tag: str, topics: int) -> list[str]:
     texts = [
         f"The access code for the Item-{run_tag} locker is Code-{run_tag}.",
         f"The Item-{run_tag} locker is on the third floor of the Harbour building.",
+        # 下面五条是"近失配"素材：话题相邻、答案不成立。
+        "The front door code for the flat is K7-42.",
+        "The spare key is kept in the blue drawer.",
+        "My brother Leo works at the Harbour office as a surveyor.",
+        f"The Item-{run_tag} locker was installed in 2019.",
     ]
     for index in range(topics):
         word = _TOPIC_WORDS[index % len(_TOPIC_WORDS)]
@@ -103,12 +108,20 @@ def _cases(run_tag: str, absent: str) -> tuple[tuple[str, str], ...]:
         ("absent_attribute", f"What colour is the Item-{run_tag} locker?"),
         # 同类属性存在（地点），只是数量从未记录。
         ("absent_quantity", f"How many shelves does the Item-{run_tag} locker have?"),
-        # 主体不存在的关系人。
+        # 主体不存在的关系人（库里没有任何兄弟/姐妹记忆以外的人）。
         ("relation_absent", f"What does my sister {absent.capitalize()} do for work?"),
         # 措辞贴近库内文本、但答案不在库里。
         ("option_overlap", f"Which city hosts the newsletter {run_tag}-0 office?"),
         # 时间从未记录。
         ("absent_temporal", f"When did the locker Item-{run_tag} get installed?"),
+        # 近失配陷阱：库里只有"前门"的代码。
+        ("trap_other_door", "What is the code for the back door of the flat?"),
+        # 近失配陷阱：blue 是抽屉的颜色，不是钥匙的颜色。
+        ("trap_adjacent_colour", "What colour is the spare key?"),
+        # 近失配陷阱：库里有兄弟 Leo，问的是姐妹。
+        ("trap_other_sibling", "Which office does my sister Maya work at?"),
+        # 近失配陷阱：只记录了年份，问月份。
+        ("trap_partial_date", f"In which month was the Item-{run_tag} locker installed?"),
     )
 
 
@@ -168,10 +181,7 @@ def run_probe(
             if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
                 raise RuntimeError("Search contract")
             returned = " ".join(_content_text(row.get("content")) for row in data)
-            refusal = name.startswith("absent") or name in {
-                "relation_absent",
-                "option_overlap",
-            }
+            refusal = not name.startswith("positive")
             if refusal:
                 passed = len(data) == 0
             elif name == "positive_code":
@@ -260,7 +270,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the large-store abstention probe")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--timeout", type=float, default=600.0)
-    parser.add_argument("--topics", type=int, default=10)
+    parser.add_argument(
+        "--topics",
+        type=int,
+        default=10,
+        help="每个主题两条噪声记忆；26 个主题约等于官方库的 110 条文本记忆",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
     try:
         settings = Settings.from_env()

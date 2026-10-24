@@ -114,6 +114,10 @@ def test_probe_passes_when_the_noisy_store_still_refuses() -> None:
         "relation_absent",
         "option_overlap",
         "absent_temporal",
+        "trap_other_door",
+        "trap_adjacent_colour",
+        "trap_other_sibling",
+        "trap_partial_date",
     ):
         assert by_case[name]["refusal_expected"] is True
         assert by_case[name]["returned_count"] == 0
@@ -136,8 +140,8 @@ def test_probe_seeds_and_cleans_every_registered_add() -> None:
 
     cleanup = next(row for row in rows if row["case"] == "cleanup")
     assert code == 0
-    # 两条目标记忆 + 每主题两条噪声记忆。
-    assert cleanup["registered_run_count"] == 2 + 2 * 4
+    # 六条固定记忆（目标两条 + 近失配陷阱四条）+ 每主题两条噪声记忆。
+    assert cleanup["registered_run_count"] == 6 + 2 * 4
     assert cleanup["registered_run_count"] == len(backend.runs)
     assert cleanup["residual_memories_deleted"] == 0
 
