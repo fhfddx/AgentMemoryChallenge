@@ -316,6 +316,62 @@ def test_observe_reads_the_container_stderr_stream(fake_runner, capsys, monkeypa
     assert "gate_hits=2" in stdout
 
 
+def _timed(stamp: str, row: dict[str, object]) -> str:
+    return f"{stamp} " + json.dumps(row, sort_keys=True)
+
+
+def _search_row(
+    *, candidates: int, returned: int, gate: bool, abstained: bool
+) -> dict[str, object]:
+    return {
+        "event": "search.completed",
+        "candidate_count": candidates,
+        "returned_count": returned,
+        "refusal_gate": gate,
+        "selector_abstained": abstained,
+    }
+
+
+def test_profile_splits_probe_traffic_from_the_official_run(
+    fake_runner, capsys, monkeypatch
+) -> None:
+    probe = [
+        _timed(
+            "2026-10-24T10:00:01.000000000Z",
+            _search_row(candidates=4, returned=0, gate=True, abstained=True),
+        ),
+        _timed(
+            "2026-10-24T10:00:20.000000000Z",
+            _search_row(candidates=6, returned=2, gate=False, abstained=False),
+        ),
+    ]
+    official = [
+        _timed(
+            f"2026-10-24T11:00:{index:02d}.000000000Z",
+            _search_row(
+                candidates=12,
+                returned=0 if index < 2 else 3,
+                gate=False,
+                abstained=index < 2,
+            ),
+        )
+        for index in range(4)
+    ]
+    payload = "\n".join(probe + official) + "\n"
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, "", payload)
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["profile"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "cluster1 start=10:00:01 searches=2 empty=1 gate_hits=1 selector_abstained=1" in stdout
+    assert "cluster2 start=11:00:00 searches=4 empty=2 gate_hits=0 selector_abstained=2" in stdout
+
+
 def test_profile_summarizes_the_official_run(fake_runner, capsys, monkeypatch) -> None:
     rows = [
         {

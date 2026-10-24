@@ -202,6 +202,31 @@ docker logs --since 60m masm-v11-api-1 2>&1 | grep '"selector_abstained":true' |
 - `refusal_gate=true` 出现在本该有答案的 direct/atomic 上 → **立即回滚**，那种情况下总分只会 ≤ 38.46；
 - `gate_hits=0` → 这批请求里预检没机会触发，本改动等价于没改，回滚后再研究。
 
+## 8.1 取一次官方运行的指纹（`profile`）
+
+```bash
+python3 scripts/server_verify_refusal_gate.py profile --since 6h
+```
+
+窗口要足够大以覆盖那次官方运行。输出：
+
+```
+[profile] INFO searches=… empty=… gate_hits=… selector_abstained=… graph_enabled=…
+[profile] INFO candidate_count={…}
+[profile] INFO returned_count={…}
+[profile] INFO graph_state={…}
+[profile] INFO cluster1 start=HH:MM:SS searches=… empty=… gate_hits=… selector_abstained=… candidates={…}
+[profile] INFO cluster2 start=HH:MM:SS searches=… empty=… gate_hits=… selector_abstained=… candidates={…}
+```
+
+`cluster*` 行按 ≥150 秒的间隔把日志切成簇：**探针流量与官方运行各成一簇**，不要把探针的
+`gate_hits` 记到官方头上。读法：
+
+- 官方那簇的 `gate_hits` 若为 0，说明官方题目里没有关系前缀形状（与 §10.9 的结论一致）；
+- `empty` 等于「被拒答的题数」。若 `empty` 恰好等于 abstention 的命中数（如 2/9），说明失败
+  的拒答题都**返回了证据**；若明显更大，说明另有题目（通常是 multi-session）在返回空；
+- `candidates` 里大量 `<=0` = 检索层没给候选；集中在 `<=16` = 有近失配候选但被接受。
+
 ## 9. 回滚
 
 同样自包含；把 `ROLLBACK_SHA` 换成你要回到的那个 tag（上一版最好成绩是 `a7b58d1`）：

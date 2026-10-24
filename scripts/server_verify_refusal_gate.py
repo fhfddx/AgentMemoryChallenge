@@ -22,6 +22,7 @@ import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -166,10 +167,24 @@ def _run_probe(
 def parse_rows(payload: bytes | str) -> list[dict[str, object]]:
     """从每一行里取出 JSON 对象；兼容纯 JSONL 与 ``时间 级别 logger {json}`` 前缀。"""
 
+    return [row for _, row in parse_timed_rows(payload)]
+
+
+_TIMESTAMP = re.compile(r"^(\d{4}-\d{2}-\d{2}T[0-9:.]+Z)\s+")
+
+
+def parse_timed_rows(payload: bytes | str) -> list[tuple[str | None, dict[str, object]]]:
+    """同 :func:`parse_rows`，但在 ``docker logs -t`` 前缀存在时一并取出时间戳。"""
+
     text = payload.decode("utf-8", "replace") if isinstance(payload, bytes) else payload
     decoder = json.JSONDecoder()
-    rows: list[dict[str, object]] = []
+    rows: list[tuple[str | None, dict[str, object]]] = []
     for line in text.splitlines():
+        stamp: str | None = None
+        match = _TIMESTAMP.match(line)
+        if match is not None:
+            stamp = match.group(1)
+            line = line[match.end():]
         start = line.find("{")
         if start < 0:
             continue
@@ -178,7 +193,7 @@ def parse_rows(payload: bytes | str) -> list[dict[str, object]]:
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
-            rows.append(value)
+            rows.append((stamp, value))
     return rows
 
 
@@ -399,6 +414,65 @@ def summarize_profile(rows: Sequence[dict[str, object]]) -> list[Row]:
     ]
 
 
+def _cluster(timed: Sequence[tuple[str | None, dict[str, object]]], gap_seconds: float):
+    """按时间间隔把日志切成簇：一次官方运行与一次探针不会落进同一簇。"""
+
+    clusters: list[list[tuple[str | None, dict[str, object]]]] = []
+    previous: float | None = None
+    for stamp, row in timed:
+        moment = _epoch(stamp)
+        if previous is None or moment is None or moment - previous > gap_seconds:
+            clusters.append([])
+        clusters[-1].append((stamp, row))
+        if moment is not None:
+            previous = moment
+    return clusters
+
+
+def _epoch(stamp: str | None) -> float | None:
+    if stamp is None:
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def summarize_clusters(
+    timed: Sequence[tuple[str | None, dict[str, object]]], gap_seconds: float = 150.0
+) -> list[Row]:
+    """逐簇指纹：把探针流量与官方运行分开，免得把探针的 gate_hits 算到官方头上。"""
+
+    clusters = [
+        [(stamp, row) for stamp, row in cluster]
+        for cluster in _cluster(timed, gap_seconds)
+        if any(
+            row.get("event") == "search.completed" or "candidate_count" in row
+            for _, row in cluster
+        )
+    ]
+    if len(clusters) < 2:
+        return []
+    rows: list[Row] = []
+    for index, cluster in enumerate(clusters, start=1):
+        diagnostics = [row for _, row in cluster]
+        stamp = cluster[0][0]
+        clock = stamp[11:19] if stamp else "unknown"
+        empty = sum(1 for row in diagnostics if row.get("returned_count") == 0)
+        gate_hits = sum(1 for row in diagnostics if row.get("refusal_gate") is True)
+        abstained = sum(1 for row in diagnostics if row.get("selector_abstained") is True)
+        candidates = _histogram(diagnostics, "candidate_count", (0, 4, 16))
+        rows.append(
+            Row(
+                INFO,
+                "profile",
+                f"cluster{index} start={clock} searches={len(diagnostics)} empty={empty} "
+                f"gate_hits={gate_hits} selector_abstained={abstained} candidates={candidates}",
+            )
+        )
+    return rows
+
+
 def summarize_observe(rows: Sequence[dict[str, object]]) -> Row:
     diagnostics = [
         row for row in rows if row.get("event") == "search.completed" or "candidate_count" in row
@@ -491,8 +565,10 @@ def run_stages(
             result = runner(("docker", "logs", "--since", since, container))
             results.append(summarize_observe(parse_rows(result.stdout + result.stderr)))
         elif stage == "profile":
-            result = runner(("docker", "logs", "--since", since, container))
-            results.extend(summarize_profile(parse_rows(result.stdout + result.stderr)))
+            result = runner(("docker", "logs", "-t", "--since", since, container))
+            timed = parse_timed_rows(result.stdout + result.stderr)
+            results.extend(summarize_profile([row for _, row in timed]))
+            results.extend(summarize_clusters(timed))
         elif stage == "bridge":
             # 桥接判据有抖动：连跑两次，两次都必须命中 2 个会话。
             for run in (1, 2):
