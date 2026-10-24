@@ -503,6 +503,7 @@ class GraphEvidenceSelector:
             if self._additive
             else None
         )
+        question, visual, has_text = _question_text(query)
         pool = build_selector_pool(
             scoped_ranked,
             max_candidates=self._max_candidates,
@@ -511,15 +512,35 @@ class GraphEvidenceSelector:
             item.memory_id for item in pool if item.memory_id in strong_anchor_ids
         }
         if not pool:
+            # 候选池为空说明相关性闸门没有留下任何候选：库里没有能回答该问题的记忆。
+            # 显式拒答（而非把基线的空结果原样传出），让 abstention 有可归因、可复现的来源。
             if baseline is not None:
+                pool_vetoed = False
+                if self._presence is not None:
+                    relation_names = relation_capitalized_names(question)
+                    if relation_names:
+                        relation_present = self._presence(
+                            request_user_id, sorted(relation_names)
+                        )
+                        pool_vetoed = bool(relation_names - relation_present)
                 return GraphSelection(
-                    baseline,
+                    SelectionResult(
+                        evidence=(),
+                        candidate_count=baseline.candidate_count,
+                        source_count=baseline.source_count,
+                        selected_source_count=0,
+                        fallback=False,
+                        abstained=True,
+                        failure_category="none",
+                        evidence_state="insufficient",
+                    ),
                     GraphDiagnostics(
                         enabled=True,
                         candidate_count=baseline.candidate_count,
-                        selected_count=len(baseline.evidence),
-                        selected_source_count=baseline.selected_source_count,
-                        state=_reported_state(baseline.evidence_state),
+                        selected_count=0,
+                        selected_source_count=0,
+                        state="insufficient",
+                        vetoed=pool_vetoed or self._additive,
                     ),
                 )
             return GraphSelection(
@@ -527,7 +548,6 @@ class GraphEvidenceSelector:
                 GraphDiagnostics(enabled=True),
             )
 
-        question, visual, has_text = _question_text(query)
         if visual and not has_text:
             # 纯图片查询没有可供 planner 判断的文本问题：沿用既有 selector/回退路径。
             selection = (
