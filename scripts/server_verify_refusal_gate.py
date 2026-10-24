@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,9 @@ from typing import NamedTuple
 PASS = "PASS"
 FAIL = "FAIL"
 INFO = "INFO"
+
+# 脱敏格式化后是 "2026-10-24 23:00:00,000 INFO masm.search {...}"，冒号后可能有空格。
+_FIELD_PATTERN = re.compile(r'"refusal_gate":\s*true')
 
 DEFAULT_STAGES = ("gate", "field", "bridge", "path", "compare", "observe")
 ALL_STAGES = ("gate", "field", "abst", "bridge", "path", "compare", "observe")
@@ -64,9 +68,11 @@ _GATE_FIELDS = (
 _FIELD_CHECK = """
 import logging
 
+from masm.observability.logging import configure_logging
 from masm.retrieval.diagnostics import SearchDiagnostics, emit_search_diagnostics
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+# 走生产同一条脱敏链路：白名单少一个键，这里就会看不到 refusal_gate。
+configure_logging(level=logging.INFO)
 emit_search_diagnostics(
     SearchDiagnostics(
         request_tag="0" * 32,
@@ -142,16 +148,17 @@ def _run_probe(
 
 
 def parse_rows(payload: bytes | str) -> list[dict[str, object]]:
-    """从 JSONL 里取出诊断行；非 JSON 行与坏行一律跳过。"""
+    """从每一行里取出 JSON 对象；兼容纯 JSONL 与 ``时间 级别 logger {json}`` 前缀。"""
 
     text = payload.decode("utf-8", "replace") if isinstance(payload, bytes) else payload
+    decoder = json.JSONDecoder()
     rows: list[dict[str, object]] = []
     for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
+        start = line.find("{")
+        if start < 0:
             continue
         try:
-            value = json.loads(line)
+            value, _ = decoder.raw_decode(line[start:])
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
@@ -202,10 +209,13 @@ def summarize_gate(result: CommandResult) -> Row:
 
 
 def summarize_field(result: CommandResult) -> Row:
-    if '"refusal_gate":true' in result.stdout:
+    # logging 默认写 stderr，脱敏格式化后的行还带 ``时间 级别 logger`` 前缀。
+    combined = result.stdout + result.stderr
+    if _FIELD_PATTERN.search(combined):
         return Row(PASS, "field", "refusal_gate_field=present")
-    tail = result.stdout.strip().splitlines()[-1:] or [""]
-    return Row(FAIL, "field", "refusal_gate_field=missing tail=" + tail[0][:160])
+    tail = (combined.strip().splitlines() or [""])[-1]
+    detail = f"refusal_gate_field=missing exit={result.returncode} tail={tail[:120]}"
+    return Row(FAIL, "field", detail)
 
 
 def summarize_abst(exit_code: int | str, rows: Sequence[dict[str, object]]) -> Row:
@@ -296,26 +306,43 @@ def summarize_compare(exit_code: int | str, rows: Sequence[dict[str, object]]) -
         f"exit={exit_code} subset_ok={ok_count}/{len(cases)} false={len(bad)} "
         f"forbidden_total={forbidden_text} false_cases={','.join(bad[:4]) or 'none'}"
     )
+    if bad:
+        shapes = ";".join(
+            f"{row.get('case')}(baseline={row.get('baseline_count')},"
+            f"merged={row.get('merged_count')},added={row.get('added_count')})"
+            for row in cases
+            if row.get("subset_ok") is False
+        )
+        detail += f" shape={shapes[:160]}"
     return Row(PASS if ok else FAIL, "compare", detail)
 
 
 def summarize_observe(rows: Sequence[dict[str, object]]) -> Row:
-    searches = hits = hits_with_evidence = abstained = 0
-    for row in rows:
-        if "refusal_gate" not in row:
-            continue
-        searches += 1
+    diagnostics = [
+        row for row in rows if row.get("event") == "search.completed" or "candidate_count" in row
+    ]
+    with_field = [row for row in diagnostics if "refusal_gate" in row]
+    hits = hits_with_evidence = abstained = 0
+    for row in with_field:
         if row.get("refusal_gate") is True:
             hits += 1
             if row.get("returned_count"):
                 hits_with_evidence += 1
         elif row.get("selector_abstained") is True:
             abstained += 1
-    if searches == 0:
+    if not diagnostics:
         return Row(INFO, "observe", "no_search_diagnostics_in_window")
+    if not with_field:
+        return Row(
+            FAIL,
+            "observe",
+            f"diagnostics={len(diagnostics)} refusal_gate_field_missing"
+            " (白名单缺键或镜像未更新)",
+        )
     detail = (
-        f"searches={searches} gate_hits={hits} "
-        f"gate_hits_with_evidence={hits_with_evidence} selector_abstained={abstained}"
+        f"diagnostics={len(diagnostics)} with_field={len(with_field)} "
+        f"gate_hits={hits} gate_hits_with_evidence={hits_with_evidence} "
+        f"selector_abstained={abstained}"
     )
     return Row(FAIL if hits_with_evidence else INFO, "observe", detail)
 

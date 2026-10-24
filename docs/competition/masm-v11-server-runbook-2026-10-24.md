@@ -169,7 +169,7 @@ RESULT=PASS
 | 阶段 | 通过条件 |
 | --- | --- |
 | `gate` | `verification_exit_code=0`；`checkout_clean` / `probe_*` / `source_*` 全 `yes`；`official-masm` + `valid` + `present`；四个 provider 全 `set` |
-| `field` | 镜像诊断里有 `refusal_gate` 字段 |
+| `field` | 走生产同一条脱敏链路后，日志行里仍有 `refusal_gate` 字段 |
 | `abst` | 所有行 `passed=true`，且 `positive_relation.returned_count >= 1` |
 | `bridge1/2` | `bridged_question.distinct_session_count = 2` 且 `passed`，连跑两次都过 |
 | `path` | `disconnected_chain.returned_count = 0` 且 `connected_chain.passed` |
@@ -177,6 +177,10 @@ RESULT=PASS
 | `observe` | 只观测；`gate_hits_with_evidence` 必须为 0（命中却带回证据＝预检逻辑被破坏） |
 
 长探针用独立会话启动、脚本从宿主流进容器，SSH 断线不会打断；重连后重跑同一条命令即可。
+
+`field` 与 `observe` 都依赖 `refusal_gate` 出现在**脱敏后**的日志里：该键已加入
+`ALLOWED_LOG_FIELDS`，因此任何包含这条改动的提交都必须重新构建镜像，否则 `observe`
+会报 `refusal_gate_field_missing`（这是唯一会因此变红的阶段，探针本身不受影响）。
 
 ## 8. 观测口径（`observe` 阶段已包含，这里是对照用）
 

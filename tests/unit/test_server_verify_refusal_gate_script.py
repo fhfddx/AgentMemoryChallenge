@@ -81,11 +81,19 @@ def _compare_rows(*, forbidden_total: int = 0, subset_failures: int = 0) -> list
 
 def _diagnostic_rows(gate_hits: int = 3, hit_with_evidence: int = 0) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = [
-        {"refusal_gate": False, "selector_abstained": True, "returned_count": 0}
+        {
+            "event": "search.completed",
+            "candidate_count": 2,
+            "refusal_gate": False,
+            "selector_abstained": True,
+            "returned_count": 0,
+        }
     ]
     for index in range(gate_hits):
         rows.append(
             {
+                "event": "search.completed",
+                "candidate_count": 2,
                 "refusal_gate": True,
                 "selector_abstained": False,
                 "returned_count": 1 if index < hit_with_evidence else 0,
@@ -116,7 +124,12 @@ def fake_runner(monkeypatch: pytest.MonkeyPatch):
         if any(part.endswith("evidence_graph_server_gate.py") for part in argv):
             return verify.CommandResult(0, _GATE_STDOUT.decode(), "")
         if argv[:2] == ["docker", "exec"]:
-            return verify.CommandResult(0, '{"refusal_gate":true,"returned_count":0}', "")
+            # 真实的脱敏格式化输出：写在 stderr，且带「时间 级别 logger」前缀。
+            line = (
+                '2026-10-24 23:00:00,000 INFO masm.search '
+                '{"event": "search.completed", "refusal_gate": true, "returned_count": 0}'
+            )
+            return verify.CommandResult(0, "", line)
         if argv[:2] == ["docker", "logs"]:
             return verify.CommandResult(0, _jsonl(_diagnostic_rows()).decode(), "")
         raise AssertionError(f"unexpected command: {argv}")
@@ -262,6 +275,58 @@ def test_observe_flags_a_gate_hit_that_returned_evidence(fake_runner, capsys, mo
     stdout = capsys.readouterr().out
     assert exit_code == 1
     assert "gate_hits_with_evidence=1" in stdout
+
+
+def test_observe_fails_when_diagnostics_lack_the_new_field(
+    fake_runner, capsys, monkeypatch
+) -> None:
+    rows = [{"event": "search.completed", "candidate_count": 3, "returned_count": 1}]
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, _jsonl(rows).decode(), "")
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["observe"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 1
+    assert "refusal_gate_field_missing" in stdout
+
+
+def test_field_check_reads_the_redacted_stderr_line(fake_runner, capsys, monkeypatch) -> None:
+    line = (
+        '2026-10-24 23:00:00,000 INFO masm.search '
+        '{"event": "search.completed", "refusal_gate": true}'
+    )
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, "", line)
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["field"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "[field  ] PASS" in stdout
+
+
+def test_field_check_fails_when_the_whitelist_drops_the_field(
+    fake_runner, capsys, monkeypatch
+) -> None:
+    line = '2026-10-24 23:00:00,000 INFO masm.search {"event": "search.completed"}'
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, "", line)
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["field"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 1
+    assert "refusal_gate_field=missing" in stdout
 
 
 def test_unknown_stage_is_rejected_by_the_parser(capsys) -> None:
