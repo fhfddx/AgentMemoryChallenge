@@ -316,6 +316,52 @@ def test_observe_reads_the_container_stderr_stream(fake_runner, capsys, monkeypa
     assert "gate_hits=2" in stdout
 
 
+def test_profile_summarizes_the_official_run(fake_runner, capsys, monkeypatch) -> None:
+    rows = [
+        {
+            "event": "search.completed",
+            "candidate_count": 0,
+            "returned_count": 0,
+            "refusal_gate": True,
+            "selector_abstained": True,
+            "graph_enabled": True,
+            "graph_state": "insufficient",
+        },
+        {
+            "event": "search.completed",
+            "candidate_count": 6,
+            "returned_count": 2,
+            "refusal_gate": False,
+            "selector_abstained": False,
+            "graph_enabled": True,
+            "graph_state": "sufficient",
+        },
+        {
+            "event": "search.completed",
+            "candidate_count": 6,
+            "returned_count": 0,
+            "refusal_gate": False,
+            "selector_abstained": True,
+            "graph_enabled": True,
+            "graph_state": "insufficient",
+        },
+    ]
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, "", _jsonl(rows).decode())
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["profile"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "searches=3 empty=2 gate_hits=1 selector_abstained=2 graph_enabled=3" in stdout
+    assert "candidate_count={'<=0': 1, '<=16': 2}" in stdout
+    assert "returned_count={'<=0': 2, '<=3': 1}" in stdout
+    assert "graph_state={'insufficient': 2, 'sufficient': 1}" in stdout
+
+
 def test_observe_flags_a_gate_hit_that_returned_evidence(fake_runner, capsys, monkeypatch) -> None:
     def run(argv, *, input_bytes=None):
         return verify.CommandResult(

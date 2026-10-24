@@ -40,7 +40,16 @@ KNOWN_FLAKY_NEGATIVES = frozenset({"elliptical_confirmation_negative"})
 _FIELD_PATTERN = re.compile(r'"refusal_gate":\s*true')
 
 DEFAULT_STAGES = ("gate", "field", "bridge", "path", "compare", "observe")
-ALL_STAGES = ("gate", "field", "abst", "bridge", "path", "compare", "observe")
+ALL_STAGES = (
+    "gate",
+    "field",
+    "abst",
+    "bridge",
+    "path",
+    "compare",
+    "observe",
+    "profile",
+)
 PROBE_TIMEOUTS = {"abst": 420.0, "bridge": 420.0, "path": 420.0, "compare": 540.0}
 PROBE_SCRIPTS = {
     "abst": "abstention_path_probe.py",
@@ -336,6 +345,60 @@ def summarize_compare(exit_code: int | str, rows: Sequence[dict[str, object]]) -
     return Row(FAIL, "compare", detail)
 
 
+def _bucket(value: object, edges: Sequence[int]) -> str:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return "unknown"
+    for edge in edges:
+        if value <= edge:
+            return f"<={edge}"
+    return f">{edges[-1]}"
+
+
+def _histogram(rows: Sequence[dict[str, object]], field: str, edges: Sequence[int]) -> str:
+    counts: dict[str, int] = {}
+    for row in rows:
+        key = _bucket(row.get(field), edges)
+        counts[key] = counts.get(key, 0) + 1
+    return str(dict(sorted(counts.items())))
+
+
+def summarize_profile(rows: Sequence[dict[str, object]]) -> list[Row]:
+    """把一次官方运行的诊断折叠成不含文本的指纹：多少题、几题空、候选与图状态分布。"""
+
+    diagnostics = [
+        row for row in rows if row.get("event") == "search.completed" or "candidate_count" in row
+    ]
+    if not diagnostics:
+        return [Row(INFO, "profile", "no_search_diagnostics_in_window")]
+    empty = sum(1 for row in diagnostics if row.get("returned_count") == 0)
+    gate_hits = sum(1 for row in diagnostics if row.get("refusal_gate") is True)
+    abstained = sum(1 for row in diagnostics if row.get("selector_abstained") is True)
+    graph_on = sum(1 for row in diagnostics if row.get("graph_enabled") is True)
+    states: dict[str, int] = {}
+    for row in diagnostics:
+        state = str(row.get("graph_state", "unknown"))
+        states[state] = states.get(state, 0) + 1
+    return [
+        Row(
+            INFO,
+            "profile",
+            f"searches={len(diagnostics)} empty={empty} gate_hits={gate_hits} "
+            f"selector_abstained={abstained} graph_enabled={graph_on}",
+        ),
+        Row(
+            INFO,
+            "profile",
+            "candidate_count=" + _histogram(diagnostics, "candidate_count", (0, 4, 16)),
+        ),
+        Row(
+            INFO,
+            "profile",
+            "returned_count=" + _histogram(diagnostics, "returned_count", (0, 1, 3)),
+        ),
+        Row(INFO, "profile", f"graph_state={dict(sorted(states.items()))}"),
+    ]
+
+
 def summarize_observe(rows: Sequence[dict[str, object]]) -> Row:
     diagnostics = [
         row for row in rows if row.get("event") == "search.completed" or "candidate_count" in row
@@ -427,6 +490,9 @@ def run_stages(
             # 应用日志走 stderr，所以两路都要读。
             result = runner(("docker", "logs", "--since", since, container))
             results.append(summarize_observe(parse_rows(result.stdout + result.stderr)))
+        elif stage == "profile":
+            result = runner(("docker", "logs", "--since", since, container))
+            results.extend(summarize_profile(parse_rows(result.stdout + result.stderr)))
         elif stage == "bridge":
             # 桥接判据有抖动：连跑两次，两次都必须命中 2 个会话。
             for run in (1, 2):

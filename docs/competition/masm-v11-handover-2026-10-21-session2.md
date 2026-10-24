@@ -241,7 +241,6 @@ PY
 - 观测命令：`docker logs masm-v11-api-1 2>&1 | grep '"refusal_gate":true'`，并把 `returned_count` 与 `selector_abstained` 一起看。
 
 ### 10.8 候选就绪（2026-10-24 服务器实测，镜像 `939c77f`）
-
 | 检查 | 结果 |
 | --- | --- |
 | 选择器字节 | `git diff a7b58d1 HEAD --quiet -- src/masm/retrieval/evidence_graph.py` → 一致 |
@@ -263,4 +262,33 @@ cd /root/AgentMemoryChallenge
 python3 scripts/server_verify_refusal_gate.py            # gate field bridge path compare observe
 python3 scripts/server_verify_refusal_gate.py all        # 需要连 abst 一起复跑时
 ```
+
+### 10.9 官方结果（2026-10-24，镜像 `939c77f`）：38.46，预检中性
+
+| 能力 | 分数 |
+| --- | --- |
+| Retrieval | 100.00（direct 100 / atomic 100） |
+| Relational / multi_session | 0.00 |
+| Evidence governance / abstention | 22.22 |
+| **总分** | **38.46** |
+
+结论：**「官方拒答题是关系前缀形状」这个假设被证伪**。预检把 R10-A 从选择器内部搬到选择器之前，abstention 一分未变（仍 22.22 = 2/9）：
+
+- 已拿到的 2 题里，没有一题是靠「预检比选择器更早拒答」多出来的；
+- 剩下 7 题也不在这个形状里——否则会被预检拦成空响应。
+
+同时基线保住了：若沿用带「空池显式拒答」的候选，本次最多 30.77。剩余 Smoke **18 次**。
+
+**下一步不要先猜判据，先取指纹。** 官方运行的每一次 `/search` 都在容器日志里留下无文本诊断行，新增的 `profile` 阶段把它们折叠成分布：
+
+```bash
+cd /root/AgentMemoryChallenge
+python3 scripts/server_verify_refusal_gate.py profile --since 60m
+```
+
+输出 `searches / empty / gate_hits / selector_abstained / graph_enabled`、`candidate_count` 与 `returned_count` 分桶、`graph_state` 分布。读法：
+
+- `empty` 应当等于「被判拒答的题数」。若 `empty=2`，说明 7 道失败拒答题都**返回了证据**问题不在拒答判据，而在「错误证据被接受」；若 `empty` 明显更大，说明 multi-session 题也在返回空。
+- `candidate_count` 若大量落在 `<=0`，是检索层没给候选；若集中在 `<=16`，是「有近失配候选但被接受」。
+- `gate_hits=0` 会把本文的结论钉死：官方题目里没有关系前缀形状。
 
