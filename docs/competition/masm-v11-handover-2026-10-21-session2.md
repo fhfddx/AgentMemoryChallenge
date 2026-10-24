@@ -264,7 +264,6 @@ python3 scripts/server_verify_refusal_gate.py all        # 需要连 abst 一起
 ```
 
 ### 10.9 官方结果（2026-10-24，镜像 `939c77f`）：38.46，预检中性
-
 | 能力 | 分数 |
 | --- | --- |
 | Retrieval | 100.00（direct 100 / atomic 100） |
@@ -292,3 +291,24 @@ python3 scripts/server_verify_refusal_gate.py profile --since 60m
 - `candidate_count` 若大量落在 `<=0`，是检索层没给候选；若集中在 `<=16`，是「有近失配候选但被接受」。
 - `gate_hits=0` 会把本文的结论钉死：官方题目里没有关系前缀形状。
 
+### 10.10 空结果补救（2026-10-24 晚，待官方验证）
+
+官方那 4 个空响应里有 2 个是 multi-session，其中 `#13` / `#18` 的指纹是「planner 提出了需求、
+支撑为 0」，而候选池只有 22–32 条——官方库里有 110 条记忆，其余被相关性闸门丢掉了。桥接帮不到
+它们：`bridge_skip=no_selected`，桥接只在「已经选出证据」之后才工作。
+
+实现（选择器一行未改）：`SearchService` 在选择结果为空时，用问题里的稀有词
+（`discriminative_units`）调一次已有的 OR-lexical 补召回，把新候选并进池子再跑一次选择器。
+诊断新增 `retry_added`（补进来多少条）。
+
+设计上的两点保证：
+
+- 只发生在今天返回空的问题上——9 道已答对的题一次都不会进这条路径，direct/atomic 零风险；
+- 延迟代价只落在空响应题上，不会拖慢已答题的 planner（这正是 `7c64c19` 召回加宽失败的原因）。
+
+上线前必须验证的两件事（都在服务器上，不花额度）：
+
+1. `abst` 仍 10/10（尤其 `positive_relation`），说明补救没有把拒答题变成过答；
+2. `abstention_noise_probe` 仍 15/16（唯一已知失败是 `trap_adjacent_colour`），说明大库条件下也没被破坏。
+
+两条都绿，才值得再花一次 Smoke；观察 `retry_added>0` 的题数即知补救触发了几次。
