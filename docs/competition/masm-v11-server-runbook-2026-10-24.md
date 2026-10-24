@@ -176,6 +176,12 @@ RESULT=PASS
 | `compare` | `subset_ok` 26/26、无 `false` 行、`forbidden_total <= 5` |
 | `observe` | 只观测；`gate_hits_with_evidence` 必须为 0（命中却带回证据＝预检逻辑被破坏） |
 
+`compare` 的唯一例外（已实测）：在**字节完全相同**的选择器上，同一条探针两次运行分别得到
+26/26 与 25/26，翻转的永远是 `elliptical_confirmation_negative`（`baseline=2, merged=1,
+forbidden=False`：v7 有时保留含 "Porto" 的引用，加法式把它正确剔除，于是"超集"不成立）。
+这种单例翻转且 `forbidden=False` 时脚本输出 `WARN` 而不是 `FAIL`；任何**正例**掉证据仍然是
+`FAIL`。
+
 长探针用独立会话启动、脚本从宿主流进容器，SSH 断线不会打断；重连后重跑同一条命令即可。
 
 `field` 与 `observe` 都依赖 `refusal_gate` 出现在**脱敏后**的日志里：该键已加入

@@ -262,6 +262,60 @@ def test_gate_requires_every_provider_variable(fake_runner, capsys, monkeypatch)
     assert "providers=3/4" in stdout
 
 
+def test_compare_known_flaky_negative_is_a_warning(fake_runner, capsys) -> None:
+    rows = _compare_rows(subset_failures=1)
+    for row in rows:
+        if row.get("case") == "case-00":
+            row.update(
+                {
+                    "case": "elliptical_confirmation_negative",
+                    "baseline_count": 2,
+                    "merged_count": 1,
+                    "added_count": 0,
+                    "forbidden": False,
+                    "graph_state": "sufficient",
+                }
+            )
+    _set_probe(fake_runner, {"evidence_graph_probe.py": (0, _jsonl(rows))})
+
+    exit_code = verify.main(["compare"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "[compare] WARN" in stdout
+    assert "known_flaky=measured_variance" in stdout
+
+
+def test_compare_flip_on_a_positive_case_is_still_a_failure(fake_runner, capsys) -> None:
+    rows = _compare_rows(subset_failures=1)
+    for row in rows:
+        if row.get("case") == "case-00":
+            row.update({"case": "elliptical_confirmation", "forbidden": False})
+    _set_probe(fake_runner, {"evidence_graph_probe.py": (0, _jsonl(rows))})
+
+    exit_code = verify.main(["compare"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 1
+    assert "false_cases=elliptical_confirmation" in stdout
+
+
+def test_observe_reads_the_container_stderr_stream(fake_runner, capsys, monkeypatch) -> None:
+    rows = _diagnostic_rows(gate_hits=2)
+
+    def run(argv, *, input_bytes=None):
+        # docker logs 把容器的 stderr 写到 CLI 的 stderr。
+        return verify.CommandResult(0, "", _jsonl(rows).decode())
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["observe"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "gate_hits=2" in stdout
+
+
 def test_observe_flags_a_gate_hit_that_returned_evidence(fake_runner, capsys, monkeypatch) -> None:
     def run(argv, *, input_bytes=None):
         return verify.CommandResult(
