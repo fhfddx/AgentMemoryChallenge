@@ -342,6 +342,19 @@ class _IntentTarget:
 
 _TOKEN_SPLIT = re.compile(r"[a-z0-9]+")
 
+# 词面 OR 必须排除的功能词：``simple`` 配置不删停用词，带上它们等于全库命中。
+_LEXICAL_STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "are", "was", "were", "what", "when", "where", "which",
+        "who", "whom", "whose", "why", "how", "does", "did", "doing", "done", "have",
+        "has", "had", "having", "with", "from", "into", "onto", "about", "that",
+        "this", "these", "those", "there", "their", "them", "they", "she", "her",
+        "his", "him", "you", "your", "our", "ours", "its", "not", "but", "all",
+        "any", "can", "could", "should", "would", "will", "shall", "may", "might",
+        "must", "get", "got", "one", "two", "yes", "still", "ever", "never",
+    }
+)
+
 
 class MemoryRepository:
     """记忆存储仓库。"""
@@ -797,10 +810,17 @@ class MemoryRepository:
 
         词面通道必须用 OR 语义：``plainto_tsquery`` 把整句按 AND 连接，问句里只要有一个词
         不在记忆里（``what`` / ``which`` / ``my``）就整条零命中——线上实测 23 次搜索的
-        lexical 计数全是 0，等于这条通道从未工作。OR 语义下排序精度交给 ``ts_rank``。
+        lexical 计数全是 0，等于这条通道从未工作。
+
+        OR 只能取实词：``simple`` 配置不删停用词，若把 ``the`` / ``is`` 也放进 OR，任何含
+        ``the`` 的记忆都会命中，词面通道会退化成"返回全库"（实测出现过一次返回 111 条）。
         """
 
-        tokens = [token for token in _TOKEN_SPLIT.findall(query.lower()) if len(token) >= 2]
+        tokens = [
+            token
+            for token in _TOKEN_SPLIT.findall(query.lower())
+            if len(token) >= 3 and token not in _LEXICAL_STOPWORDS
+        ]
         if not tokens:
             return []
         with self._database.session() as session:

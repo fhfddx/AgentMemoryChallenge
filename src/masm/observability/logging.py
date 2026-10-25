@@ -63,10 +63,6 @@ ALLOWED_LOG_FIELDS = frozenset(
         "graph_planner_latency_ms",
         # 选择器之前的拒答预检是否命中：不加入白名单的话，线上永远看不到它。
         "refusal_gate",
-        # 空结果补救补进来多少条候选。
-        "retry_added",
-        # 池子够大时按 best-effort 返回了多少条证据。
-        "best_effort",
         "channel",
         "model_name",
         "model_version",

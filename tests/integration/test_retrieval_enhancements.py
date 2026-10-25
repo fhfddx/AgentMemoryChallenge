@@ -347,6 +347,21 @@ def test_lexical_channel_matches_when_the_question_has_extra_words(
     assert {row.memory_id for row in single} <= {row.memory_id for row in strict}
 
 
+def test_lexical_channel_ignores_stopword_only_questions(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """停用词不能进 OR：否则任何含 "the" 的记忆都会命中，词面通道退化成返回全库。"""
+    user_id = _uid("lex-stop")
+    request_id = _uid("lex-stop-run")
+    AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings).add(
+        _request(request_id, user_id, "The cat is on the mat.")
+    )
+    repo = MemoryRepository(database)
+
+    assert repo.lexical_candidates(user_id, "What is the weather like?", 10) == []
+    assert repo.lexical_candidates(user_id, "Where is the cat?", 10)
+
+
 def test_legacy_context_without_messages_remains_searchable(
     database: Database, asset_store: AssetStore, settings, embeddings
 ) -> None:

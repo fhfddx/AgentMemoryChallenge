@@ -115,7 +115,6 @@ def create_app(
             ) if settings.source_context_enabled else None
         ),
         refusal_gate=runtime.refusal_gate,
-        supplementary_recall=runtime.supplementary_recall,
     )
 
     @application.middleware("http")

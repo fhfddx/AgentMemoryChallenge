@@ -93,10 +93,6 @@ class SearchDiagnostics:
     graph_planner_latency_ms: float = 0.0
     # 选择器之前的拒答预检是否命中：用于区分"预检拒答"与"选择器弃答"。
     refusal_gate: bool = False
-    # 空结果补救补进来多少条候选（0 表示没有触发或没补到东西）。
-    retry_added: int = 0
-    # 池子够大但仍判"证据不足"时，按 best-effort 返回了多少条证据。
-    best_effort: int = 0
 
 
 def emit_search_diagnostics(value: SearchDiagnostics) -> None:
@@ -167,8 +163,6 @@ def emit_search_diagnostics(value: SearchDiagnostics) -> None:
         ),
         "graph_planner_latency_ms": round(max(0.0, float(value.graph_planner_latency_ms)), 2),
         "refusal_gate": bool(value.refusal_gate),
-        "retry_added": max(0, int(value.retry_added)),
-        "best_effort": max(0, int(value.best_effort)),
     }
     _LOGGER.info(
         json.dumps(payload, sort_keys=True, separators=(",", ":")),
