@@ -406,7 +406,7 @@ def summarize_detail(timed: Sequence[tuple[str | None, dict[str, object]]]) -> l
                 f"req={row.get('graph_requirement_count')} "
                 f"sup={row.get('graph_support_count')} link={row.get('graph_link_count')} "
                 f"bridge={row.get('graph_bridge_added')}/{row.get('graph_bridge_skip')} "
-                f"ch={channels}",
+                f"retry={row.get('retry_added')} ch={channels}",
             )
         )
     if not rows:
