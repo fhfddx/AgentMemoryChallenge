@@ -7,7 +7,11 @@
 - 仓库：`/root/AgentMemoryChallenge`（宿主机），容器 `masm-v11-api-1` / `masm-v11-postgres-1`，compose 项目 `masm-v11`；
 - **绝不重启、不改动 `masm-v11-postgres-1`**；
 - 长命令会断线：单块 ≤ 60 秒，长任务 `nohup` + 轮询；
-- 探针脚本只存在于宿主机，靠 stdin 流进容器（镜像里没有 `scripts/`）。
+- 探针脚本只存在于宿主机，靠 stdin 流进容器（镜像里没有 `scripts/`）；
+- **官方运行后先取指纹再重建**：`--force-recreate` 会删掉旧容器，容器日志随之消失，那次运行的逐题诊断将永久丢失。
+
+> **当前状态（2026-10-25）**：最终候选 `masm-v11-final-candidate:939c77f`（官方 38.46，R 100 / A 22.22 / M 0）。
+> 剩下的实验结论见交接文档 §10.14–§10.16；本 runbook 的验证流程仍然适用。
 
 ---
 
