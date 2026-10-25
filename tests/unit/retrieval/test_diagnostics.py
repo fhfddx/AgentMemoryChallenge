@@ -58,6 +58,7 @@ def test_diagnostics_never_logs_payload_or_identity(caplog) -> None:
         "graph_state", "graph_fallback", "graph_failure_category",
         "graph_planner_failure_reason", "graph_vetoed", "graph_bridge_added",
         "graph_bridge_skip", "graph_planner_latency_ms", "refusal_gate", "retry_added",
+        "best_effort",
     }
 
 

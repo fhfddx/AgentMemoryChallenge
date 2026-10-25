@@ -1,5 +1,7 @@
 """SearchService query preparation tests."""
 
+import json
+import logging
 from dataclasses import replace
 from uuid import UUID
 
@@ -284,3 +286,70 @@ def test_answered_search_never_pays_for_the_retry() -> None:
     service.search(SearchRequest(query="Where did Alice go?", user_id="user-1", top_k=5))
 
     assert selector.calls == 1
+
+
+def _empty_graph_selector(calls: list[int]):
+    class Selector:
+        def select(self, query, options, ranked, anchors, context, *, request_user_id):
+            del query, options, anchors, context, request_user_id
+            calls.append(len(ranked))
+            return _GraphOutcome(
+                SelectionResult(
+                    evidence=(),
+                    candidate_count=len(ranked),
+                    source_count=0,
+                    selected_source_count=0,
+                    fallback=False,
+                    abstained=True,
+                    failure_category="none",
+                    evidence_state="insufficient",
+                ),
+                GraphDiagnostics(enabled=True, candidate_count=len(ranked), selected_count=0),
+            )
+
+    return Selector()
+
+
+def test_rich_pool_returns_best_effort_evidence_instead_of_nothing(caplog) -> None:
+    """池子够大时的"证据不足"更可能是组装失败：返回最相关证据比返回空更有价值。"""
+
+    class Retriever:
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            return [
+                MemoryCandidate(UUID(int=index), user_id, f"fact {index}", 1.0 - index / 100)
+                for index in range(1, 10)
+            ]
+
+    calls: list[int] = []
+    service = SearchService(
+        Retriever(), max_image_bytes=1024, graph_selector=_empty_graph_selector(calls)
+    )
+
+    with caplog.at_level(logging.INFO, logger="masm.search"):
+        response = service.search(
+            SearchRequest(query="Where did Alice go?", user_id="user-1", top_k=3)
+        )
+
+    assert len(response.data) == 3
+    payload = json.loads(caplog.records[-1].message)
+    assert payload["best_effort"] == 3
+    assert payload["returned_count"] == 3
+
+
+def test_small_pool_still_abstains(caplog) -> None:
+    class Retriever:
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            return [MemoryCandidate(UUID(int=1), user_id, "only fact", 0.9)]
+
+    calls: list[int] = []
+    service = SearchService(
+        Retriever(), max_image_bytes=1024, graph_selector=_empty_graph_selector(calls)
+    )
+
+    with caplog.at_level(logging.INFO, logger="masm.search"):
+        response = service.search(
+            SearchRequest(query="Where did Alice go?", user_id="user-1", top_k=3)
+        )
+
+    assert response.data == []
+    assert json.loads(caplog.records[-1].message)["best_effort"] == 0

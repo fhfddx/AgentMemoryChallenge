@@ -65,6 +65,8 @@ ALLOWED_LOG_FIELDS = frozenset(
         "refusal_gate",
         # 空结果补救补进来多少条候选。
         "retry_added",
+        # 池子够大时按 best-effort 返回了多少条证据。
+        "best_effort",
         "channel",
         "model_name",
         "model_version",
