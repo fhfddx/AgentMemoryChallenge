@@ -793,10 +793,19 @@ class MemoryRepository:
         self, user_id: str, query: str, limit: int,
         *, granularity: Literal["context", "message"] | None = None,
     ) -> list[MemoryCandidate]:
-        """全文检索，SQL 查询阶段即按 user_id 过滤。"""
+        """全文检索，SQL 查询阶段即按 user_id 过滤。
+
+        词面通道必须用 OR 语义：``plainto_tsquery`` 把整句按 AND 连接，问句里只要有一个词
+        不在记忆里（``what`` / ``which`` / ``my``）就整条零命中——线上实测 23 次搜索的
+        lexical 计数全是 0，等于这条通道从未工作。OR 语义下排序精度交给 ``ts_rank``。
+        """
+
+        tokens = [token for token in _TOKEN_SPLIT.findall(query.lower()) if len(token) >= 2]
+        if not tokens:
+            return []
         with self._database.session() as session:
             ts_vector = func.to_tsvector("simple", Memory.summary)
-            ts_query = func.plainto_tsquery("simple", query)
+            ts_query = func.to_tsquery("simple", " | ".join(tokens[:8]))
             rank = func.ts_rank(ts_vector, ts_query)
             stmt = (
                 select(Memory, rank.label("rank"))

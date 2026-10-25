@@ -327,6 +327,26 @@ def test_context_and_user_isolation(
     assert all(row.request_id == request_id for row in [*contexts, *messages])
 
 
+def test_lexical_channel_matches_when_the_question_has_extra_words(
+    database: Database, asset_store: AssetStore, settings, embeddings
+) -> None:
+    """问句里的 what/is/the 不能把词面召回打成零命中：整句 AND 语义曾在线上让该通道失效。"""
+    user_id = _uid("lex")
+    request_id = _uid("lex-run")
+    AddService(MemoryRepository(database), asset_store, settings, embeddings=embeddings).add(
+        _request(request_id, user_id, "The access code for the Elm locker is K7-42.")
+    )
+    repo = MemoryRepository(database)
+
+    question = "What is the access code for the Elm locker?"
+    strict = repo.lexical_candidates(user_id, question, 10)
+    single = repo.lexical_candidates(user_id, "elm", 10)
+
+    assert strict, "a question with extra words must still match a stored fact"
+    assert single, "a bare distinctive token must match too"
+    assert {row.memory_id for row in single} <= {row.memory_id for row in strict}
+
+
 def test_legacy_context_without_messages_remains_searchable(
     database: Database, asset_store: AssetStore, settings, embeddings
 ) -> None:
