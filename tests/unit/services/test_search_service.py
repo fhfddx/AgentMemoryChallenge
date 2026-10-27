@@ -1,11 +1,14 @@
 """SearchService query preparation tests."""
 
+import json
+import logging
 from dataclasses import replace
 from uuid import UUID
 
 from masm.providers.fakes import FakeStructuredLLM
 from masm.retrieval.baseline import ParsedQuery
-from masm.retrieval.evidence_selector import EvidenceSelector
+from masm.retrieval.evidence_graph import GraphDiagnostics
+from masm.retrieval.evidence_selector import EvidenceSelector, SelectionResult
 from masm.retrieval.response_packer import ResponsePacker
 from masm.schemas.api import SearchRequest
 from masm.services.search_service import SearchService
@@ -151,3 +154,73 @@ def test_refusal_gate_is_not_consulted_for_multimodal_queries() -> None:
 
     assert response.data == []
     assert calls == []
+
+
+def _empty_graph_selector():
+    class Selector:
+        def select(self, query, options, ranked, anchors, context, *, request_user_id):
+            del query, options, anchors, context, request_user_id
+            return type(
+                "Outcome",
+                (),
+                {
+                    "selection": SelectionResult(
+                        evidence=(),
+                        candidate_count=len(ranked),
+                        source_count=0,
+                        selected_source_count=0,
+                        fallback=False,
+                        abstained=True,
+                        failure_category="none",
+                        evidence_state="insufficient",
+                    ),
+                    "graph": GraphDiagnostics(
+                        enabled=True, candidate_count=len(ranked), selected_count=0
+                    ),
+                },
+            )()
+
+    return Selector()
+
+
+def test_rich_pool_returns_at_most_three_evidence_items(caplog) -> None:
+    """兜底只回 3 条：整池倒出会灌爆响应（实测把 direct 打穿）。"""
+
+    class Retriever:
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            return [
+                MemoryCandidate(UUID(int=index), user_id, f"fact {index}", 1.0 - index / 100)
+                for index in range(1, 13)
+            ]
+
+    service = SearchService(
+        Retriever(), max_image_bytes=1024, graph_selector=_empty_graph_selector()
+    )
+
+    with caplog.at_level(logging.INFO, logger="masm.search"):
+        response = service.search(
+            SearchRequest(query="Where did Alice go?", user_id="user-1", top_k=10)
+        )
+
+    assert len(response.data) == 3
+    payload = json.loads(caplog.records[-1].message)
+    assert payload["best_effort"] == 3
+    assert payload["returned_count"] == 3
+
+
+def test_small_pool_keeps_abstaining(caplog) -> None:
+    class Retriever:
+        def retrieve(self, user_id: str, query: ParsedQuery, limit: int):
+            return [MemoryCandidate(UUID(int=1), user_id, "only fact", 0.9)]
+
+    service = SearchService(
+        Retriever(), max_image_bytes=1024, graph_selector=_empty_graph_selector()
+    )
+
+    with caplog.at_level(logging.INFO, logger="masm.search"):
+        response = service.search(
+            SearchRequest(query="Where did Alice go?", user_id="user-1", top_k=3)
+        )
+
+    assert response.data == []
+    assert json.loads(caplog.records[-1].message)["best_effort"] == 0

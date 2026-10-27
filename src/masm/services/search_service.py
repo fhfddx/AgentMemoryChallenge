@@ -17,7 +17,11 @@ from masm.retrieval.evidence_graph import (
     source_pairs_from_edges,
 )
 from masm.retrieval.evidence_renderer import EvidenceRenderer
-from masm.retrieval.evidence_selector import DeterministicEvidenceSelector, EvidenceSelector
+from masm.retrieval.evidence_selector import (
+    DeterministicEvidenceSelector,
+    EvidenceSelector,
+    SelectionResult,
+)
 from masm.retrieval.query_analyzer import QueryAnalyzer
 from masm.retrieval.relation_expander import ExpansionEdge, RelationExpander
 from masm.retrieval.relevance import RelevanceGate
@@ -27,6 +31,11 @@ from masm.retrieval.source_context import SourceContextEnricher
 from masm.schemas.api import MemoryEvidence, SearchRequest, SearchResponse
 from masm.storage.assets import decode_image_data_url
 from masm.storage.types import MemoryCandidate
+
+# 池子至少这么大时，"证据不足"更可能是组装失败而不是材料缺失。
+MIN_POOL_FOR_BEST_EFFORT = 8
+# 兜底只回这么多条：整池倒出会灌爆响应（实测 direct 归零），三条是"够用且克制"的上限。
+BEST_EFFORT_LIMIT = 3
 
 
 class SearchService:
@@ -95,6 +104,7 @@ class SearchService:
         selection = None
         graph_diagnostics: GraphDiagnostics | None = None
         selector_latency_ms = 0.0
+        best_effort = 0
         # 选择器之前的拒答预检：结论只取决于问题与全库，命中就不进选择器。
         gate = self._refusal_gate
         refused = (
@@ -107,6 +117,7 @@ class SearchService:
             ranked = []
         elif self._graph_selector is not None:
             # 图模式：模型只提出需求/引用/链接，确定性代码校验、组装并推导三态。
+            pool = ranked
             selector_started = perf_counter()
             outcome = self._graph_selector.select(
                 request.query,
@@ -122,6 +133,21 @@ class SearchService:
             selector_latency_ms = (perf_counter() - selector_started) * 1000.0
             selection = outcome.selection
             graph_diagnostics = outcome.graph
+            # 池子够大却判"证据不足"，多半是组装能力的限制而不是材料缺失；实测空响应在
+            # 官方 abstention 上几乎不得分，而池子里已有材料就还有命中机会。只回最多
+            # BEST_EFFORT_LIMIT 条，绝不把整个池子倒出去（那会把 direct 打穿）。
+            if not selection.evidence and len(pool) >= MIN_POOL_FOR_BEST_EFFORT:
+                selection = SelectionResult(
+                    evidence=tuple(pool[:BEST_EFFORT_LIMIT]),
+                    candidate_count=selection.candidate_count,
+                    source_count=selection.source_count,
+                    selected_source_count=selection.selected_source_count,
+                    fallback=True,
+                    abstained=False,
+                    failure_category=selection.failure_category,
+                    evidence_state="partial",
+                )
+                best_effort = len(selection.evidence)
             ranked = list(selection.evidence)
         elif self._selector is not None:
             selector_started = perf_counter()
@@ -208,6 +234,7 @@ class SearchService:
                     graph_diagnostics.planner_latency_ms if graph_diagnostics else 0.0
                 ),
                 refusal_gate=refused,
+                best_effort=best_effort,
             )
         )
         return response
