@@ -262,6 +262,221 @@ def test_gate_requires_every_provider_variable(fake_runner, capsys, monkeypatch)
     assert "providers=3/4" in stdout
 
 
+def test_compare_known_flaky_negative_is_a_warning(fake_runner, capsys) -> None:
+    rows = _compare_rows(subset_failures=1)
+    for row in rows:
+        if row.get("case") == "case-00":
+            row.update(
+                {
+                    "case": "elliptical_confirmation_negative",
+                    "baseline_count": 2,
+                    "merged_count": 1,
+                    "added_count": 0,
+                    "forbidden": False,
+                    "graph_state": "sufficient",
+                }
+            )
+    _set_probe(fake_runner, {"evidence_graph_probe.py": (0, _jsonl(rows))})
+
+    exit_code = verify.main(["compare"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "[compare] WARN" in stdout
+    assert "known_flaky=measured_variance" in stdout
+
+
+def test_compare_flip_on_a_positive_case_is_still_a_failure(fake_runner, capsys) -> None:
+    rows = _compare_rows(subset_failures=1)
+    for row in rows:
+        if row.get("case") == "case-00":
+            row.update({"case": "elliptical_confirmation", "forbidden": False})
+    _set_probe(fake_runner, {"evidence_graph_probe.py": (0, _jsonl(rows))})
+
+    exit_code = verify.main(["compare"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 1
+    assert "false_cases=elliptical_confirmation" in stdout
+
+
+def test_observe_reads_the_container_stderr_stream(fake_runner, capsys, monkeypatch) -> None:
+    rows = _diagnostic_rows(gate_hits=2)
+
+    def run(argv, *, input_bytes=None):
+        # docker logs 把容器的 stderr 写到 CLI 的 stderr。
+        return verify.CommandResult(0, "", _jsonl(rows).decode())
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["observe"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "gate_hits=2" in stdout
+
+
+def _timed(stamp: str, row: dict[str, object]) -> str:
+    return f"{stamp} " + json.dumps(row, sort_keys=True)
+
+
+def _search_row(
+    *, candidates: int, returned: int, gate: bool, abstained: bool
+) -> dict[str, object]:
+    return {
+        "event": "search.completed",
+        "candidate_count": candidates,
+        "returned_count": returned,
+        "refusal_gate": gate,
+        "selector_abstained": abstained,
+    }
+
+
+def test_profile_splits_probe_traffic_from_the_official_run(
+    fake_runner, capsys, monkeypatch
+) -> None:
+    probe = [
+        _timed(
+            "2026-10-24T10:00:01.000000000Z",
+            _search_row(candidates=4, returned=0, gate=True, abstained=True),
+        ),
+        _timed(
+            "2026-10-24T10:00:20.000000000Z",
+            _search_row(candidates=6, returned=2, gate=False, abstained=False),
+        ),
+    ]
+    official = [
+        _timed(
+            f"2026-10-24T11:00:{index:02d}.000000000Z",
+            _search_row(
+                candidates=12,
+                returned=0 if index < 2 else 3,
+                gate=False,
+                abstained=index < 2,
+            ),
+        )
+        for index in range(4)
+    ]
+    payload = "\n".join(probe + official) + "\n"
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, "", payload)
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["profile"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "cluster1 start=10:00:01 searches=2 empty=1 gate_hits=1 selector_abstained=1" in stdout
+    assert "cluster2 start=11:00:00 searches=4 empty=2 gate_hits=0 selector_abstained=2" in stdout
+
+
+def test_clusters_count_only_search_diagnostics(fake_runner, capsys, monkeypatch) -> None:
+    lines = [
+        _timed("2026-10-24T10:00:00.000000000Z", {"event": "http.request", "count": 1}),
+        _timed(
+            "2026-10-24T10:00:05.000000000Z",
+            _search_row(candidates=3, returned=1, gate=False, abstained=False),
+        ),
+        _timed("2026-10-24T12:00:00.000000000Z", {"event": "model.call", "attempts": 1}),
+        _timed(
+            "2026-10-24T12:00:05.000000000Z",
+            _search_row(candidates=0, returned=0, gate=False, abstained=True),
+        ),
+    ]
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, "", "\n".join(lines) + "\n")
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["profile"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "cluster1 start=10:00:00 searches=1" in stdout
+    assert "cluster2 start=12:00:00 searches=1 empty=1" in stdout
+
+
+def test_detail_lists_one_line_per_search(fake_runner, capsys, monkeypatch) -> None:
+    lines = [
+        _timed(
+            "2026-10-24T11:00:01.000000000Z",
+            {
+                "event": "search.completed",
+                "candidate_count": 0,
+                "dedup_count": 0,
+                "returned_count": 0,
+                "refusal_gate": False,
+                "selector_abstained": True,
+                "graph_state": "insufficient",
+                "channel_counts": {"lexical": 3, "text_vector": 9},
+            },
+        ),
+        _timed("2026-10-24T11:00:02.000000000Z", {"event": "model.call", "attempts": 1}),
+    ]
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, "", "\n".join(lines) + "\n")
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["detail"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "#1 11:00:01 cand=0 dedup=0 returned=0" in stdout
+    assert "ch={'lexical': 3, 'text_vector': 9}" in stdout
+    assert "#2" not in stdout
+
+
+def test_profile_summarizes_the_official_run(fake_runner, capsys, monkeypatch) -> None:
+    rows = [
+        {
+            "event": "search.completed",
+            "candidate_count": 0,
+            "returned_count": 0,
+            "refusal_gate": True,
+            "selector_abstained": True,
+            "graph_enabled": True,
+            "graph_state": "insufficient",
+        },
+        {
+            "event": "search.completed",
+            "candidate_count": 6,
+            "returned_count": 2,
+            "refusal_gate": False,
+            "selector_abstained": False,
+            "graph_enabled": True,
+            "graph_state": "sufficient",
+        },
+        {
+            "event": "search.completed",
+            "candidate_count": 6,
+            "returned_count": 0,
+            "refusal_gate": False,
+            "selector_abstained": True,
+            "graph_enabled": True,
+            "graph_state": "insufficient",
+        },
+    ]
+
+    def run(argv, *, input_bytes=None):
+        return verify.CommandResult(0, "", _jsonl(rows).decode())
+
+    monkeypatch.setattr(verify, "_run", run)
+
+    exit_code = verify.main(["profile"])
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert "searches=3 empty=2 gate_hits=1 selector_abstained=2 graph_enabled=3" in stdout
+    assert "candidate_count={'<=0': 1, '<=16': 2}" in stdout
+    assert "returned_count={'<=0': 2, '<=3': 1}" in stdout
+    assert "graph_state={'insufficient': 2, 'sufficient': 1}" in stdout
+
+
 def test_observe_flags_a_gate_hit_that_returned_evidence(fake_runner, capsys, monkeypatch) -> None:
     def run(argv, *, input_bytes=None):
         return verify.CommandResult(
